@@ -1,6 +1,6 @@
 module filippo.io/litetlog
 
-go 1.20
+go 1.19
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
