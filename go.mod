@@ -8,7 +8,7 @@ require (
 	golang.org/x/crypto v0.9.0
 	golang.org/x/mod v0.10.0
 	golang.org/x/net v0.10.0
-	sigsum.org/sigsum-go v0.3.2
+	sigsum.org/sigsum-go v0.3.5-0.20230613111228-f0b03a53298b
 )
 
 require (
