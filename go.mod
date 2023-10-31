@@ -4,15 +4,15 @@ go 1.20
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
-	github.com/rogpeppe/go-internal v1.10.1-0.20230508101108-a4f6fabd84c5
-	golang.org/x/crypto v0.9.0
-	golang.org/x/mod v0.10.0
-	golang.org/x/net v0.10.0
-	sigsum.org/sigsum-go v0.3.5-0.20230613111228-f0b03a53298b
+	github.com/rogpeppe/go-internal v1.11.0
+	golang.org/x/crypto v0.14.0
+	golang.org/x/mod v0.13.0
+	golang.org/x/net v0.17.0
+	sigsum.org/sigsum-go v0.6.1
 )
 
 require (
-	golang.org/x/sys v0.8.0 // indirect
-	golang.org/x/text v0.9.0 // indirect
-	golang.org/x/tools v0.9.1 // indirect
+	golang.org/x/sys v0.13.0 // indirect
+	golang.org/x/text v0.13.0 // indirect
+	golang.org/x/tools v0.14.0 // indirect
 )
