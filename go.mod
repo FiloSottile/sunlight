@@ -4,6 +4,7 @@ go 1.20
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
+	github.com/google/certificate-transparency-go v1.1.7
 	github.com/rogpeppe/go-internal v1.11.0
 	golang.org/x/crypto v0.14.0
 	golang.org/x/mod v0.13.0
