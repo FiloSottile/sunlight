@@ -22,9 +22,10 @@ import (
 const maxCheckpointSize = 1e6
 
 type Checkpoint struct {
-	Origin string
-	N      int64
-	Hash   tlog.Hash
+	Origin    string
+	N         int64
+	Hash      tlog.Hash
+	Extension string
 }
 
 func ParseCheckpoint(text string) (Checkpoint, error) {
@@ -36,7 +37,7 @@ func ParseCheckpoint(text string) (Checkpoint, error) {
 	//	2
 	//	nND/nri/U0xuHUrYSy0HtMeal2vzD9V4k/BO79C+QeI=
 	//
-	// For forwards compatibility, extra text lines after the encoding are ignored.
+	// It can be followed by extra extension lines.
 
 	if strings.Count(text, "\n") < 3 || len(text) > maxCheckpointSize {
 		return Checkpoint{}, errors.New("malformed checkpoint")
@@ -56,7 +57,12 @@ func ParseCheckpoint(text string) (Checkpoint, error) {
 
 	var hash tlog.Hash
 	copy(hash[:], h)
-	return Checkpoint{lines[0], n, hash}, nil
+	return Checkpoint{lines[0], n, hash, lines[3]}, nil
+}
+
+func MarshalCheckpoint(c Checkpoint) string {
+	return fmt.Sprintf("%s\n%d\n%s\n%s",
+		c.Origin, c.N, base64.StdEncoding.EncodeToString(c.Hash[:]), c.Extension)
 }
 
 const algCosignatureV1 = 4
@@ -121,13 +127,13 @@ func formatCosignatureV1(t uint64, msg []byte) ([]byte, error) {
 	// three lines are the first three lines of the note. All other
 	// lines are not processed by the witness, so are not signed.
 
-	lines := bytes.Split(msg, []byte("\n"))
-	if len(lines) < 3 {
-		return nil, errors.New("cosigned note format invalid")
+	c, err := ParseCheckpoint(string(msg))
+	if err != nil {
+		return nil, fmt.Errorf("message being signed is not a valid checkpoint: %w", err)
 	}
 	return []byte(fmt.Sprintf(
-		"cosignature/v1\ntime %d\n%s\n%s\n%s\n",
-		t, lines[0], lines[1], lines[2])), nil
+		"cosignature/v1\ntime %d\n%s\n%d\n%s\n",
+		t, c.Origin, c.N, base64.StdEncoding.EncodeToString(c.Hash[:]))), nil
 }
 
 type CosignatureV1Signer struct {
@@ -148,6 +154,36 @@ func (v *verifier) KeyHash() uint32                            { return v.hash }
 func (v *verifier) Verify(msg, sig []byte) bool                { return v.verify(msg, sig) }
 func (s *CosignatureV1Signer) Sign(msg []byte) ([]byte, error) { return s.sign(msg) }
 func (s *CosignatureV1Signer) Verifier() note.Verifier         { return &s.verifier }
+
+// NewInjectedSigner constructs a new InjectedSigner that produces
+// note signatures bearing the provided fixed value.
+func NewInjectedSigner(name string, alg uint8, key, sig []byte) (*InjectedSigner, error) {
+	if !isValidName(name) {
+		return nil, errors.New("invalid name")
+	}
+
+	s := &InjectedSigner{}
+	s.name = name
+	s.hash = keyHash(name, append([]byte{alg}, key...))
+	s.sign = func(msg []byte) ([]byte, error) {
+		return sig, nil
+	}
+	s.verify = func(msg, s []byte) bool {
+		return bytes.Equal(s, sig)
+	}
+
+	return s, nil
+}
+
+type InjectedSigner struct {
+	verifier
+	sign func([]byte) ([]byte, error)
+}
+
+var _ note.Signer = &InjectedSigner{}
+
+func (s *InjectedSigner) Sign(msg []byte) ([]byte, error) { return s.sign(msg) }
+func (s *InjectedSigner) Verifier() note.Verifier         { return &s.verifier }
 
 // isValidName reports whether name is valid.
 // It must be non-empty and not have any Unicode spaces or pluses.
