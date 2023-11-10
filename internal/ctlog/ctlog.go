@@ -25,9 +25,9 @@ type Log struct {
 	backend Backend
 
 	// TODO: add a lock when using these outside the sequencer.
-	tree        tlog.Tree
-	hashes      map[int64]tlog.Hash
-	partialTile []byte // the current partial level -1 tile
+	tree              tlog.Tree
+	partialTileHashes map[int64]tlog.Hash // the hashes in current partial tiles
+	partialDataTile   []byte              // the current partial tile at level -1
 
 	// poolMu is held for the entire duration of addLeafToPool, and by
 	// sequencePool while swapping the pool. This guarantees that addLeafToPool
@@ -158,7 +158,7 @@ func (l *Log) sequencePool() error {
 	timestamp := time.Now().UnixMilli()
 
 	newHashes := make(map[int64]tlog.Hash)
-	newTile := bytes.Clone(l.partialTile)
+	newTile := bytes.Clone(l.partialDataTile)
 	hashReader := l.hashReader(newHashes)
 	n := l.tree.N
 	for _, leaf := range p.pendingLeaves {
@@ -220,15 +220,27 @@ func (l *Log) sequencePool() error {
 		return err
 	}
 
+	partialTileHashes := make(map[int64]tlog.Hash)
+	var hIdx []int64
+	for _, t := range tlogx.PartialTiles(tileHeight, n) {
+		for i := t.N * tileWidth; i < t.N*tileWidth+int64(t.W); i++ {
+			hIdx = append(hIdx, tlog.StoredHashIndex(t.L, i))
+		}
+	}
+	h, err := hashReader.ReadHashes(hIdx)
+	if err != nil {
+		return err
+	}
+	for i := range hIdx {
+		partialTileHashes[hIdx[i]] = h[i]
+	}
+
+	defer close(p.done)
 	p.timestamp = timestamp
 	p.firstLeafIndex = l.tree.N
 	l.tree = newTree
-	l.partialTile = newTile
-	for id, h := range newHashes {
-		l.hashes[id] = h
-	}
-	// TODO: cull l.hashes to only the right edge tiles.
-	close(p.done)
+	l.partialDataTile = newTile
+	l.partialTileHashes = partialTileHashes
 
 	return nil
 }
@@ -279,7 +291,7 @@ func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 	return func(indexes []int64) ([]tlog.Hash, error) {
 		var list []tlog.Hash
 		for _, id := range indexes {
-			if h, ok := l.hashes[id]; ok {
+			if h, ok := l.partialTileHashes[id]; ok {
 				list = append(list, h)
 				continue
 			}
