@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -28,15 +29,20 @@ type Log struct {
 	backend Backend
 
 	// TODO: add a lock when using these outside the sequencer.
-	tree              tlog.Tree
-	partialTileHashes map[int64]tlog.Hash // the hashes in current partial tiles
-	partialDataTile   []byte              // the current partial tile at level -1
+	tree tlog.Tree
+	// edgeTiles is a map from level to the right-most tile of that level.
+	edgeTiles map[int]tileWithBytes
 
 	// poolMu is held for the entire duration of addLeafToPool, and by
 	// sequencePool while swapping the pool. This guarantees that addLeafToPool
 	// will never add to a pool that already started sequencing.
 	poolMu      sync.Mutex
 	currentPool *pool
+}
+
+type tileWithBytes struct {
+	tlog.Tile
+	B []byte
 }
 
 func NewLog(name string, key crypto.Signer, backend Backend) (*Log, error) {
@@ -53,6 +59,7 @@ func NewLog(name string, key crypto.Signer, backend Backend) (*Log, error) {
 		logID:       logID,
 		privKey:     key,
 		backend:     backend,
+		edgeTiles:   make(map[int]tileWithBytes),
 		currentPool: &pool{done: make(chan struct{})},
 	}, nil
 }
@@ -178,28 +185,33 @@ func (l *Log) sequencePool() error {
 
 	timestamp := time.Now().UnixMilli()
 
+	edgeTiles := maps.Clone(l.edgeTiles)
+	var dataTile []byte
+	if t, ok := edgeTiles[-1]; ok && t.W < tileWidth {
+		dataTile = bytes.Clone(t.B)
+	}
 	newHashes := make(map[int64]tlog.Hash)
-	newTile := bytes.Clone(l.partialDataTile)
 	hashReader := l.hashReader(newHashes)
 	n := l.tree.N
 	for _, leaf := range p.pendingLeaves {
 		hashes, err := tlog.StoredHashes(n, leaf.merkleTreeLeaf(timestamp), hashReader)
 		if err != nil {
-			return err
+			return fmt.Errorf("couldn't fetch stored hashes for leaf %d: %w", n, err)
 		}
 		for i, h := range hashes {
 			id := tlog.StoredHashIndex(0, n) + int64(i)
 			newHashes[id] = h
 		}
-		newTile = append(newTile, leaf.tileLeaf(timestamp)...)
+		dataTile = append(dataTile, leaf.tileLeaf(timestamp)...)
 
 		n++
 
 		if n%tileWidth == 0 { // Data tile is full.
 			tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 			tile.L = -1
-			g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), newTile) })
-			newTile = nil
+			edgeTiles[-1] = tileWithBytes{tile, dataTile}
+			g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), dataTile) })
+			dataTile = nil
 		}
 	}
 
@@ -207,7 +219,8 @@ func (l *Log) sequencePool() error {
 	if n%tileWidth != 0 {
 		tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
-		g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), newTile) })
+		edgeTiles[-1] = tileWithBytes{tile, dataTile}
+		g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), dataTile) })
 	}
 
 	tiles := tlog.NewTiles(tileHeight, l.tree.N, n)
@@ -217,6 +230,9 @@ func (l *Log) sequencePool() error {
 			return err
 		}
 		tile := tile
+		if t, ok := edgeTiles[tile.L]; !ok || t.N < tile.N || (t.N == tile.N && t.W < tile.W) {
+			edgeTiles[tile.L] = tileWithBytes{tile, data}
+		}
 		g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), data) })
 	}
 
@@ -228,9 +244,9 @@ func (l *Log) sequencePool() error {
 	if err != nil {
 		return err
 	}
-	newTree := tlog.Tree{N: n, Hash: rootHash}
+	tree := tlog.Tree{N: n, Hash: rootHash}
 
-	checkpoint, err := l.signTreeHead(newTree, timestamp)
+	checkpoint, err := l.signTreeHead(tree, timestamp)
 	if err != nil {
 		return err
 	}
@@ -241,27 +257,11 @@ func (l *Log) sequencePool() error {
 		return err
 	}
 
-	partialTileHashes := make(map[int64]tlog.Hash)
-	var hIdx []int64
-	for _, t := range tlogx.PartialTiles(tileHeight, n) {
-		for i := t.N * tileWidth; i < t.N*tileWidth+int64(t.W); i++ {
-			hIdx = append(hIdx, tlog.StoredHashIndex(t.L, i))
-		}
-	}
-	h, err := hashReader.ReadHashes(hIdx)
-	if err != nil {
-		return err
-	}
-	for i := range hIdx {
-		partialTileHashes[hIdx[i]] = h[i]
-	}
-
 	defer close(p.done)
 	p.timestamp = timestamp
 	p.firstLeafIndex = l.tree.N
-	l.tree = newTree
-	l.partialDataTile = newTile
-	l.partialTileHashes = partialTileHashes
+	l.tree = tree
+	l.edgeTiles = edgeTiles
 
 	return nil
 }
@@ -344,15 +344,16 @@ func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 	return func(indexes []int64) ([]tlog.Hash, error) {
 		var list []tlog.Hash
 		for _, id := range indexes {
-			if h, ok := l.partialTileHashes[id]; ok {
-				list = append(list, h)
-				continue
-			}
 			if h, ok := overlay[id]; ok {
 				list = append(list, h)
 				continue
 			}
-			return nil, fmt.Errorf("internal error: requested unavailable hash %d", id)
+			t := l.edgeTiles[tlog.TileForIndex(tileHeight, id).L]
+			h, err := tlog.HashFromTile(t.Tile, t.B, id)
+			if err != nil {
+				return nil, err
+			}
+			list = append(list, h)
 		}
 		return list, nil
 	}

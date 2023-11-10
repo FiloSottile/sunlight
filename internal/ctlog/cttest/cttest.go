@@ -17,7 +17,7 @@ type TestLog struct {
 	Key     *ecdsa.PrivateKey
 }
 
-func NewEmptyTestLog(t *testing.T) *TestLog {
+func NewEmptyTestLog(t testing.TB) *TestLog {
 	backend := NewMemoryBackend(t)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -35,12 +35,12 @@ func NewEmptyTestLog(t *testing.T) *TestLog {
 }
 
 type MemoryBackend struct {
-	t  *testing.T
+	t  testing.TB
 	mu sync.Mutex
 	m  map[string][]byte
 }
 
-func NewMemoryBackend(t *testing.T) *MemoryBackend {
+func NewMemoryBackend(t testing.TB) *MemoryBackend {
 	return &MemoryBackend{
 		t: t, m: make(map[string][]byte),
 	}
