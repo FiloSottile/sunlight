@@ -195,6 +195,7 @@ func (l *Log) sequencePool() error {
 		if err != nil {
 			return err
 		}
+		tile := tile
 		g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), data) })
 	}
 
