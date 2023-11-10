@@ -1,6 +1,7 @@
 package ctlog
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/sha256"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"filippo.io/litetlog/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/tls"
+	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -21,9 +23,9 @@ type Log struct {
 	backend Backend
 
 	// TODO: add a lock when using these outside the sequencer.
-	tree   tlog.Tree
-	hashes map[int64]tlog.Hash
-	leaves map[int64][]byte
+	tree        tlog.Tree
+	hashes      map[int64]tlog.Hash
+	partialTile []byte // the current partial level -1 tile
 
 	// poolMu is held for the entire duration of addLeafToPool, and by
 	// sequencePool while swapping the pool. This guarantees that addLeafToPool
@@ -41,23 +43,92 @@ type Backend interface {
 }
 
 const tileHeight = 10
+const tileWidth = 1 << tileHeight
+
+type logEntry struct {
+	// cert is either the x509_entry or the tbs_certificate for precerts.
+	cert []byte
+
+	isPrecert          bool
+	issuerKeyHash      [32]byte
+	preCertificate     []byte
+	precertSigningCert []byte
+}
+
+// merkleTreeLeaf returns a RFC 6962 MerkleTreeLeaf.
+func (e *logEntry) merkleTreeLeaf(timestamp int64) []byte {
+	b := &cryptobyte.Builder{}
+	b.AddUint8(0 /* version = v1 */)
+	b.AddUint8(0 /* leaf_type = timestamped_entry */)
+	e.timestampedEntry(b, timestamp)
+	return b.BytesOrPanic()
+}
+
+func (e *logEntry) timestampedEntry(b *cryptobyte.Builder, timestamp int64) {
+	b.AddUint64(uint64(timestamp))
+	if !e.isPrecert {
+		b.AddUint8(0 /* entry_type = x509_entry */)
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddBytes(e.cert)
+		})
+	} else {
+		b.AddUint8(1 /* entry_type = precert_entry */)
+		b.AddBytes(e.issuerKeyHash[:])
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddBytes(e.cert)
+		})
+	}
+	b.AddUint16LengthPrefixed(func(child *cryptobyte.Builder) {
+		/* extensions */
+	})
+}
+
+func (e *logEntry) tileLeaf(timestamp int64) []byte {
+	// struct {
+	//     TimestampedEntry timestamped_entry;
+	//     select(entry_type) {
+	//         case x509_entry: Empty;
+	//         case precert_entry: PreCertExtraData;
+	//     } extra_data;
+	// } TileLeaf;
+	//
+	// struct {
+	//     ASN.1Cert pre_certificate;
+	//     opaque PrecertificateSigningCertificate<0..2^24-1>;
+	// } PreCertExtraData;
+
+	b := &cryptobyte.Builder{}
+	e.timestampedEntry(b, timestamp)
+	if e.isPrecert {
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddBytes(e.preCertificate)
+		})
+		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+			b.AddBytes(e.precertSigningCert)
+		})
+	}
+	return b.BytesOrPanic()
+}
 
 type pool struct {
-	pendingLeaves [][]byte
+	pendingLeaves []*logEntry
 
 	// done is closed when the pool has been sequenced and
 	// the results below are ready.
 	done chan struct{}
 
+	// firstLeafIndex is the 0-based index of pendingLeaves[0] in the tree, and
+	// every following entry is sequenced contiguously.
 	firstLeafIndex int64
-	// The timestamp MUST be at least as recent as the most recent SCT timestamp
-	// in the tree. RFC 6962, Section 3.5.
-	sthTimestamp int64
+	// timestamp is both the STH and the SCT timestamp.
+	// "The timestamp MUST be at least as recent as the most recent SCT
+	// timestamp in the tree." RFC 6962, Section 3.5.
+	timestamp int64
 }
 
 // addLeafToPool adds leaf to the current pool, and returns a function that will
 // wait until the pool is sequenced and returns the index of the leaf.
-func (l *Log) addLeafToPool(leaf []byte) func() (id int64) {
+func (l *Log) addLeafToPool(leaf *logEntry) func() (id int64) {
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
 	p := l.currentPool
@@ -75,11 +146,14 @@ func (l *Log) sequencePool() error {
 	l.currentPool = &pool{done: make(chan struct{})}
 	l.poolMu.Unlock()
 
+	timestamp := time.Now().UnixMilli()
+
 	newHashes := make(map[int64]tlog.Hash)
+	newTile := bytes.Clone(l.partialTile)
 	hashReader := l.hashReader(newHashes)
 	n := l.tree.N
 	for _, leaf := range p.pendingLeaves {
-		hashes, err := tlog.StoredHashes(n, leaf, hashReader)
+		hashes, err := tlog.StoredHashes(n, leaf.merkleTreeLeaf(timestamp), hashReader)
 		if err != nil {
 			return err
 		}
@@ -87,7 +161,29 @@ func (l *Log) sequencePool() error {
 			id := tlog.StoredHashIndex(0, n) + int64(i)
 			newHashes[id] = h
 		}
+		newTile = append(newTile, leaf.tileLeaf(timestamp)...)
+
 		n++
+
+		if n%tileWidth == 0 { // Data tile is full.
+			tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
+			tile.L = -1
+			// TODO: do these uploads in parallel.
+			if err := l.backend.Upload(tile.Path(), newTile); err != nil {
+				return err
+			}
+			newTile = nil
+		}
+	}
+
+	// Upload partial data tile.
+	if n%tileWidth != 0 {
+		tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
+		tile.L = -1
+		// TODO: do these uploads in parallel.
+		if err := l.backend.Upload(tile.Path(), newTile); err != nil {
+			return err
+		}
 	}
 
 	tiles := tlog.NewTiles(tileHeight, l.tree.N, n)
@@ -109,7 +205,7 @@ func (l *Log) sequencePool() error {
 	}
 	newTree := tlog.Tree{N: n, Hash: rootHash}
 
-	checkpoint, sthTimestamp, err := l.signTreeHead(newTree)
+	checkpoint, err := l.signTreeHead(newTree, timestamp)
 	if err != nil {
 		return err
 	}
@@ -120,13 +216,14 @@ func (l *Log) sequencePool() error {
 		return err
 	}
 
-	p.sthTimestamp = sthTimestamp
+	p.timestamp = timestamp
 	p.firstLeafIndex = l.tree.N
 	l.tree = newTree
+	l.partialTile = newTile
 	for id, h := range newHashes {
 		l.hashes[id] = h
 	}
-	// TODO: cull l.hashes and l.leaves to only the right edge tiles.
+	// TODO: cull l.hashes to only the right edge tiles.
 	close(p.done)
 
 	return nil
@@ -134,34 +231,33 @@ func (l *Log) sequencePool() error {
 
 // signTreeHead signs the tree and returns a checkpoint according to
 // c2sp.org/checkpoint.
-func (l *Log) signTreeHead(tree tlog.Tree) (checkpoint []byte, timestamp int64, err error) {
-	sthTimestamp := time.Now().UnixMilli()
+func (l *Log) signTreeHead(tree tlog.Tree, timestamp int64) (checkpoint []byte, err error) {
 	sth := &ct.SignedTreeHead{
 		Version:        ct.V1,
 		TreeSize:       uint64(tree.N),
-		Timestamp:      uint64(sthTimestamp),
+		Timestamp:      uint64(timestamp),
 		SHA256RootHash: ct.SHA256Hash(tree.Hash),
 	}
 	sthBytes, err := ct.SerializeSTHSignatureInput(*sth)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	// We compute the signature here and inject it in a fixed note.Signer to
 	// avoid a risky serialize-deserialize loop, and to control the timestamp.
 	digitallySigned, err := tls.CreateSignature(l.privKey, tls.SHA256, sthBytes)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	sig, err := tls.Marshal(struct {
 		Timestamp uint64
 		Signature tls.DigitallySigned
-	}{uint64(sthTimestamp), digitallySigned})
+	}{uint64(timestamp), digitallySigned})
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	signer, err := tlogx.NewInjectedSigner(l.name, 0x05, l.logID[:], sig)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	n, err := note.Sign(&note.Note{
 		Text: tlogx.MarshalCheckpoint(tlogx.Checkpoint{
@@ -170,9 +266,9 @@ func (l *Log) signTreeHead(tree tlog.Tree) (checkpoint []byte, timestamp int64, 
 		}),
 	}, signer)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	return n, sthTimestamp, nil
+	return n, nil
 }
 
 func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
