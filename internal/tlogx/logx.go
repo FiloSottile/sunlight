@@ -37,7 +37,7 @@ func TileParent(t tlog.Tile, k int, n int64) (parent tlog.Tile, ok bool) {
 // PartialTiles returns the partial tiles for a tree of size n.
 func PartialTiles(h int, n int64) []tlog.Tile {
 	var partial []tlog.Tile
-	t := tlog.TileForIndex(h, tlog.StoredHashIndex(0, n))
+	t := tlog.TileForIndex(h, tlog.StoredHashIndex(0, n-1))
 	for {
 		if t.W < 1<<t.H {
 			partial = append(partial, t)

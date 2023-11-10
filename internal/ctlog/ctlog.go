@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"fmt"
 	"sync"
 	"time"
 
 	"filippo.io/litetlog/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
-	"github.com/google/certificate-transparency-go/tls"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
@@ -21,7 +24,7 @@ import (
 type Log struct {
 	name    string
 	logID   [sha256.Size]byte
-	privKey crypto.PrivateKey
+	privKey crypto.Signer
 	backend Backend
 
 	// TODO: add a lock when using these outside the sequencer.
@@ -34,6 +37,24 @@ type Log struct {
 	// will never add to a pool that already started sequencing.
 	poolMu      sync.Mutex
 	currentPool *pool
+}
+
+func NewLog(name string, key crypto.Signer, backend Backend) (*Log, error) {
+	pkix, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil {
+		return nil, err
+	}
+	logID := sha256.Sum256(pkix)
+
+	// TODO: fetch current log state from backend.
+
+	return &Log{
+		name:        name,
+		logID:       logID,
+		privKey:     key,
+		backend:     backend,
+		currentPool: &pool{done: make(chan struct{})},
+	}, nil
 }
 
 // Backend is a strongly consistent object storage.
@@ -258,33 +279,65 @@ func (l *Log) signTreeHead(tree tlog.Tree, timestamp int64) (checkpoint []byte, 
 	if err != nil {
 		return nil, err
 	}
+
 	// We compute the signature here and inject it in a fixed note.Signer to
 	// avoid a risky serialize-deserialize loop, and to control the timestamp.
-	digitallySigned, err := tls.CreateSignature(l.privKey, tls.SHA256, sthBytes)
+
+	treeHeadSignature, err := digitallySign(l.privKey, sthBytes)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := tls.Marshal(struct {
-		Timestamp uint64
-		Signature tls.DigitallySigned
-	}{uint64(timestamp), digitallySigned})
+
+	// struct {
+	//     uint64 timestamp;
+	//     TreeHeadSignature signature;
+	// } RFC6962NoteSignature;
+	var b cryptobyte.Builder
+	b.AddUint64(uint64(timestamp))
+	b.AddBytes(treeHeadSignature)
+	sig, err := b.Bytes()
 	if err != nil {
 		return nil, err
 	}
+
 	signer, err := tlogx.NewInjectedSigner(l.name, 0x05, l.logID[:], sig)
 	if err != nil {
 		return nil, err
 	}
-	n, err := note.Sign(&note.Note{
+	return note.Sign(&note.Note{
 		Text: tlogx.MarshalCheckpoint(tlogx.Checkpoint{
 			Origin: l.name,
 			N:      tree.N, Hash: tree.Hash,
 		}),
 	}, signer)
+}
+
+// digitallySign produces an encoded digitally-signed signature.
+//
+// It reimplements tls.CreateSignature and tls.Marshal from
+// github.com/google/certificate-transparency-go/tls, in part to limit
+// complexity and in part because tls.CreateSignature expects non-pointer
+// {rsa,ecdsa}.PrivateKey types, which is unusual.
+func digitallySign(k crypto.Signer, msg []byte) ([]byte, error) {
+	h := sha256.Sum256(msg)
+	sig, err := k.Sign(rand.Reader, h[:], crypto.SHA256)
 	if err != nil {
 		return nil, err
 	}
-	return n, nil
+	var b cryptobyte.Builder
+	b.AddUint8(4 /* hash = sha256 */)
+	switch k.Public().(type) {
+	case *rsa.PublicKey:
+		b.AddUint8(1 /* signature = rsa */)
+	case *ecdsa.PublicKey:
+		b.AddUint8(3 /* signature = ecdsa */)
+	default:
+		return nil, fmt.Errorf("unsupported key type %T", k.Public())
+	}
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddBytes(sig)
+	})
+	return b.Bytes()
 }
 
 func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
