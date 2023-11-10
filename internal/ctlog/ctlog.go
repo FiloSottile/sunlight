@@ -2,6 +2,7 @@ package ctlog
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/sha256"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
+	"golang.org/x/sync/errgroup"
 )
 
 type Log struct {
@@ -39,7 +41,7 @@ type Backend interface {
 	// Upload is expected to retry transient errors, and only return an error
 	// for unrecoverable errors. When Upload returns, the object must be fully
 	// persisted. Upload can be called concurrently.
-	Upload(key string, data []byte) error
+	Upload(ctx context.Context, key string, data []byte) error
 }
 
 const tileHeight = 10
@@ -140,11 +142,18 @@ func (l *Log) addLeafToPool(leaf *logEntry) func() (id int64) {
 	}
 }
 
+const sequenceTimeout = 5 * time.Second
+
 func (l *Log) sequencePool() error {
 	l.poolMu.Lock()
 	p := l.currentPool
 	l.currentPool = &pool{done: make(chan struct{})}
 	l.poolMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), sequenceTimeout)
+	defer cancel()
+	g, gctx := errgroup.WithContext(ctx)
+	defer g.Wait()
 
 	timestamp := time.Now().UnixMilli()
 
@@ -168,10 +177,7 @@ func (l *Log) sequencePool() error {
 		if n%tileWidth == 0 { // Data tile is full.
 			tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 			tile.L = -1
-			// TODO: do these uploads in parallel.
-			if err := l.backend.Upload(tile.Path(), newTile); err != nil {
-				return err
-			}
+			g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), newTile) })
 			newTile = nil
 		}
 	}
@@ -180,10 +186,7 @@ func (l *Log) sequencePool() error {
 	if n%tileWidth != 0 {
 		tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
-		// TODO: do these uploads in parallel.
-		if err := l.backend.Upload(tile.Path(), newTile); err != nil {
-			return err
-		}
+		g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), newTile) })
 	}
 
 	tiles := tlog.NewTiles(tileHeight, l.tree.N, n)
@@ -192,11 +195,11 @@ func (l *Log) sequencePool() error {
 		if err != nil {
 			return err
 		}
+		g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), data) })
+	}
 
-		// TODO: do these uploads in parallel.
-		if err := l.backend.Upload(tile.Path(), data); err != nil {
-			return err
-		}
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
 	rootHash, err := tlog.TreeHash(n, hashReader)
@@ -209,7 +212,7 @@ func (l *Log) sequencePool() error {
 	if err != nil {
 		return err
 	}
-	if err := l.backend.Upload("sth", checkpoint); err != nil {
+	if err := l.backend.Upload(ctx, "sth", checkpoint); err != nil {
 		// TODO: this is a critical error to handle, since if the STH actually
 		// got committed before the error we need to make very very sure we
 		// don't sign an inconsistent version when we retry.
