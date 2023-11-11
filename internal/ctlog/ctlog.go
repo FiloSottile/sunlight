@@ -209,8 +209,9 @@ func (l *Log) sequencePool() error {
 		if n%tileWidth == 0 { // Data tile is full.
 			tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 			tile.L = -1
-			edgeTiles[-1] = tileWithBytes{tile, dataTile}
-			g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), dataTile) })
+			data := dataTile
+			edgeTiles[-1] = tileWithBytes{tile, data}
+			g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), data) })
 			dataTile = nil
 		}
 	}
@@ -269,13 +270,12 @@ func (l *Log) sequencePool() error {
 // signTreeHead signs the tree and returns a checkpoint according to
 // c2sp.org/checkpoint.
 func (l *Log) signTreeHead(tree tlog.Tree, timestamp int64) (checkpoint []byte, err error) {
-	sth := &ct.SignedTreeHead{
+	sthBytes, err := ct.SerializeSTHSignatureInput(ct.SignedTreeHead{
 		Version:        ct.V1,
 		TreeSize:       uint64(tree.N),
 		Timestamp:      uint64(timestamp),
 		SHA256RootHash: ct.SHA256Hash(tree.Hash),
-	}
-	sthBytes, err := ct.SerializeSTHSignatureInput(*sth)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +342,7 @@ func digitallySign(k crypto.Signer, msg []byte) ([]byte, error) {
 
 func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 	return func(indexes []int64) ([]tlog.Hash, error) {
-		var list []tlog.Hash
+		list := make([]tlog.Hash, 0, len(indexes))
 		for _, id := range indexes {
 			if h, ok := overlay[id]; ok {
 				list = append(list, h)
