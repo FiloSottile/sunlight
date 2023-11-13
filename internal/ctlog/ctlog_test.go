@@ -5,11 +5,20 @@ import (
 	"crypto/rand"
 	"flag"
 	mathrand "math/rand"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"filippo.io/litetlog/internal/ctlog"
 	"filippo.io/litetlog/internal/ctlog/cttest"
 )
+
+func init() {
+	t := time.Now().UnixMilli()
+	ctlog.SetTimeNowUnixMilli(func() int64 {
+		return atomic.AddInt64(&t, 1)
+	})
+}
 
 var longFlag = flag.Bool("long", false, "run especially slow tests")
 
@@ -43,7 +52,7 @@ func TestSequenceOneLeaf(t *testing.T) {
 
 func TestSequenceLargeLog(t *testing.T) {
 	if testing.Short() {
-		t.Skip()
+		t.Skip("skipping TestSequenceLargeLog in -short mode")
 	}
 
 	tl := cttest.NewEmptyTestLog(t)
@@ -70,7 +79,6 @@ func TestSequenceEmptyPool(t *testing.T) {
 	sequenceTwice := func(tl *cttest.TestLog) {
 		fatalIfErr(t, tl.Log.Sequence())
 		t1 := tl.CheckLog()
-		time.Sleep(3 * time.Millisecond)
 		fatalIfErr(t, tl.Log.Sequence())
 		t2 := tl.CheckLog()
 		if t1 >= t2 {
@@ -96,6 +104,30 @@ func TestSequenceEmptyPool(t *testing.T) {
 	sequenceTwice(tl)
 	addCerts(tl, 1) // 1024 + 1
 	sequenceTwice(tl)
+}
+
+func TestReloadLog(t *testing.T) {
+	// TODO: test reloading after uploading tiles but before uploading STH.
+	// This will be related to how partial tiles are handled, and tile trailing
+	// data GREASE.
+
+	tl := cttest.NewEmptyTestLog(t)
+	n := int64(1024 + 2)
+	if testing.Short() {
+		n = 3
+	}
+	for i := int64(0); i < n; i++ {
+		cert := make([]byte, mathrand.Intn(4)+1)
+		rand.Read(cert)
+		tl.Log.AddCertificate(cert)
+
+		fatalIfErr(t, tl.Log.Sequence())
+		tl.CheckLog()
+
+		tl = cttest.ReloadLog(t, tl)
+		fatalIfErr(t, tl.Log.Sequence())
+		tl.CheckLog()
+	}
 }
 
 func fatalIfErr(t testing.TB, err error) {

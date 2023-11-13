@@ -7,3 +7,7 @@ func (l *Log) AddCertificate(cert []byte) func() (id int64) {
 func (l *Log) Sequence() error {
 	return l.sequencePool()
 }
+
+func SetTimeNowUnixMilli(f func() int64) {
+	timeNowUnixMilli = f
+}

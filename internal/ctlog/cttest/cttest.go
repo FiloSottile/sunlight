@@ -13,7 +13,6 @@ import (
 
 	"filippo.io/litetlog/internal/ctlog"
 	"filippo.io/litetlog/internal/tlogx"
-	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -36,7 +35,11 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 		t.Fatal(err)
 	}
 	t.Logf("ECDSA key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
-	log, err := ctlog.NewLog("example.com/TestLog", key, backend)
+	err = ctlog.CreateLog(context.Background(), "example.com/TestLog", key, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := ctlog.LoadLog(context.Background(), "example.com/TestLog", key, backend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +50,21 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 	}
 }
 
+func ReloadLog(t testing.TB, tl *TestLog) *TestLog {
+	log, err := ctlog.LoadLog(context.Background(), "example.com/TestLog", tl.Key, tl.Backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &TestLog{t: t,
+		Log:     log,
+		Backend: tl.Backend,
+		Key:     tl.Key,
+	}
+}
+
 func (tl *TestLog) CheckLog() (sthTimestamp uint64) {
 	t := tl.t
+	// TODO: accept an expected log size.
 
 	sth, err := tl.Backend.Fetch(context.Background(), "sth")
 	fatalIfErr(t, err)
@@ -93,40 +109,23 @@ func (tl *TestLog) CheckLog() (sthTimestamp uint64) {
 		}
 		b, err := tl.Backend.Fetch(context.Background(), tile.Path())
 		fatalIfErr(t, err)
-		s := cryptobyte.String(b)
 		for i := 0; i < tile.W; i++ {
-			start := len(b) - len(s)
-			var timestamp uint64
-			var entryType uint8
-			var cert, extensions []byte
-			if !s.ReadUint64(&timestamp) || !s.ReadUint8(&entryType) {
-				t.Fatalf("invalid data tile %v around index %d", tile, len(b)-len(s))
+			timestampedEntry, _, timestamp, rest, err := ctlog.ReadTileLeaf(b)
+			if err != nil {
+				t.Fatalf("invalid data tile %v", tile)
 			}
-			switch entryType {
-			case 0: // x509_entry
-				if !s.ReadUint24LengthPrefixed((*cryptobyte.String)(&cert)) {
-					t.Fatalf("invalid data tile %v around index %d", tile, len(b)-len(s))
-				}
-			case 1: // precert_entry
-				panic("unimplemented") // TODO
-			default:
-				t.Fatalf("invalid data tile %v: unknown type %d", tile, entryType)
-			}
-			if !s.ReadUint16LengthPrefixed((*cryptobyte.String)(&extensions)) {
-				t.Fatalf("invalid data tile %v around index %d", tile, len(b)-len(s))
-			}
-			end := len(b) - len(s)
+			b = rest
 
 			idx := n*tileWidth + int64(i)
 			if timestamp > sthTimestamp {
 				t.Errorf("STH timestamp %d is before record %d timestamp %d", sthTimestamp, idx, timestamp)
 			}
-			got := tlog.RecordHash(append([]byte{0, 0}, b[start:end]...))
+			got := tlog.RecordHash(append([]byte{0, 0}, timestampedEntry...))
 			if exp := leafHashes[idx]; got != exp {
 				t.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", idx, got, exp)
 			}
 		}
-		if !s.Empty() {
+		if len(b) != 0 {
 			t.Errorf("invalid data tile %v: trailing data", tile)
 		}
 	}
