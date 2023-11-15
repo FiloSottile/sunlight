@@ -8,6 +8,8 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 
@@ -34,7 +36,8 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 		t.Fatal(err)
 	}
 	t.Logf("ECDSA key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
-	config := &ctlog.Config{Name: "example.com/TestLog", Key: key, Backend: backend}
+	config := &ctlog.Config{Name: "example.com/TestLog", Key: key, Backend: backend,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	err = ctlog.CreateLog(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +67,7 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 	t := tl.t
 	// TODO: accept an expected log size.
 
-	sth, err := tl.Config.Backend.Fetch(context.Background(), "sth")
+	sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
 	fatalIfErr(t, err)
 	v, err := tlogx.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
 	fatalIfErr(t, err)

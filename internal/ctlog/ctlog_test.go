@@ -34,10 +34,7 @@ func TestSequenceOneLeaf(t *testing.T) {
 		n = 3
 	}
 	for i := int64(0); i < n; i++ {
-		cert := make([]byte, mathrand.Intn(4)+1)
-		rand.Read(cert)
-
-		wait := tl.Log.AddCertificate(cert)
+		wait := addCertificate(t, tl)
 		fatalIfErr(t, tl.Log.Sequence())
 		if e, err := wait(context.Background()); err != nil {
 			t.Fatal(err)
@@ -60,18 +57,14 @@ func TestSequenceLargeLog(t *testing.T) {
 
 	tl := cttest.NewEmptyTestLog(t)
 	for i := 0; i < 5; i++ {
-		cert := make([]byte, mathrand.Intn(4)+1)
-		rand.Read(cert)
-		tl.Log.AddCertificate(cert)
+		addCertificate(t, tl)
 	}
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog()
 
 	for i := 0; i < 500; i++ {
 		for i := 0; i < 3000; i++ {
-			cert := make([]byte, mathrand.Intn(4)+1)
-			rand.Read(cert)
-			tl.Log.AddCertificate(cert)
+			addCertificate(t, tl)
 		}
 		fatalIfErr(t, tl.Log.Sequence())
 	}
@@ -91,9 +84,7 @@ func TestSequenceEmptyPool(t *testing.T) {
 	}
 	addCerts := func(tl *cttest.TestLog, n int) {
 		for i := 0; i < n; i++ {
-			cert := make([]byte, mathrand.Intn(1000)+1)
-			rand.Read(cert)
-			tl.Log.AddCertificate(cert)
+			addCertificate(t, tl)
 		}
 	}
 
@@ -110,6 +101,15 @@ func TestSequenceEmptyPool(t *testing.T) {
 }
 
 func TestReloadLog(t *testing.T) {
+	t.Run("Certificates", func(t *testing.T) {
+		testReloadLog(t, addCertificate)
+	})
+	t.Run("Precerts", func(t *testing.T) {
+		testReloadLog(t, addPreCertificate)
+	})
+}
+
+func testReloadLog(t *testing.T, add func(*testing.T, *cttest.TestLog) func(context.Context) (*ctlog.SequencedLogEntry, error)) {
 	// TODO: test reloading after uploading tiles but before uploading STH.
 	// This will be related to how partial tiles are handled, and tile trailing
 	// data GREASE.
@@ -120,9 +120,7 @@ func TestReloadLog(t *testing.T) {
 		n = 3
 	}
 	for i := int64(0); i < n; i++ {
-		cert := make([]byte, mathrand.Intn(4)+1)
-		rand.Read(cert)
-		tl.Log.AddCertificate(cert)
+		add(t, tl)
 
 		fatalIfErr(t, tl.Log.Sequence())
 		tl.CheckLog()
@@ -131,6 +129,26 @@ func TestReloadLog(t *testing.T) {
 		fatalIfErr(t, tl.Log.Sequence())
 		tl.CheckLog()
 	}
+}
+
+func addCertificate(t *testing.T, tl *cttest.TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	cert := make([]byte, mathrand.Intn(4)+1)
+	rand.Read(cert)
+	return tl.Log.AddLeafToPool(&ctlog.LogEntry{Certificate: cert})
+}
+
+func addPreCertificate(t *testing.T, tl *cttest.TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	e := &ctlog.LogEntry{IsPrecert: true}
+	e.Certificate = make([]byte, mathrand.Intn(4)+1)
+	rand.Read(e.Certificate)
+	e.PreCertificate = make([]byte, mathrand.Intn(4)+1)
+	rand.Read(e.PreCertificate)
+	rand.Read(e.IssuerKeyHash[:])
+	if mathrand.Intn(2) == 0 {
+		e.PrecertSigningCert = make([]byte, mathrand.Intn(4)+1)
+		rand.Read(e.PrecertSigningCert)
+	}
+	return tl.Log.AddLeafToPool(e)
 }
 
 func fatalIfErr(t testing.TB, err error) {
@@ -148,6 +166,6 @@ func BenchmarkSequencer(b *testing.B) {
 		if i%poolSize == 0 && i != 0 {
 			fatalIfErr(b, tl.Log.Sequence())
 		}
-		tl.Log.AddCertificate(bytes.Repeat([]byte("A"), 2350))
+		tl.Log.AddLeafToPool(&ctlog.LogEntry{Certificate: bytes.Repeat([]byte("A"), 2350)})
 	}
 }

@@ -95,6 +95,7 @@ func (l *Log) addChainOrPreChain(rw http.ResponseWriter, r *http.Request, checkT
 			return
 		}
 
+		e.IsPrecert = true
 		e.Certificate = defangedTBS
 		e.PreCertificate = chain[0].Raw
 		if preIssuer != nil {

@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math"
 	"sync"
@@ -55,6 +56,7 @@ type Config struct {
 	Key  crypto.Signer
 
 	Backend Backend
+	Log     *slog.Logger
 
 	Roots         *x509util.PEMCertPool
 	NotAfterStart time.Time
@@ -62,6 +64,11 @@ type Config struct {
 }
 
 func CreateLog(ctx context.Context, config *Config) error {
+	_, err := config.Backend.Fetch(ctx, "checkpoint")
+	if err == nil {
+		return errors.New("STH file already exist, refusing to initialize log")
+	}
+
 	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
 	if err != nil {
 		return err
@@ -74,7 +81,7 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return err
 	}
 
-	return config.Backend.Upload(ctx, "sth", checkpoint)
+	return config.Backend.Upload(ctx, "checkpoint", checkpoint)
 }
 
 func LoadLog(ctx context.Context, config *Config) (*Log, error) {
@@ -84,7 +91,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	}
 	logID := sha256.Sum256(pkix)
 
-	sth, err := config.Backend.Fetch(ctx, "sth")
+	sth, err := config.Backend.Fetch(ctx, "checkpoint")
 	if err != nil {
 		return nil, err
 	}
@@ -116,19 +123,23 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 
 	edgeTiles := make(map[int]tileWithBytes)
 	if c.N > 0 {
-		if _, err := tlog.TileHashReader(tree, &tileReader{config.Backend, func(tiles []tlog.Tile, data [][]byte) {
-			for i, tile := range tiles {
-				if t, ok := edgeTiles[tile.L]; !ok || t.N < tile.N || (t.N == tile.N && t.W < tile.W) {
-					edgeTiles[tile.L] = tileWithBytes{tile, data[i]}
+		if _, err := tlog.TileHashReader(tree, &tileReader{
+			fetch: func(key string) ([]byte, error) {
+				return config.Backend.Fetch(ctx, key)
+			},
+			saveTiles: func(tiles []tlog.Tile, data [][]byte) {
+				for i, tile := range tiles {
+					if t, ok := edgeTiles[tile.L]; !ok || t.N < tile.N || (t.N == tile.N && t.W < tile.W) {
+						edgeTiles[tile.L] = tileWithBytes{tile, data[i]}
+					}
 				}
-			}
-		}}).ReadHashes([]int64{tlog.StoredHashIndex(0, c.N-1)}); err != nil {
+			}}).ReadHashes([]int64{tlog.StoredHashIndex(0, c.N-1)}); err != nil {
 			return nil, err
 		}
 
 		dataTile := edgeTiles[0]
 		dataTile.L = -1
-		dataTile.B, err = config.Backend.Fetch(context.Background(), dataTile.Path())
+		dataTile.B, err = config.Backend.Fetch(ctx, dataTile.Path())
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +191,7 @@ const tileHeight = 10
 const tileWidth = 1 << tileHeight
 
 type tileReader struct {
-	Backend
+	fetch     func(key string) ([]byte, error)
 	saveTiles func(tiles []tlog.Tile, data [][]byte)
 }
 
@@ -190,7 +201,7 @@ func (r *tileReader) Height() int {
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 	for _, t := range tiles {
-		b, err := r.Backend.Fetch(context.Background(), t.Path())
+		b, err := r.fetch(t.Path())
 		if err != nil {
 			return nil, err
 		}
@@ -288,6 +299,7 @@ type pool struct {
 	// the results below are ready.
 	done chan struct{}
 
+	err error
 	// firstLeafIndex is the 0-based index of pendingLeaves[0] in the tree, and
 	// every following entry is sequenced contiguously.
 	firstLeafIndex int64
@@ -311,6 +323,9 @@ func (l *Log) addLeafToPool(leaf *LogEntry) func(ctx context.Context) (*Sequence
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-p.done:
+			if p.err != nil {
+				return nil, p.err
+			}
 			return &SequencedLogEntry{
 				LogEntry:  *leaf,
 				LeafIndex: p.firstLeafIndex + int64(n),
@@ -320,15 +335,39 @@ func (l *Log) addLeafToPool(leaf *LogEntry) func(ctx context.Context) (*Sequence
 	}
 }
 
+func (l *Log) RunSequencer(ctx context.Context) (err error) {
+	defer func() {
+		l.poolMu.Lock()
+		p := l.currentPool
+		l.poolMu.Unlock()
+		p.err = err
+		close(p.done)
+	}()
+	t := time.NewTicker(1 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			l.poolMu.Lock()
+			p := l.currentPool
+			l.currentPool = &pool{done: make(chan struct{})}
+			l.poolMu.Unlock()
+			if err := l.sequencePool(ctx, p); err != nil {
+				p.err = err
+				close(p.done)
+				return err
+			}
+		}
+	}
+}
+
 const sequenceTimeout = 5 * time.Second
 
-func (l *Log) sequencePool() error {
-	l.poolMu.Lock()
-	p := l.currentPool
-	l.currentPool = &pool{done: make(chan struct{})}
-	l.poolMu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), sequenceTimeout)
+func (l *Log) sequencePool(ctx context.Context, p *pool) error {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, sequenceTimeout)
 	defer cancel()
 	g, gctx := errgroup.WithContext(ctx)
 	defer g.Wait()
@@ -405,12 +444,14 @@ func (l *Log) sequencePool() error {
 	if err != nil {
 		return err
 	}
-	if err := l.c.Backend.Upload(ctx, "sth", checkpoint); err != nil {
+	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
 		// TODO: this is a critical error to handle, since if the STH actually
 		// got committed before the error we need to make very very sure we
 		// don't sign an inconsistent version when we retry.
 		return err
 	}
+
+	l.c.Log.Info("sequenced pool", "elapsed", time.Since(start), "entries", n-l.tree.N)
 
 	defer close(p.done)
 	p.timestamp = timestamp
@@ -530,6 +571,7 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 			return nil, s, errors.New("invalid data tile")
 		}
 	case 1: // precert_entry
+		e.IsPrecert = true
 		if !s.CopyBytes(e.IssuerKeyHash[:]) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
 			!s.ReadUint16LengthPrefixed(&extensions) ||
