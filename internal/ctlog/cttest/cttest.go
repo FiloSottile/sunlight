@@ -115,6 +115,9 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 			b = rest
 
 			idx := n*tileWidth + int64(i)
+			if e.LeafIndex != idx {
+				t.Errorf("SCT index %d, expected %d", e.LeafIndex, idx)
+			}
 			if e.Timestamp > sthTimestamp {
 				t.Errorf("STH timestamp %d is before record %d timestamp %d", sthTimestamp, idx, e.Timestamp)
 			}

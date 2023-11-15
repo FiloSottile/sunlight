@@ -240,9 +240,18 @@ func (e *SequencedLogEntry) timestampedEntry(b *cryptobyte.Builder) {
 			b.AddBytes(e.Certificate)
 		})
 	}
-	b.AddUint16LengthPrefixed(func(child *cryptobyte.Builder) {
-		/* extensions */
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddBytes(e.Extensions())
 	})
+}
+
+func (e *SequencedLogEntry) Extensions() []byte {
+	b := &cryptobyte.Builder{}
+	b.AddUint8(0 /* extension_type = leaf_index */)
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		addUint40(b, uint64(e.LeafIndex))
+	})
+	return b.BytesOrPanic()
 }
 
 func (e *SequencedLogEntry) TileLeaf() []byte {
@@ -509,7 +518,7 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 	s := cryptobyte.String(tile)
 	var timestamp uint64
 	var entryType uint8
-	var extensions []byte
+	var extensions cryptobyte.String
 	if !s.ReadUint64(&timestamp) || !s.ReadUint8(&entryType) || timestamp > math.MaxInt64 {
 		return nil, s, errors.New("invalid data tile")
 	}
@@ -517,13 +526,13 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 	switch entryType {
 	case 0: // x509_entry
 		if !s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
-			!s.ReadUint16LengthPrefixed((*cryptobyte.String)(&extensions)) {
+			!s.ReadUint16LengthPrefixed(&extensions) {
 			return nil, s, errors.New("invalid data tile")
 		}
 	case 1: // precert_entry
 		if !s.CopyBytes(e.IssuerKeyHash[:]) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
-			!s.ReadUint16LengthPrefixed((*cryptobyte.String)(&extensions)) ||
+			!s.ReadUint16LengthPrefixed(&extensions) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PrecertSigningCert)) {
 			return nil, s, errors.New("invalid data tile")
@@ -531,5 +540,29 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 	default:
 		return nil, s, fmt.Errorf("invalid data tile %v: unknown type %d", tile, entryType)
 	}
+	var extensionType uint8
+	var extensionData cryptobyte.String
+	if !extensions.ReadUint8(&extensionType) || extensionType != 0 ||
+		!extensions.ReadUint16LengthPrefixed(&extensionData) ||
+		!readUint48(&extensionData, &e.LeafIndex) || !extensionData.Empty() ||
+		!extensions.Empty() {
+		return nil, s, errors.New("invalid data tile extensions")
+	}
 	return e, s, nil
+}
+
+// addUint40 appends a big-endian, 40-bit value to the byte string.
+func addUint40(b *cryptobyte.Builder, v uint64) {
+	b.AddBytes([]byte{byte(v >> 32), byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
+}
+
+// readUint40 decodes a big-endian, 40-bit value into out and advances over it.
+// It reports whether the read was successful.
+func readUint48(s *cryptobyte.String, out *int64) bool {
+	var v []byte
+	if !s.ReadBytes(&v, 5) {
+		return false
+	}
+	*out = int64(v[0])<<32 | int64(v[1])<<24 | int64(v[2])<<16 | int64(v[3])<<8 | int64(v[4])
+	return true
 }

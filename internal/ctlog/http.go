@@ -130,7 +130,7 @@ func (l *Log) addChainOrPreChain(rw http.ResponseWriter, r *http.Request, checkT
 		SCTVersion: ct.V1,
 		Timestamp:  uint64(seq.Timestamp),
 		ID:         l.logID[:],
-		Extensions: base64.StdEncoding.EncodeToString(nil),
+		Extensions: base64.StdEncoding.EncodeToString(seq.Extensions()),
 		Signature:  sctSignature,
 	})
 	if err != nil {
