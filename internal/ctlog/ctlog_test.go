@@ -2,6 +2,7 @@ package ctlog_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"flag"
 	mathrand "math/rand"
@@ -36,10 +37,12 @@ func TestSequenceOneLeaf(t *testing.T) {
 		cert := make([]byte, mathrand.Intn(4)+1)
 		rand.Read(cert)
 
-		id := tl.Log.AddCertificate(cert)
+		wait := tl.Log.AddCertificate(cert)
 		fatalIfErr(t, tl.Log.Sequence())
-		if id := id(); id != i {
-			t.Errorf("got leaf index %d, expected %d", id, 0)
+		if e, err := wait(context.Background()); err != nil {
+			t.Fatal(err)
+		} else if e.LeafIndex != i {
+			t.Errorf("got leaf index %d, expected %d", e.LeafIndex, 0)
 		}
 
 		if !*longFlag {

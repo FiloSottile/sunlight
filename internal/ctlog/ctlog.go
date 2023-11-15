@@ -12,11 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"sync"
 	"time"
 
 	"filippo.io/litetlog/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
+	"github.com/google/certificate-transparency-go/x509util"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
@@ -24,12 +26,9 @@ import (
 )
 
 type Log struct {
-	name    string
-	logID   [sha256.Size]byte
-	privKey crypto.Signer
-	backend Backend
+	c     *Config
+	logID [sha256.Size]byte
 
-	// TODO: add a lock when using these outside the sequencer.
 	tree treeWithTimestamp
 	// edgeTiles is a map from level to the right-most tile of that level.
 	edgeTiles map[int]tileWithBytes
@@ -51,34 +50,45 @@ type tileWithBytes struct {
 	B []byte
 }
 
-func CreateLog(ctx context.Context, name string, key crypto.Signer, backend Backend) error {
-	pkix, err := x509.MarshalPKIXPublicKey(key.Public())
+type Config struct {
+	Name string
+	Key  crypto.Signer
+
+	Backend Backend
+
+	Roots         *x509util.PEMCertPool
+	NotAfterStart time.Time
+	NotAfterLimit time.Time
+}
+
+func CreateLog(ctx context.Context, config *Config) error {
+	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
 	if err != nil {
 		return err
 	}
 	logID := sha256.Sum256(pkix)
 
 	tree := treeWithTimestamp{tlog.Tree{}, timeNowUnixMilli()}
-	checkpoint, err := signTreeHead(name, logID, key, tree)
+	checkpoint, err := signTreeHead(config.Name, logID, config.Key, tree)
 	if err != nil {
 		return err
 	}
 
-	return backend.Upload(ctx, "sth", checkpoint)
+	return config.Backend.Upload(ctx, "sth", checkpoint)
 }
 
-func LoadLog(ctx context.Context, name string, key crypto.Signer, backend Backend) (*Log, error) {
-	pkix, err := x509.MarshalPKIXPublicKey(key.Public())
+func LoadLog(ctx context.Context, config *Config) (*Log, error) {
+	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
 	if err != nil {
 		return nil, err
 	}
 	logID := sha256.Sum256(pkix)
 
-	sth, err := backend.Fetch(ctx, "sth")
+	sth, err := config.Backend.Fetch(ctx, "sth")
 	if err != nil {
 		return nil, err
 	}
-	v, err := tlogx.NewRFC6962Verifier(name, key.Public())
+	v, err := tlogx.NewRFC6962Verifier(config.Name, config.Key.Public())
 	if err != nil {
 		return nil, err
 	}
@@ -96,8 +106,8 @@ func LoadLog(ctx context.Context, name string, key crypto.Signer, backend Backen
 	if now := timeNowUnixMilli(); now < timestamp {
 		return nil, fmt.Errorf("current time %d is before STH time %d", now, timestamp)
 	}
-	if c.Origin != name {
-		return nil, fmt.Errorf("STH name is %q, not %q", c.Origin, name)
+	if c.Origin != config.Name {
+		return nil, fmt.Errorf("STH name is %q, not %q", c.Origin, config.Name)
 	}
 	tree := tlog.Tree{N: c.N, Hash: c.Hash}
 	if c.Extension != "" {
@@ -106,7 +116,7 @@ func LoadLog(ctx context.Context, name string, key crypto.Signer, backend Backen
 
 	edgeTiles := make(map[int]tileWithBytes)
 	if c.N > 0 {
-		if _, err := tlog.TileHashReader(tree, &tileReader{backend, func(tiles []tlog.Tile, data [][]byte) {
+		if _, err := tlog.TileHashReader(tree, &tileReader{config.Backend, func(tiles []tlog.Tile, data [][]byte) {
 			for i, tile := range tiles {
 				if t, ok := edgeTiles[tile.L]; !ok || t.N < tile.N || (t.N == tile.N && t.W < tile.W) {
 					edgeTiles[tile.L] = tileWithBytes{tile, data[i]}
@@ -118,7 +128,7 @@ func LoadLog(ctx context.Context, name string, key crypto.Signer, backend Backen
 
 		dataTile := edgeTiles[0]
 		dataTile.L = -1
-		dataTile.B, err = backend.Fetch(context.Background(), dataTile.Path())
+		dataTile.B, err = config.Backend.Fetch(context.Background(), dataTile.Path())
 		if err != nil {
 			return nil, err
 		}
@@ -127,13 +137,13 @@ func LoadLog(ctx context.Context, name string, key crypto.Signer, backend Backen
 		b := edgeTiles[-1].B
 		start := tileWidth * dataTile.N
 		for i := start; i < start+int64(dataTile.W); i++ {
-			timestampedEntry, _, _, rest, err := ReadTileLeaf(b)
+			e, rest, err := ReadTileLeaf(b)
 			if err != nil {
 				return nil, fmt.Errorf("invalid data tile %v", dataTile)
 			}
 			b = rest
 
-			got := tlog.RecordHash(append([]byte{0, 0}, timestampedEntry...))
+			got := tlog.RecordHash(e.MerkleTreeLeaf())
 			exp, err := tlog.HashFromTile(edgeTiles[0].Tile, edgeTiles[0].B, tlog.StoredHashIndex(0, i))
 			if err != nil {
 				return nil, err
@@ -145,10 +155,8 @@ func LoadLog(ctx context.Context, name string, key crypto.Signer, backend Backen
 	}
 
 	return &Log{
-		name:        name,
+		c:           config,
 		logID:       logID,
-		privKey:     key,
-		backend:     backend,
 		tree:        treeWithTimestamp{tree, timestamp},
 		edgeTiles:   edgeTiles,
 		currentPool: &pool{done: make(chan struct{})},
@@ -193,37 +201,43 @@ func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 
 func (r *tileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) { r.saveTiles(tiles, data) }
 
-type logEntry struct {
-	// cert is either the x509_entry or the tbs_certificate for precerts.
-	cert []byte
+type LogEntry struct {
+	// Certificate is either the x509_entry or the tbs_certificate for precerts.
+	Certificate []byte
 
-	isPrecert          bool
-	issuerKeyHash      [32]byte
-	preCertificate     []byte
-	precertSigningCert []byte
+	IsPrecert          bool
+	IssuerKeyHash      [32]byte
+	PreCertificate     []byte
+	PrecertSigningCert []byte
 }
 
-// merkleTreeLeaf returns a RFC 6962 MerkleTreeLeaf.
-func (e *logEntry) merkleTreeLeaf(timestamp int64) []byte {
+type SequencedLogEntry struct {
+	LogEntry
+	LeafIndex int64
+	Timestamp int64
+}
+
+// MerkleTreeLeaf returns a RFC 6962 MerkleTreeLeaf.
+func (e *SequencedLogEntry) MerkleTreeLeaf() []byte {
 	b := &cryptobyte.Builder{}
 	b.AddUint8(0 /* version = v1 */)
 	b.AddUint8(0 /* leaf_type = timestamped_entry */)
-	e.timestampedEntry(b, timestamp)
+	e.timestampedEntry(b)
 	return b.BytesOrPanic()
 }
 
-func (e *logEntry) timestampedEntry(b *cryptobyte.Builder, timestamp int64) {
-	b.AddUint64(uint64(timestamp))
-	if !e.isPrecert {
+func (e *SequencedLogEntry) timestampedEntry(b *cryptobyte.Builder) {
+	b.AddUint64(uint64(e.Timestamp))
+	if !e.IsPrecert {
 		b.AddUint8(0 /* entry_type = x509_entry */)
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.cert)
+			b.AddBytes(e.Certificate)
 		})
 	} else {
 		b.AddUint8(1 /* entry_type = precert_entry */)
-		b.AddBytes(e.issuerKeyHash[:])
+		b.AddBytes(e.IssuerKeyHash[:])
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.cert)
+			b.AddBytes(e.Certificate)
 		})
 	}
 	b.AddUint16LengthPrefixed(func(child *cryptobyte.Builder) {
@@ -231,7 +245,7 @@ func (e *logEntry) timestampedEntry(b *cryptobyte.Builder, timestamp int64) {
 	})
 }
 
-func (e *logEntry) tileLeaf(timestamp int64) []byte {
+func (e *SequencedLogEntry) TileLeaf() []byte {
 	// struct {
 	//     TimestampedEntry timestamped_entry;
 	//     select(entry_type) {
@@ -246,20 +260,20 @@ func (e *logEntry) tileLeaf(timestamp int64) []byte {
 	// } PreCertExtraData;
 
 	b := &cryptobyte.Builder{}
-	e.timestampedEntry(b, timestamp)
-	if e.isPrecert {
+	e.timestampedEntry(b)
+	if e.IsPrecert {
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.preCertificate)
+			b.AddBytes(e.PreCertificate)
 		})
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.precertSigningCert)
+			b.AddBytes(e.PrecertSigningCert)
 		})
 	}
 	return b.BytesOrPanic()
 }
 
 type pool struct {
-	pendingLeaves []*logEntry
+	pendingLeaves []*LogEntry
 
 	// done is closed when the pool has been sequenced and
 	// the results below are ready.
@@ -275,16 +289,25 @@ type pool struct {
 }
 
 // addLeafToPool adds leaf to the current pool, and returns a function that will
-// wait until the pool is sequenced and returns the index of the leaf.
-func (l *Log) addLeafToPool(leaf *logEntry) func() (id int64) {
+// wait until the pool is sequenced and returns the sequenced leaf.
+func (l *Log) addLeafToPool(leaf *LogEntry) func(ctx context.Context) (*SequencedLogEntry, error) {
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
 	p := l.currentPool
 	n := len(p.pendingLeaves)
+	// TODO: check if the pool is full.
 	p.pendingLeaves = append(p.pendingLeaves, leaf)
-	return func() int64 {
-		<-p.done
-		return p.firstLeafIndex + int64(n)
+	return func(ctx context.Context) (*SequencedLogEntry, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-p.done:
+			return &SequencedLogEntry{
+				LogEntry:  *leaf,
+				LeafIndex: p.firstLeafIndex + int64(n),
+				Timestamp: p.timestamp,
+			}, nil
+		}
 	}
 }
 
@@ -315,7 +338,8 @@ func (l *Log) sequencePool() error {
 	hashReader := l.hashReader(newHashes)
 	n := l.tree.N
 	for _, leaf := range p.pendingLeaves {
-		hashes, err := tlog.StoredHashes(n, leaf.merkleTreeLeaf(timestamp), hashReader)
+		leaf := &SequencedLogEntry{LogEntry: *leaf, Timestamp: timestamp, LeafIndex: n}
+		hashes, err := tlog.StoredHashes(n, leaf.MerkleTreeLeaf(), hashReader)
 		if err != nil {
 			return fmt.Errorf("couldn't fetch stored hashes for leaf %d: %w", n, err)
 		}
@@ -323,7 +347,7 @@ func (l *Log) sequencePool() error {
 			id := tlog.StoredHashIndex(0, n) + int64(i)
 			newHashes[id] = h
 		}
-		dataTile = append(dataTile, leaf.tileLeaf(timestamp)...)
+		dataTile = append(dataTile, leaf.TileLeaf()...)
 
 		n++
 
@@ -332,7 +356,7 @@ func (l *Log) sequencePool() error {
 			tile.L = -1
 			data := dataTile
 			edgeTiles[-1] = tileWithBytes{tile, data}
-			g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), data) })
+			g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
 			dataTile = nil
 		}
 	}
@@ -342,7 +366,7 @@ func (l *Log) sequencePool() error {
 		tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}
-		g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), dataTile) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), dataTile) })
 	}
 
 	tiles := tlog.NewTiles(tileHeight, l.tree.N, n)
@@ -355,7 +379,7 @@ func (l *Log) sequencePool() error {
 		if t, ok := edgeTiles[tile.L]; !ok || t.N < tile.N || (t.N == tile.N && t.W < tile.W) {
 			edgeTiles[tile.L] = tileWithBytes{tile, data}
 		}
-		g.Go(func() error { return l.backend.Upload(gctx, tile.Path(), data) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
 	}
 
 	if err := g.Wait(); err != nil {
@@ -368,11 +392,11 @@ func (l *Log) sequencePool() error {
 	}
 	tree := treeWithTimestamp{Tree: tlog.Tree{N: n, Hash: rootHash}, Time: timestamp}
 
-	checkpoint, err := signTreeHead(l.name, l.logID, l.privKey, tree)
+	checkpoint, err := signTreeHead(l.c.Name, l.logID, l.c.Key, tree)
 	if err != nil {
 		return err
 	}
-	if err := l.backend.Upload(ctx, "sth", checkpoint); err != nil {
+	if err := l.c.Backend.Upload(ctx, "sth", checkpoint); err != nil {
 		// TODO: this is a critical error to handle, since if the STH actually
 		// got committed before the error we need to make very very sure we
 		// don't sign an inconsistent version when we retry.
@@ -480,35 +504,32 @@ func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 	}
 }
 
-func ReadTileLeaf(tile []byte) (timestampedEntry, cert []byte, timestamp uint64, rest []byte, err error) {
-	// TODO: make a return type for this and merge it with logEntry.
-
+func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
+	e = &SequencedLogEntry{}
 	s := cryptobyte.String(tile)
+	var timestamp uint64
 	var entryType uint8
 	var extensions []byte
-	if !s.ReadUint64(&timestamp) || !s.ReadUint8(&entryType) {
-		err = errors.New("invalid data tile")
-		return
+	if !s.ReadUint64(&timestamp) || !s.ReadUint8(&entryType) || timestamp > math.MaxInt64 {
+		return nil, s, errors.New("invalid data tile")
 	}
+	e.Timestamp = int64(timestamp)
 	switch entryType {
 	case 0: // x509_entry
-		if !s.ReadUint24LengthPrefixed((*cryptobyte.String)(&cert)) {
-			err = errors.New("invalid data tile")
-			return
+		if !s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
+			!s.ReadUint16LengthPrefixed((*cryptobyte.String)(&extensions)) {
+			return nil, s, errors.New("invalid data tile")
 		}
 	case 1: // precert_entry
-		panic("unimplemented") // TODO
+		if !s.CopyBytes(e.IssuerKeyHash[:]) ||
+			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
+			!s.ReadUint16LengthPrefixed((*cryptobyte.String)(&extensions)) ||
+			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) ||
+			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PrecertSigningCert)) {
+			return nil, s, errors.New("invalid data tile")
+		}
 	default:
-		err = fmt.Errorf("invalid data tile %v: unknown type %d", tile, entryType)
-		return
+		return nil, s, fmt.Errorf("invalid data tile %v: unknown type %d", tile, entryType)
 	}
-	if !s.ReadUint16LengthPrefixed((*cryptobyte.String)(&extensions)) {
-		err = errors.New("invalid data tile")
-		return
-	}
-	// TODO: parse and handle extensions.
-
-	timestampedEntry = tile[:len(tile)-len(s)]
-	rest = s
-	return
+	return e, s, nil
 }

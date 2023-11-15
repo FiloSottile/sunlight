@@ -18,10 +18,9 @@ import (
 )
 
 type TestLog struct {
-	Log     *ctlog.Log
-	Backend *MemoryBackend
-	Key     *ecdsa.PrivateKey
-	t       testing.TB
+	Log    *ctlog.Log
+	Config *ctlog.Config
+	t      testing.TB
 }
 
 func NewEmptyTestLog(t testing.TB) *TestLog {
@@ -35,42 +34,41 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 		t.Fatal(err)
 	}
 	t.Logf("ECDSA key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
-	err = ctlog.CreateLog(context.Background(), "example.com/TestLog", key, backend)
+	config := &ctlog.Config{Name: "example.com/TestLog", Key: key, Backend: backend}
+	err = ctlog.CreateLog(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	log, err := ctlog.LoadLog(context.Background(), "example.com/TestLog", key, backend)
+	log, err := ctlog.LoadLog(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &TestLog{t: t,
-		Log:     log,
-		Backend: backend,
-		Key:     key,
+		Log:    log,
+		Config: config,
 	}
 }
 
 func ReloadLog(t testing.TB, tl *TestLog) *TestLog {
-	log, err := ctlog.LoadLog(context.Background(), "example.com/TestLog", tl.Key, tl.Backend)
+	log, err := ctlog.LoadLog(context.Background(), tl.Config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &TestLog{t: t,
-		Log:     log,
-		Backend: tl.Backend,
-		Key:     tl.Key,
+		Log:    log,
+		Config: tl.Config,
 	}
 }
 
-func (tl *TestLog) CheckLog() (sthTimestamp uint64) {
+func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 	t := tl.t
 	// TODO: accept an expected log size.
 
-	sth, err := tl.Backend.Fetch(context.Background(), "sth")
+	sth, err := tl.Config.Backend.Fetch(context.Background(), "sth")
 	fatalIfErr(t, err)
-	v, err := tlogx.NewRFC6962Verifier("example.com/TestLog", tl.Key.Public())
+	v, err := tlogx.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
 	fatalIfErr(t, err)
-	v.Timestamp = func(t uint64) { sthTimestamp = t }
+	v.Timestamp = func(t uint64) { sthTimestamp = int64(t) }
 	n, err := note.Open(sth, note.VerifierList(v))
 	fatalIfErr(t, err)
 	c, err := tlogx.ParseCheckpoint(n.Text)
@@ -107,20 +105,20 @@ func (tl *TestLog) CheckLog() (sthTimestamp uint64) {
 		if n == lastTile.N {
 			tile = lastTile
 		}
-		b, err := tl.Backend.Fetch(context.Background(), tile.Path())
+		b, err := tl.Config.Backend.Fetch(context.Background(), tile.Path())
 		fatalIfErr(t, err)
 		for i := 0; i < tile.W; i++ {
-			timestampedEntry, _, timestamp, rest, err := ctlog.ReadTileLeaf(b)
+			e, rest, err := ctlog.ReadTileLeaf(b)
 			if err != nil {
 				t.Fatalf("invalid data tile %v", tile)
 			}
 			b = rest
 
 			idx := n*tileWidth + int64(i)
-			if timestamp > sthTimestamp {
-				t.Errorf("STH timestamp %d is before record %d timestamp %d", sthTimestamp, idx, timestamp)
+			if e.Timestamp > sthTimestamp {
+				t.Errorf("STH timestamp %d is before record %d timestamp %d", sthTimestamp, idx, e.Timestamp)
 			}
-			got := tlog.RecordHash(append([]byte{0, 0}, timestampedEntry...))
+			got := tlog.RecordHash(e.MerkleTreeLeaf())
 			if exp := leafHashes[idx]; got != exp {
 				t.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", idx, got, exp)
 			}
@@ -144,7 +142,7 @@ func (r *tileReader) Height() int {
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 	for _, t := range tiles {
-		b, err := r.Backend.Fetch(context.Background(), t.Path())
+		b, err := r.Config.Backend.Fetch(context.Background(), t.Path())
 		if err != nil {
 			return nil, err
 		}

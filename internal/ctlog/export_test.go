@@ -1,7 +1,13 @@
 package ctlog
 
-func (l *Log) AddCertificate(cert []byte) func() (id int64) {
-	return l.addLeafToPool(&logEntry{cert: cert})
+import "context"
+
+func (l *Log) AddCertificate(cert []byte) func(ctx context.Context) (*SequencedLogEntry, error) {
+	return l.addLeafToPool(&LogEntry{Certificate: cert})
+}
+
+func (l *Log) AddLeafToPool(e *LogEntry) func(ctx context.Context) (*SequencedLogEntry, error) {
+	return l.addLeafToPool(e)
 }
 
 func (l *Log) Sequence() error {
