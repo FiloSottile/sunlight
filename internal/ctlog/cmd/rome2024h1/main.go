@@ -84,7 +84,7 @@ func main() {
 		log.Println("ListenAndServeTLS:", s.ListenAndServeTLS("", ""))
 		stop()
 	}()
-	log.Println("RunSequencer:", l.RunSequencer(ctx))
+	log.Println("RunSequencer:", l.RunSequencer(ctx, 1*time.Second))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

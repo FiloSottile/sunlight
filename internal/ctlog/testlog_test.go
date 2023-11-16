@@ -1,20 +1,27 @@
-package cttest
+package ctlog_test
 
 import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"filippo.io/litetlog/internal/ctlog"
 	"filippo.io/litetlog/internal/tlogx"
+	"github.com/google/certificate-transparency-go/client"
+	"github.com/google/certificate-transparency-go/jsonclient"
+	"github.com/google/certificate-transparency-go/x509"
+	"github.com/google/certificate-transparency-go/x509util"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -23,40 +30,73 @@ type TestLog struct {
 	Log    *ctlog.Log
 	Config *ctlog.Config
 	t      testing.TB
+	l      *slog.LevelVar
 }
 
 func NewEmptyTestLog(t testing.TB) *TestLog {
 	backend := NewMemoryBackend(t)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fatalIfErr(t, err)
 	k, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fatalIfErr(t, err)
 	t.Logf("ECDSA key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
-	config := &ctlog.Config{Name: "example.com/TestLog", Key: key, Backend: backend,
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	logHandler, logLevel := testLogHandler(t)
+	config := &ctlog.Config{
+		Name:          "example.com/TestLog",
+		Key:           key,
+		Backend:       backend,
+		Log:           slog.New(logHandler),
+		Roots:         x509util.NewPEMCertPool(),
+		NotAfterStart: time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
+		NotAfterLimit: time.Date(2024, time.July, 1, 0, 0, 0, 0, time.UTC),
+	}
+	root, err := x509.ParseCertificate(testRoot)
+	fatalIfErr(t, err)
+	config.Roots.AddCert(root)
 	err = ctlog.CreateLog(context.Background(), config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fatalIfErr(t, err)
 	log, err := ctlog.LoadLog(context.Background(), config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fatalIfErr(t, err)
 	return &TestLog{t: t,
 		Log:    log,
 		Config: config,
+		l:      logLevel,
 	}
+}
+
+func testLogHandler(t testing.TB) (slog.Handler, *slog.LevelVar) {
+	level := &slog.LevelVar{}
+	level.Set(slog.LevelDebug)
+	h := slog.NewTextHandler(writerFunc(func(p []byte) (n int, err error) {
+		t.Logf("%s", p)
+		return len(p), nil
+	}), &slog.HandlerOptions{
+		AddSource: true,
+		Level:     level,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.SourceKey {
+				src := a.Value.Any().(*slog.Source)
+				a.Value = slog.StringValue(fmt.Sprintf("%s:%d", filepath.Base(src.File), src.Line))
+			}
+			return a
+		},
+	})
+	return h, level
+}
+
+type writerFunc func(p []byte) (n int, err error)
+
+func (f writerFunc) Write(p []byte) (n int, err error) {
+	return f(p)
+}
+
+func (tl *TestLog) Quiet() {
+	tl.l.Set(slog.LevelWarn)
 }
 
 func ReloadLog(t testing.TB, tl *TestLog) *TestLog {
 	log, err := ctlog.LoadLog(context.Background(), tl.Config)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fatalIfErr(t, err)
 	return &TestLog{t: t,
 		Log:    log,
 		Config: tl.Config,
@@ -135,6 +175,46 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 	}
 
 	return
+}
+
+func (tl *TestLog) LogClient() *client.LogClient {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rr := httptest.NewRecorder()
+		tl.Log.Handler().ServeHTTP(rr, r)
+		res := rr.Result()
+		if res.StatusCode != http.StatusOK {
+			tl.t.Logf("%s %s %d", r.Method, r.URL.Path, res.StatusCode)
+			tl.t.Logf("\t%s", rr.Body.String())
+		}
+		for h, v := range res.Header {
+			w.Header()[h] = v
+		}
+		w.WriteHeader(res.StatusCode)
+		io.Copy(w, res.Body)
+	}))
+	tl.t.Cleanup(ts.Close)
+	pubKey, err := x509.MarshalPKIXPublicKey(tl.Config.Key.Public())
+	fatalIfErr(tl.t, err)
+	lc, err := client.New(ts.URL, &http.Client{
+		Timeout: 10 * time.Second,
+	}, jsonclient.Options{
+		Logger:       slog.NewLogLogger(tl.Config.Log.Handler(), slog.LevelInfo),
+		PublicKeyDER: pubKey,
+	})
+	fatalIfErr(tl.t, err)
+	tl.StartSequencer()
+	return lc
+}
+
+func (tl *TestLog) StartSequencer() {
+	ctx, cancel := context.WithCancel(context.Background())
+	tl.t.Cleanup(cancel)
+	go func() {
+		err := tl.Log.RunSequencer(ctx, 50*time.Millisecond)
+		if err != context.Canceled {
+			tl.t.Errorf("RunSequencer returned an error: %v", err)
+		}
+	}()
 }
 
 const tileHeight = 10

@@ -240,12 +240,12 @@ func (e *SequencedLogEntry) MerkleTreeLeaf() []byte {
 func (e *SequencedLogEntry) timestampedEntry(b *cryptobyte.Builder) {
 	b.AddUint64(uint64(e.Timestamp))
 	if !e.IsPrecert {
-		b.AddUint8(0 /* entry_type = x509_entry */)
+		b.AddUint16(0 /* entry_type = x509_entry */)
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 			b.AddBytes(e.Certificate)
 		})
 	} else {
-		b.AddUint8(1 /* entry_type = precert_entry */)
+		b.AddUint16(1 /* entry_type = precert_entry */)
 		b.AddBytes(e.IssuerKeyHash[:])
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 			b.AddBytes(e.Certificate)
@@ -335,7 +335,7 @@ func (l *Log) addLeafToPool(leaf *LogEntry) func(ctx context.Context) (*Sequence
 	}
 }
 
-func (l *Log) RunSequencer(ctx context.Context) (err error) {
+func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error) {
 	defer func() {
 		l.poolMu.Lock()
 		p := l.currentPool
@@ -343,7 +343,7 @@ func (l *Log) RunSequencer(ctx context.Context) (err error) {
 		p.err = err
 		close(p.done)
 	}()
-	t := time.NewTicker(1 * time.Second)
+	t := time.NewTicker(period)
 	defer t.Stop()
 	for {
 		select {
@@ -451,7 +451,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 		return err
 	}
 
-	l.c.Log.Info("sequenced pool", "elapsed", time.Since(start), "entries", n-l.tree.N)
+	l.c.Log.Info("sequenced pool", "elapsed", time.Since(start), "entries", n-l.tree.N, "size", tree.N)
 
 	defer close(p.done)
 	p.timestamp = timestamp
@@ -558,9 +558,9 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 	e = &SequencedLogEntry{}
 	s := cryptobyte.String(tile)
 	var timestamp uint64
-	var entryType uint8
+	var entryType uint16
 	var extensions cryptobyte.String
-	if !s.ReadUint64(&timestamp) || !s.ReadUint8(&entryType) || timestamp > math.MaxInt64 {
+	if !s.ReadUint64(&timestamp) || !s.ReadUint16(&entryType) || timestamp > math.MaxInt64 {
 		return nil, s, errors.New("invalid data tile")
 	}
 	e.Timestamp = int64(timestamp)
