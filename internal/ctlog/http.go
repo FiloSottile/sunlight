@@ -12,12 +12,64 @@ import (
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/trillian/ctfe"
 	"github.com/google/certificate-transparency-go/x509"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+type metrics struct {
+	inFlight *prometheus.GaugeVec
+	requests *prometheus.CounterVec
+	duration *prometheus.SummaryVec
+}
+
+func initMetrics() metrics {
+	m := metrics{}
+	m.inFlight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "in_flight_requests",
+		},
+		[]string{"endpoint"},
+	)
+	m.requests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "requests_total",
+		},
+		[]string{"endpoint", "code"},
+	)
+	m.duration = prometheus.NewSummaryVec(
+		prometheus.SummaryOpts{
+			Name:       "request_duration_seconds",
+			Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
+		},
+		[]string{"endpoint", "code"},
+	)
+	return m
+}
+
+func (l *Log) Metrics() []prometheus.Collector {
+	return append([]prometheus.Collector{
+		l.m.duration,
+		l.m.inFlight,
+		l.m.requests,
+	}, l.c.Backend.Metrics()...)
+}
+
 func (l *Log) Handler() http.Handler {
+	addChainLabels := prometheus.Labels{"endpoint": "add-chain"}
+	addChain := http.Handler(http.HandlerFunc(l.addChain))
+	addChain = promhttp.InstrumentHandlerCounter(l.m.requests.MustCurryWith(addChainLabels), addChain)
+	addChain = promhttp.InstrumentHandlerDuration(l.m.duration.MustCurryWith(addChainLabels), addChain)
+	addChain = promhttp.InstrumentHandlerInFlight(l.m.inFlight.With(addChainLabels), addChain)
+
+	addPreChainLabels := prometheus.Labels{"endpoint": "add-pre-chain"}
+	addPreChain := http.Handler(http.HandlerFunc(l.addPreChain))
+	addPreChain = promhttp.InstrumentHandlerCounter(l.m.requests.MustCurryWith(addPreChainLabels), addPreChain)
+	addPreChain = promhttp.InstrumentHandlerDuration(l.m.duration.MustCurryWith(addPreChainLabels), addPreChain)
+	addPreChain = promhttp.InstrumentHandlerInFlight(l.m.inFlight.With(addPreChainLabels), addPreChain)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ct/v1/add-chain", l.addChain)
-	mux.HandleFunc("/ct/v1/add-pre-chain", l.addPreChain)
+	mux.Handle("/ct/v1/add-chain", addChain)
+	mux.Handle("/ct/v1/add-pre-chain", addPreChain)
 	return http.MaxBytesHandler(mux, 128*1024)
 }
 

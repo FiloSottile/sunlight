@@ -22,6 +22,7 @@ import (
 	"github.com/google/certificate-transparency-go/jsonclient"
 	"github.com/google/certificate-transparency-go/x509"
 	"github.com/google/certificate-transparency-go/x509util"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -287,6 +288,8 @@ func (b *MemoryBackend) Fetch(ctx context.Context, key string) ([]byte, error) {
 	}
 	return data, nil
 }
+
+func (b *MemoryBackend) Metrics() []prometheus.Collector { return nil }
 
 func fatalIfErr(t testing.TB, err error) {
 	t.Helper()

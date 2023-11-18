@@ -9,12 +9,15 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"time"
 
 	"filippo.io/litetlog/internal/ctlog"
 	"github.com/google/certificate-transparency-go/x509util"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/acme/autocert"
 )
 
@@ -66,6 +69,20 @@ func main() {
 		log.Fatal(err)
 	}
 
+	metrics := prometheus.NewRegistry()
+	prometheus.WrapRegistererWithPrefix("rome2024h1_", metrics).MustRegister(l.Metrics()...)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.Handle("/2024h1/", http.StripPrefix("/2024h1", l.Handler()))
+	mux.Handle("/metrics", promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
+		ErrorLog: slog.NewLogLogger(c.Log.Handler(), slog.LevelWarn),
+	}))
+
 	m := &autocert.Manager{
 		Cache:      autocert.DirCache("rome-autocert"),
 		Prompt:     autocert.AcceptTOS,
@@ -75,7 +92,7 @@ func main() {
 	s := &http.Server{
 		Addr:         ":https",
 		TLSConfig:    m.TLSConfig(),
-		Handler:      http.StripPrefix("/2024h1", l.Handler()),
+		Handler:      mux,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 15 * time.Second,
 	}

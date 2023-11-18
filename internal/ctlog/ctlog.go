@@ -20,6 +20,7 @@ import (
 	"filippo.io/litetlog/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/x509util"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
@@ -29,6 +30,7 @@ import (
 type Log struct {
 	c     *Config
 	logID [sha256.Size]byte
+	m     metrics
 
 	tree treeWithTimestamp
 	// edgeTiles is a map from level to the right-most tile of that level.
@@ -171,6 +173,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		tree:        treeWithTimestamp{tree, timestamp},
 		edgeTiles:   edgeTiles,
 		currentPool: &pool{done: make(chan struct{})},
+		m:           initMetrics(),
 	}, nil
 }
 
@@ -185,6 +188,10 @@ type Backend interface {
 
 	// Fetch can be called concurrently.
 	Fetch(ctx context.Context, key string) ([]byte, error)
+
+	// Metrics returns the metrics to register for this log. The metrics should
+	// not be shared by any other logs.
+	Metrics() []prometheus.Collector
 }
 
 const tileHeight = 10
