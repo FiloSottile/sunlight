@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -31,6 +32,8 @@ func NewS3Backend(ctx context.Context, region, bucket string) (*S3Backend, error
 		prometheus.SummaryOpts{
 			Name:       "s3_request_duration_seconds",
 			Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
+			MaxAge:     1 * time.Minute,
+			AgeBuckets: 6,
 		},
 		[]string{"action", "code"},
 	)
