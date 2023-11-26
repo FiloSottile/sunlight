@@ -70,9 +70,10 @@ func main() {
 	}
 
 	metrics := prometheus.NewRegistry()
-	prometheus.WrapRegistererWith(prometheus.Labels{
-		"log": "rome2024h1",
-	}, metrics).MustRegister(l.Metrics()...)
+	prometheus.WrapRegistererWith(
+		prometheus.Labels{"log": "rome2024h1"},
+		prometheus.WrapRegistererWithPrefix("sunlight_", metrics),
+	).MustRegister(l.Metrics()...)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
