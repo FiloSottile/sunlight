@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -19,9 +20,10 @@ type S3Backend struct {
 	putClient *s3.Client
 	bucket    string
 	metrics   []prometheus.Collector
+	log       *slog.Logger
 }
 
-func NewS3Backend(ctx context.Context, region, bucket string) (*S3Backend, error) {
+func NewS3Backend(ctx context.Context, region, bucket string, l *slog.Logger) (*S3Backend, error) {
 	counter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "s3_requests_total",
@@ -62,22 +64,27 @@ func NewS3Backend(ctx context.Context, region, bucket string) (*S3Backend, error
 		putClient: s3.NewFromConfig(putCfg),
 		bucket:    bucket,
 		metrics:   []prometheus.Collector{counter, duration},
+		log:       l,
 	}, nil
 }
 
 var _ Backend = &S3Backend{}
 
 func (s *S3Backend) Upload(ctx context.Context, key string, data []byte) error {
+	start := time.Now()
 	// TODO: give up on slow requests and retry.
 	_, err := s.putClient.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(data),
 	})
+	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", len(data),
+		"elapsed", time.Since(start), "error", err)
 	return err
 }
 
 func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
+	s.log.DebugContext(ctx, "S3 GET", "key", key)
 	out, err := s.getClient.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),

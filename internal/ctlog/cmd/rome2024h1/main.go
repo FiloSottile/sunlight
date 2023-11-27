@@ -22,11 +22,19 @@ import (
 )
 
 func main() {
+	createFlag := flag.Bool("create", false, "create the log")
+	debugFlag := flag.Bool("debug", false, "verbose logging")
+	flag.Parse()
+	if *debugFlag {
+		h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+		slog.SetDefault(slog.New(h))
+	}
+
 	log.SetFlags(log.Flags() | log.Lshortfile)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	b, err := ctlog.NewS3Backend(ctx, "us-east-2", "rome2024h1")
+	b, err := ctlog.NewS3Backend(ctx, "us-east-2", "rome2024h1", slog.Default())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -56,8 +64,6 @@ func main() {
 		NotAfterLimit: time.Date(2024, time.July, 1, 0, 0, 0, 0, time.UTC),
 	}
 
-	createFlag := flag.Bool("create", false, "create the log")
-	flag.Parse()
 	if *createFlag {
 		if err := ctlog.CreateLog(ctx, c); err != nil {
 			log.Fatal(err)

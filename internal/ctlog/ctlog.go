@@ -53,6 +53,10 @@ type tileWithBytes struct {
 	B []byte
 }
 
+func (t tileWithBytes) String() string {
+	return fmt.Sprintf("%s#%d", t.Path(), len(t.B))
+}
+
 type Config struct {
 	Name string
 	Key  crypto.Signer
@@ -123,6 +127,8 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		return nil, fmt.Errorf("unexpected STH extension %q", c.Extension)
 	}
 
+	config.Log.InfoContext(ctx, "loaded log", "size", tree.N, "timestamp", timestamp)
+
 	edgeTiles := make(map[int]tileWithBytes)
 	if c.N > 0 {
 		if _, err := tlog.TileHashReader(tree, &tileReader{
@@ -165,6 +171,9 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 				return nil, fmt.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", i, got, exp)
 			}
 		}
+	}
+	for _, t := range edgeTiles {
+		config.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
 
 	return &Log{
@@ -373,6 +382,7 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 const sequenceTimeout = 5 * time.Second
 
 func (l *Log) sequencePool(ctx context.Context, p *pool) error {
+	var tileCount int
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, sequenceTimeout)
 	defer cancel()
@@ -413,6 +423,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 			edgeTiles[-1] = tileWithBytes{tile, data}
 			g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
 			dataTile = nil
+			tileCount++
 		}
 	}
 
@@ -422,6 +433,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 		tile.L = -1
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}
 		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), dataTile) })
+		tileCount++
 	}
 
 	tiles := tlog.NewTiles(tileHeight, l.tree.N, n)
@@ -435,6 +447,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 			edgeTiles[tile.L] = tileWithBytes{tile, data}
 		}
 		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
+		tileCount++
 	}
 
 	if err := g.Wait(); err != nil {
@@ -458,7 +471,13 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 		return err
 	}
 
-	l.c.Log.Info("sequenced pool", "elapsed", time.Since(start), "entries", n-l.tree.N, "size", tree.N)
+	l.c.Log.Info("sequenced pool",
+		"entries", n-l.tree.N, "size", tree.N,
+		"tiles", tileCount, "timestamp", timestamp,
+		"elapsed", time.Since(start))
+	for _, t := range edgeTiles {
+		l.c.Log.DebugContext(ctx, "edge tile", "tile", t)
+	}
 
 	defer close(p.done)
 	p.timestamp = timestamp
