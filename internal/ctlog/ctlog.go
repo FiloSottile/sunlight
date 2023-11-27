@@ -436,7 +436,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 		tileCount++
 	}
 
-	tiles := tlog.NewTiles(tileHeight, l.tree.N, n)
+	tiles := tlogx.NewTilesForSize(tileHeight, l.tree.N, n)
 	for _, tile := range tiles {
 		data, err := tlog.ReadTileData(tile, hashReader)
 		if err != nil {
