@@ -1,9 +1,11 @@
 package ctlog
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,68 +71,100 @@ func (l *Log) Handler() http.Handler {
 	addPreChain = promhttp.InstrumentHandlerDuration(l.m.duration.MustCurryWith(addPreChainLabels), addPreChain)
 	addPreChain = promhttp.InstrumentHandlerInFlight(l.m.inFlight.With(addPreChainLabels), addPreChain)
 
+	getRootsLabels := prometheus.Labels{"endpoint": "get-roots"}
+	getRoots := http.Handler(http.HandlerFunc(l.getRoots))
+	getRoots = promhttp.InstrumentHandlerCounter(l.m.requests.MustCurryWith(getRootsLabels), getRoots)
+	getRoots = promhttp.InstrumentHandlerDuration(l.m.duration.MustCurryWith(getRootsLabels), getRoots)
+	getRoots = promhttp.InstrumentHandlerInFlight(l.m.inFlight.With(getRootsLabels), getRoots)
+
 	mux := http.NewServeMux()
 	mux.Handle("/ct/v1/add-chain", addChain)
 	mux.Handle("/ct/v1/add-pre-chain", addPreChain)
+	mux.Handle("/ct/v1/get-roots", getRoots)
 	return http.MaxBytesHandler(mux, 128*1024)
 }
 
 func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
-	l.addChainOrPreChain(rw, r, func(le *LogEntry) error {
+	if r.Method != "POST" {
+		l.c.Log.DebugContext(r.Context(), "got a non-POST request to add-chain", "method", r.Method)
+		http.Error(rw, fmt.Sprintf("unsupported method %q", r.Method), http.StatusMethodNotAllowed)
+		return
+	}
+
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *LogEntry) error {
 		if le.IsPrecert {
 			return fmt.Errorf("pre-certificate submitted to add-chain")
 		}
 		return nil
 	})
+	if err != nil {
+		l.c.Log.DebugContext(r.Context(), "add-chain error", "code", code, "err", err)
+		http.Error(rw, err.Error(), code)
+		return
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(code)
+	if _, err := rw.Write(rsp); err != nil {
+		l.c.Log.DebugContext(r.Context(), "failed to write add-chain response", "err", err)
+		return
+	}
 }
 
 func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
-	l.addChainOrPreChain(rw, r, func(le *LogEntry) error {
+	if r.Method != "POST" {
+		l.c.Log.DebugContext(r.Context(), "got a non-POST request to add-pre-chain", "method", r.Method)
+		http.Error(rw, fmt.Sprintf("unsupported method %q", r.Method), http.StatusMethodNotAllowed)
+		return
+	}
+
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *LogEntry) error {
 		if !le.IsPrecert {
 			return fmt.Errorf("final certificate submitted to add-pre-chain")
 		}
 		return nil
 	})
-}
-
-func (l *Log) addChainOrPreChain(rw http.ResponseWriter, r *http.Request, checkType func(*LogEntry) error) {
-	if r.Method != "POST" {
-		http.Error(rw, fmt.Sprintf("unsupported method %q", r.Method), http.StatusMethodNotAllowed)
+	if err != nil {
+		l.c.Log.DebugContext(r.Context(), "add-pre-chain error", "code", code, "err", err)
+		http.Error(rw, err.Error(), code)
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(rw, fmt.Sprintf("failed to read body: %s", err), http.StatusInternalServerError)
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(code)
+	if _, err := rw.Write(rsp); err != nil {
+		l.c.Log.DebugContext(r.Context(), "failed to write add-pre-chain response", "err", err)
 		return
+	}
+}
+
+func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*LogEntry) error) (response []byte, code int, err error) {
+	body, err := io.ReadAll(reqBody)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to read body: %s", err)
 	}
 	var req struct {
 		Chain [][]byte
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(rw, fmt.Sprintf("failed to parse request: %s", err), http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, fmt.Errorf("failed to parse request: %s", err)
 	}
 	if len(req.Chain) == 0 {
-		http.Error(rw, "empty chain", http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, errors.New("empty chain")
 	}
 
 	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.c.Roots, time.Time{}, true, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
 	if err != nil {
-		http.Error(rw, fmt.Sprintf("invalid chain: %s", err), http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid chain: %s", err)
 	}
 
 	e := &LogEntry{Certificate: chain[0].Raw}
 	issuers := chain[1:]
 	if isPrecert, err := ctfe.IsPrecertificate(chain[0]); err != nil {
-		http.Error(rw, fmt.Sprintf("invalid precertificate: %s", err), http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid precertificate: %s", err)
 	} else if isPrecert {
 		if len(issuers) == 0 {
-			http.Error(rw, "missing precertificate issuer", http.StatusBadRequest)
-			return
+			return nil, http.StatusBadRequest, errors.New("missing precertificate issuer")
 		}
 
 		var preIssuer *x509.Certificate
@@ -138,15 +172,13 @@ func (l *Log) addChainOrPreChain(rw http.ResponseWriter, r *http.Request, checkT
 			preIssuer = issuers[0]
 			issuers = issuers[1:]
 			if len(issuers) == 0 {
-				http.Error(rw, "missing precertificate signing certificate issuer", http.StatusBadRequest)
-				return
+				return nil, http.StatusBadRequest, errors.New("missing precertificate signing certificate issuer")
 			}
 		}
 
 		defangedTBS, err := x509.BuildPrecertTBS(chain[0].RawTBSCertificate, preIssuer)
 		if err != nil {
-			http.Error(rw, fmt.Sprintf("failed to build TBSCertificate: %s", err), http.StatusInternalServerError)
-			return
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to build TBSCertificate: %s", err)
 		}
 
 		e.IsPrecert = true
@@ -158,17 +190,15 @@ func (l *Log) addChainOrPreChain(rw http.ResponseWriter, r *http.Request, checkT
 		e.IssuerKeyHash = sha256.Sum256(issuers[0].RawSubjectPublicKeyInfo)
 	}
 	if err := checkType(e); err != nil {
-		http.Error(rw, err.Error(), http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, err
 	}
 
 	// TODO: upload any new issuers.
 
 	waitLeaf := l.addLeafToPool(e)
-	seq, err := waitLeaf(r.Context())
+	seq, err := waitLeaf(ctx)
 	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 
 	// The digitally-signed data of an SCT is technically not a MerkleTreeLeaf,
@@ -177,8 +207,7 @@ func (l *Log) addChainOrPreChain(rw http.ResponseWriter, r *http.Request, checkT
 	// MerkleLeafType of value 0 and length 1.
 	sctSignature, err := digitallySign(l.c.Key, seq.MerkleTreeLeaf())
 	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, err
 	}
 
 	rsp, err := json.Marshal(&ct.AddChainResponse{
@@ -189,13 +218,30 @@ func (l *Log) addChainOrPreChain(rw http.ResponseWriter, r *http.Request, checkT
 		Signature:  sctSignature,
 	})
 	if err != nil {
-		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return nil, http.StatusInternalServerError, err
+	}
+
+	return rsp, http.StatusOK, nil
+}
+
+func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		l.c.Log.DebugContext(r.Context(), "got a non-GET request to get-roots", "method", r.Method)
+		http.Error(rw, fmt.Sprintf("unsupported method %q", r.Method), http.StatusMethodNotAllowed)
 		return
 	}
 
+	roots := l.c.Roots.RawCertificates()
+	var res struct {
+		Certificates [][]byte `json:"certificates"`
+	}
+	res.Certificates = make([][]byte, 0, len(roots))
+	for _, r := range roots {
+		res.Certificates = append(res.Certificates, r.Raw)
+	}
+
 	rw.Header().Set("Content-Type", "application/json")
-	if _, err := rw.Write(rsp); err != nil {
-		// Too late for http.Error.
-		return
+	if err := json.NewEncoder(rw).Encode(res); err != nil {
+		l.c.Log.DebugContext(r.Context(), "failed to write get-roots response", "err", err)
 	}
 }
