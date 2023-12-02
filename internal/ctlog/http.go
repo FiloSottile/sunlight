@@ -265,7 +265,7 @@ func (l *Log) uploadIssuers(ctx context.Context, issuers []*x509.Certificate) er
 		}
 	}
 
-	err := l.c.Backend.UploadCompressible(ctx, "issuers.pem", pemIssuers.Bytes())
+	err := l.c.Backend.Upload(ctx, "issuers.pem", pemIssuers.Bytes())
 	l.c.Log.InfoContext(ctx, "uploaded issuers", "size", pemIssuers.Len(),
 		"old", oldCount, "new", len(l.issuers.RawCertificates()), "err", err)
 	return err

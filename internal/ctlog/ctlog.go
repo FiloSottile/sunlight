@@ -80,7 +80,7 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return errors.New("checkpoint file already exist, refusing to initialize log")
 	}
 
-	if err := config.Backend.UploadCompressible(ctx, "issuers.pem", []byte{}); err != nil {
+	if err := config.Backend.Upload(ctx, "issuers.pem", []byte{}); err != nil {
 		return fmt.Errorf("couldn't upload issuers.pem: %w", err)
 	}
 
@@ -233,7 +233,8 @@ type Backend interface {
 	// should be compressed before uploading if possible.
 	UploadCompressible(ctx context.Context, key string, data []byte) error
 
-	// Fetch can be called concurrently.
+	// Fetch can be called concurrently. It's expected to decompress any data
+	// uploaded by UploadCompressible.
 	Fetch(ctx context.Context, key string) ([]byte, error)
 
 	// Metrics returns the metrics to register for this log. The metrics should
