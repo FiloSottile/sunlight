@@ -244,7 +244,7 @@ func (s *CosignatureV1Signer) Verifier() note.Verifier         { return &s.verif
 // note signatures bearing the provided fixed value.
 func NewInjectedSigner(name string, alg uint8, key, sig []byte) (*InjectedSigner, error) {
 	if !isValidName(name) {
-		return nil, errors.New("invalid name")
+		return nil, fmt.Errorf("invalid name %q", name)
 	}
 
 	s := &InjectedSigner{}
@@ -274,7 +274,7 @@ func (s *InjectedSigner) Verifier() note.Verifier         { return &s.verifier }
 // TreeHeadSignature formatted per c2sp.org/checkpoint.
 func NewRFC6962Verifier(name string, key crypto.PublicKey) (*RFC6962Verifier, error) {
 	if !isValidName(name) {
-		return nil, errors.New("invalid name")
+		return nil, fmt.Errorf("invalid name %q", name)
 	}
 
 	pkix, err := x509.MarshalPKIXPublicKey(key)

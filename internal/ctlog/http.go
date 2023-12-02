@@ -144,13 +144,13 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*LogEntry) error) (response []byte, code int, err error) {
 	body, err := io.ReadAll(reqBody)
 	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to read body: %s", err)
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to read body: %w", err)
 	}
 	var req struct {
 		Chain [][]byte
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, http.StatusBadRequest, fmt.Errorf("failed to parse request: %s", err)
+		return nil, http.StatusBadRequest, fmt.Errorf("failed to parse request: %w", err)
 	}
 	if len(req.Chain) == 0 {
 		return nil, http.StatusBadRequest, errors.New("empty chain")
@@ -158,15 +158,17 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 
 	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.c.Roots, time.Time{}, true, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
 	if err != nil {
-		return nil, http.StatusBadRequest, fmt.Errorf("invalid chain: %s", err)
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid chain: %w", err)
 	}
 
 	e := &LogEntry{Certificate: chain[0].Raw}
 	issuers := chain[1:]
 	if isPrecert, err := ctfe.IsPrecertificate(chain[0]); err != nil {
-		return nil, http.StatusBadRequest, fmt.Errorf("invalid precertificate: %s", err)
+		l.c.Log.WarnContext(ctx, "invalid precertificate", "err", err, "body", body)
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid precertificate: %w", err)
 	} else if isPrecert {
 		if len(issuers) == 0 {
+			l.c.Log.WarnContext(ctx, "missing precertificate issuer", "err", err, "body", body)
 			return nil, http.StatusBadRequest, errors.New("missing precertificate issuer")
 		}
 
@@ -175,13 +177,15 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 			preIssuer = issuers[0]
 			issuers = issuers[1:]
 			if len(issuers) == 0 {
+				l.c.Log.WarnContext(ctx, "missing precertificate signing certificate issuer", "err", err, "body", body)
 				return nil, http.StatusBadRequest, errors.New("missing precertificate signing certificate issuer")
 			}
 		}
 
 		defangedTBS, err := x509.BuildPrecertTBS(chain[0].RawTBSCertificate, preIssuer)
 		if err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to build TBSCertificate: %s", err)
+			l.c.Log.ErrorContext(ctx, "failed to build TBSCertificate", "err", err, "body", body)
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to build TBSCertificate: %w", err)
 		}
 
 		e.IsPrecert = true
@@ -207,14 +211,14 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	l.issuersMu.RUnlock()
 	if newIssuers {
 		if err := l.uploadIssuers(ctx, issuers); err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to upload issuers: %s", err)
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to upload issuers: %w", err)
 		}
 	}
 
 	waitLeaf := l.addLeafToPool(e)
 	seq, err := waitLeaf(ctx)
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to sequence leaves: %w", err)
 	}
 
 	// The digitally-signed data of an SCT is technically not a MerkleTreeLeaf,
@@ -223,7 +227,8 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	// MerkleLeafType of value 0 and length 1.
 	sctSignature, err := digitallySign(l.c.Key, seq.MerkleTreeLeaf())
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
+		l.c.Log.ErrorContext(ctx, "failed to sign SCT", "err", err, "body", body)
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to sign SCT: %w", err)
 	}
 
 	rsp, err := json.Marshal(&ct.AddChainResponse{
@@ -234,7 +239,8 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		Signature:  sctSignature,
 	})
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
+		l.c.Log.ErrorContext(ctx, "failed to encode response", "err", err, "body", body)
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to encode response: %w", err)
 	}
 
 	return rsp, http.StatusOK, nil

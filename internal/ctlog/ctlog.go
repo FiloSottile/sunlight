@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -76,79 +77,88 @@ type Config struct {
 func CreateLog(ctx context.Context, config *Config) error {
 	_, err := config.Backend.Fetch(ctx, "checkpoint")
 	if err == nil {
-		return errors.New("STH file already exist, refusing to initialize log")
+		return errors.New("checkpoint file already exist, refusing to initialize log")
 	}
 
 	if err := config.Backend.UploadCompressible(ctx, "issuers.pem", []byte{}); err != nil {
-		return err
+		return fmt.Errorf("couldn't upload issuers.pem: %w", err)
 	}
 
 	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
 	if err != nil {
-		return err
+		return fmt.Errorf("couldn't marshal public key: %w", err)
 	}
 	logID := sha256.Sum256(pkix)
 
-	tree := treeWithTimestamp{tlog.Tree{}, timeNowUnixMilli()}
+	timestamp := timeNowUnixMilli()
+	tree := treeWithTimestamp{tlog.Tree{}, timestamp}
 	checkpoint, err := signTreeHead(config.Name, logID, config.Key, tree)
 	if err != nil {
-		return err
+		return fmt.Errorf("couldn't sign empty tree head: %w", err)
 	}
 
-	return config.Backend.Upload(ctx, "checkpoint", checkpoint)
+	if err := config.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
+		return fmt.Errorf("couldn't upload checkpoint: %w", err)
+	}
+
+	config.Log.InfoContext(ctx, "created log", "timestamp", timestamp,
+		"logID", base64.StdEncoding.EncodeToString(logID[:]))
+	return nil
 }
 
 func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't marshal public key: %w", err)
 	}
 	logID := sha256.Sum256(pkix)
 
 	sth, err := config.Backend.Fetch(ctx, "checkpoint")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't fetch checkpoint: %w", err)
 	}
+	config.Log.DebugContext(ctx, "loaded checkpoint", "checkpoint", sth)
 	v, err := tlogx.NewRFC6962Verifier(config.Name, config.Key.Public())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
 	}
 	var timestamp int64
 	v.Timestamp = func(t uint64) { timestamp = int64(t) }
 	n, err := note.Open(sth, note.VerifierList(v))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
 	}
 	c, err := tlogx.ParseCheckpoint(n.Text)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't parse checkpoint: %w", err)
 	}
 
 	if now := timeNowUnixMilli(); now < timestamp {
-		return nil, fmt.Errorf("current time %d is before STH time %d", now, timestamp)
+		return nil, fmt.Errorf("current time %d is before checkpoint time %d", now, timestamp)
 	}
 	if c.Origin != config.Name {
-		return nil, fmt.Errorf("STH name is %q, not %q", c.Origin, config.Name)
+		return nil, fmt.Errorf("checkpoint name is %q, not %q", c.Origin, config.Name)
 	}
 	tree := tlog.Tree{N: c.N, Hash: c.Hash}
 	if c.Extension != "" {
-		return nil, fmt.Errorf("unexpected STH extension %q", c.Extension)
+		return nil, fmt.Errorf("unexpected checkpoint extension %q", c.Extension)
 	}
 
 	pemIssuers, err := config.Backend.Fetch(ctx, "issuers.pem")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't fetch issuers.pem: %w", err)
 	}
+	config.Log.DebugContext(ctx, "loaded issuers.pem", "pem", pemIssuers)
 	issuers := x509util.NewPEMCertPool()
 	if len(pemIssuers) > 0 && !issuers.AppendCertsFromPEM(pemIssuers) {
 		return nil, errors.New("invalid issuers.pem")
 	}
 
-	config.Log.InfoContext(ctx, "loaded log", "size", tree.N, "timestamp", timestamp,
-		"issuers", len(issuers.RawCertificates()))
-
 	edgeTiles := make(map[int]tileWithBytes)
 	if c.N > 0 {
+		// Fetch the right-most edge tiles by reading the last leaf.
+		// TileHashReader will fetch and verify the right tiles as a
+		// side-effect.
 		if _, err := tlog.TileHashReader(tree, &tileReader{
 			fetch: func(key string) ([]byte, error) {
 				return config.Backend.Fetch(ctx, key)
@@ -160,30 +170,32 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 					}
 				}
 			}}).ReadHashes([]int64{tlog.StoredHashIndex(0, c.N-1)}); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("couldn't fetch right edge tiles: %w", err)
 		}
 
+		// Fetch the right-most data tile.
 		dataTile := edgeTiles[0]
 		dataTile.L = -1
 		dataTile.B, err = config.Backend.Fetch(ctx, dataTile.Path())
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("couldn't fetch right edge data tile: %w", err)
 		}
 		edgeTiles[-1] = dataTile
 
+		// Verify the data tile against the level 0 tile.
 		b := edgeTiles[-1].B
 		start := tileWidth * dataTile.N
 		for i := start; i < start+int64(dataTile.W); i++ {
 			e, rest, err := ReadTileLeaf(b)
 			if err != nil {
-				return nil, fmt.Errorf("invalid data tile %v", dataTile)
+				return nil, fmt.Errorf("invalid data tile %v: %w", dataTile.Tile, err)
 			}
 			b = rest
 
 			got := tlog.RecordHash(e.MerkleTreeLeaf())
 			exp, err := tlog.HashFromTile(edgeTiles[0].Tile, edgeTiles[0].B, tlog.StoredHashIndex(0, i))
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("couldn't extract hash for leaf %d: %w", i, err)
 			}
 			if got != exp {
 				return nil, fmt.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", i, got, exp)
@@ -193,6 +205,9 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	for _, t := range edgeTiles {
 		config.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
+
+	config.Log.InfoContext(ctx, "loaded log", "logID", base64.StdEncoding.EncodeToString(logID[:]),
+		"size", tree.N, "timestamp", timestamp, "issuers", len(issuers.RawCertificates()))
 
 	return &Log{
 		c:           config,
@@ -276,6 +291,7 @@ func (e *SequencedLogEntry) MerkleTreeLeaf() []byte {
 	return b.BytesOrPanic()
 }
 
+// timestampedEntry appends a RFC 6962 TimestampedEntry to b.
 func (e *SequencedLogEntry) timestampedEntry(b *cryptobyte.Builder) {
 	b.AddUint64(uint64(e.Timestamp))
 	if !e.IsPrecert {
@@ -295,7 +311,23 @@ func (e *SequencedLogEntry) timestampedEntry(b *cryptobyte.Builder) {
 	})
 }
 
+// Extensions returns the custom structure that's encoded in the
+// SignedCertificateTimestamp and TimestampedEntry extensions field.
 func (e *SequencedLogEntry) Extensions() []byte {
+	// enum {
+	//     leaf_index(0), (255)
+	// } ExtensionType;
+	//
+	// struct {
+	//     ExtensionType extension_type;
+	//     opaque extension_data<0..2^16-1>;
+	// } Extension;
+	//
+	// Extension CTExtensions<0..2^16-1>;
+	//
+	// uint8 uint40[5];
+	// uint40 LeafIndex;
+
 	b := &cryptobyte.Builder{}
 	b.AddUint8(0 /* extension_type = leaf_index */)
 	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
@@ -304,6 +336,7 @@ func (e *SequencedLogEntry) Extensions() []byte {
 	return b.BytesOrPanic()
 }
 
+// TileLeaf returns the custom structure that's encoded in data tiles.
 func (e *SequencedLogEntry) TileLeaf() []byte {
 	// struct {
 	//     TimestampedEntry timestamped_entry;
@@ -391,6 +424,7 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 	for {
 		select {
 		case <-ctx.Done():
+			l.c.Log.InfoContext(ctx, "sequencer stopped")
 			return ctx.Err()
 		case <-t.C:
 			l.poolMu.Lock()
@@ -399,6 +433,7 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 			l.poolMu.Unlock()
 
 			if err := l.sequencePool(ctx, p); err != nil {
+				l.c.Log.ErrorContext(ctx, "fatal sequencing error", "err", err)
 				return err
 			}
 		}
@@ -413,8 +448,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	defer func() {
 		if err != nil {
 			p.err = err
-			l.c.Log.WarnContext(ctx, "pool sequencing failed", "tree_size", l.tree.N,
-				"pool_size", len(p.pendingLeaves), "err", err)
+			l.c.Log.ErrorContext(ctx, "pool sequencing failed", "old_tree_size", l.tree.N,
+				"entries", len(p.pendingLeaves), "err", err)
 
 			// Non-fatal errors are delivered to the requests waiting on this
 			// pool, but do not break the sequencer loop.
@@ -440,6 +475,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 	edgeTiles := maps.Clone(l.edgeTiles)
 	var dataTile []byte
+	// Load the current partial data tile, if any.
 	if t, ok := edgeTiles[-1]; ok && t.W < tileWidth {
 		dataTile = bytes.Clone(t.B)
 	}
@@ -448,80 +484,95 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	n := l.tree.N
 	for _, leaf := range p.pendingLeaves {
 		leaf := &SequencedLogEntry{LogEntry: *leaf, Timestamp: timestamp, LeafIndex: n}
+		dataTile = append(dataTile, leaf.TileLeaf()...)
+
+		// Compute the new tree hashes and add them to the hashReader overlay
+		// (we will use them later to insert more leaves and finally to produce
+		// the new tiles).
 		hashes, err := tlog.StoredHashes(n, leaf.MerkleTreeLeaf(), hashReader)
 		if err != nil {
-			return fmt.Errorf("couldn't fetch stored hashes for leaf %d: %w", n, err)
+			return fmt.Errorf("couldn't compute new hashes for leaf %d: %w", n, err)
 		}
 		for i, h := range hashes {
 			id := tlog.StoredHashIndex(0, n) + int64(i)
 			newHashes[id] = h
 		}
-		dataTile = append(dataTile, leaf.TileLeaf()...)
 
 		n++
 
-		if n%tileWidth == 0 { // Data tile is full.
+		// If the data tile is full, upload it.
+		if n%tileWidth == 0 {
 			tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 			tile.L = -1
-			data := dataTile
-			edgeTiles[-1] = tileWithBytes{tile, data}
+			edgeTiles[-1] = tileWithBytes{tile, dataTile}
+			l.c.Log.DebugContext(ctx, "uploading full data tile",
+				"tree_size", n, "tile", tile, "size", len(dataTile))
+			tileCount++
+			data := dataTile // data is captured by the g.Go function.
 			g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), data) })
 			dataTile = nil
-			tileCount++
 		}
 	}
 
-	// Upload partial data tile.
+	// Upload leftover partial data tile, if any.
 	if n%tileWidth != 0 {
 		tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}
-		g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), dataTile) })
+		l.c.Log.DebugContext(ctx, "uploading partial data tile",
+			"tree_size", n, "tile", tile, "size", len(dataTile))
 		tileCount++
+		g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), dataTile) })
 	}
 
+	// Produce and upload new tree tiles.
 	tiles := tlogx.NewTilesForSize(tileHeight, l.tree.N, n)
 	for _, tile := range tiles {
+		tile := tile // tile is captured by the g.Go function.
 		data, err := tlog.ReadTileData(tile, hashReader)
 		if err != nil {
-			return err
+			return fmt.Errorf("couldn't generate tile %v: %w", tile, err)
 		}
-		tile := tile
-		if t, ok := edgeTiles[tile.L]; !ok || t.N < tile.N || (t.N == tile.N && t.W < tile.W) {
+		// Assuming NewTilesForSize produces tiles in order, this tile should
+		// always be further right than the one in edgeTiles, but double check.
+		if t0, ok := edgeTiles[tile.L]; !ok || t0.N < tile.N || (t0.N == tile.N && t0.W < tile.W) {
 			edgeTiles[tile.L] = tileWithBytes{tile, data}
 		}
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
+		l.c.Log.DebugContext(ctx, "uploading tree tile", "old_tree_size", l.tree.N,
+			"tree_size", n, "tile", tile, "size", len(data))
 		tileCount++
+		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
 	}
 
 	if err := g.Wait(); err != nil {
-		return err
+		return fmt.Errorf("couldn't upload a tile: %w", err)
 	}
 
 	rootHash, err := tlog.TreeHash(n, hashReader)
 	if err != nil {
-		return err
+		return fmt.Errorf("couldn't compute tree hash: %w", err)
 	}
 	tree := treeWithTimestamp{Tree: tlog.Tree{N: n, Hash: rootHash}, Time: timestamp}
 
 	checkpoint, err := signTreeHead(l.c.Name, l.logID, l.c.Key, tree)
 	if err != nil {
-		return err
+		return fmt.Errorf("couldn't sign checkpoint: %w", err)
 	}
+	l.c.Log.DebugContext(ctx, "uploading checkpoint", "size", len(checkpoint))
 	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
 		// This is a critical error, since if the STH actually got committed
 		// before the error we need to make very very sure we don't sign an
 		// inconsistent version next round.
-		return errors.Join(errFatal, err)
+		return errors.Join(errFatal, fmt.Errorf("couldn't upload checkpoint: %w", err))
 	}
 
-	l.c.Log.Info("sequenced pool",
-		"entries", n-l.tree.N, "size", tree.N,
-		"tiles", tileCount, "timestamp", timestamp,
-		"elapsed", time.Since(start))
 	for _, t := range edgeTiles {
 		l.c.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
+	l.c.Log.Info("sequenced pool",
+		"tree_size", tree.N, "entries", n-l.tree.N,
+		"tiles", tileCount, "timestamp", timestamp,
+		"elapsed", time.Since(start))
 
 	p.timestamp = timestamp
 	p.firstLeafIndex = l.tree.N
@@ -541,7 +592,7 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, t
 		SHA256RootHash: ct.SHA256Hash(tree.Hash),
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't serialize STH signature input: %w", err)
 	}
 
 	// We compute the signature here and inject it in a fixed note.Signer to
@@ -549,7 +600,7 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, t
 
 	treeHeadSignature, err := digitallySign(privKey, sthBytes)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't produce signature: %w", err)
 	}
 
 	// struct {
@@ -561,19 +612,23 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, t
 	b.AddBytes(treeHeadSignature)
 	sig, err := b.Bytes()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't encode RFC6962NoteSignature: %w", err)
 	}
 
 	signer, err := tlogx.NewInjectedSigner(name, 0x05, logID[:], sig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("couldn't construct signer: %w", err)
 	}
-	return note.Sign(&note.Note{
+	signedNote, err := note.Sign(&note.Note{
 		Text: tlogx.MarshalCheckpoint(tlogx.Checkpoint{
 			Origin: name,
 			N:      tree.N, Hash: tree.Hash,
 		}),
 	}, signer)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't sign note: %w", err)
+	}
+	return signedNote, nil
 }
 
 // digitallySign produces an encoded digitally-signed signature.
@@ -604,6 +659,7 @@ func digitallySign(k crypto.Signer, msg []byte) ([]byte, error) {
 	return b.Bytes()
 }
 
+// hashReader returns hashes from l.edgeTiles and from overlay.
 func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 	return func(indexes []int64) ([]tlog.Hash, error) {
 		list := make([]tlog.Hash, 0, len(indexes))
@@ -615,7 +671,7 @@ func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 			t := l.edgeTiles[tlog.TileForIndex(tileHeight, id).L]
 			h, err := tlog.HashFromTile(t.Tile, t.B, id)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("index %d not in overlay and %w", id, err)
 			}
 			list = append(list, h)
 		}
@@ -637,7 +693,7 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 	case 0: // x509_entry
 		if !s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
 			!s.ReadUint16LengthPrefixed(&extensions) {
-			return nil, s, errors.New("invalid data tile")
+			return nil, s, errors.New("invalid data tile x509_entry")
 		}
 	case 1: // precert_entry
 		e.IsPrecert = true
@@ -646,10 +702,10 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 			!s.ReadUint16LengthPrefixed(&extensions) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PrecertSigningCert)) {
-			return nil, s, errors.New("invalid data tile")
+			return nil, s, errors.New("invalid data tile precert_entry")
 		}
 	default:
-		return nil, s, fmt.Errorf("invalid data tile %v: unknown type %d", tile, entryType)
+		return nil, s, fmt.Errorf("invalid data tile: unknown type %d", entryType)
 	}
 	var extensionType uint8
 	var extensionData cryptobyte.String

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -43,7 +44,7 @@ func NewS3Backend(ctx context.Context, region, bucket string, l *slog.Logger) (*
 
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load AWS config for S3 backend: %w", err)
 	}
 
 	getLabels := prometheus.Labels{"action": "get"}
@@ -79,10 +80,10 @@ func (s *S3Backend) UploadCompressible(ctx context.Context, key string, data []b
 	b := &bytes.Buffer{}
 	w := gzip.NewWriter(b)
 	if _, err := w.Write(data); err != nil {
-		return err
+		return fmt.Errorf("failed to compress %q: %w", key, err)
 	}
 	if err := w.Close(); err != nil {
-		return err
+		return fmt.Errorf("failed to compress %q: %w", key, err)
 	}
 	return s.upload(ctx, key, b, b.Len(), aws.String("gzip"))
 }
@@ -99,7 +100,10 @@ func (s *S3Backend) upload(ctx context.Context, key string, data io.Reader, leng
 	})
 	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", length,
 		"compress", ce != nil, "elapsed", time.Since(start), "error", err)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to upload %q to S3: %w", key, err)
+	}
+	return nil
 }
 
 func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
@@ -109,10 +113,14 @@ func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch %q from S3: %w", key, err)
 	}
 	defer out.Body.Close()
-	return io.ReadAll(out.Body)
+	data, err := io.ReadAll(out.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %q from S3: %w", key, err)
+	}
+	return data, nil
 }
 
 func (s *S3Backend) Metrics() []prometheus.Collector {
