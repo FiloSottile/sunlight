@@ -195,6 +195,10 @@ type Backend interface {
 	// persisted. Upload can be called concurrently.
 	Upload(ctx context.Context, key string, data []byte) error
 
+	// UploadCompressible is like Upload, but the data is compressible and
+	// should be compressed before uploading if possible.
+	UploadCompressible(ctx context.Context, key string, data []byte) error
+
 	// Fetch can be called concurrently.
 	Fetch(ctx context.Context, key string) ([]byte, error)
 
@@ -421,7 +425,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 			tile.L = -1
 			data := dataTile
 			edgeTiles[-1] = tileWithBytes{tile, data}
-			g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
+			g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), data) })
 			dataTile = nil
 			tileCount++
 		}
@@ -432,7 +436,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 		tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), dataTile) })
+		g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), dataTile) })
 		tileCount++
 	}
 

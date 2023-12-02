@@ -2,6 +2,7 @@ package ctlog
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"log/slog"
@@ -71,15 +72,33 @@ func NewS3Backend(ctx context.Context, region, bucket string, l *slog.Logger) (*
 var _ Backend = &S3Backend{}
 
 func (s *S3Backend) Upload(ctx context.Context, key string, data []byte) error {
+	return s.upload(ctx, key, bytes.NewReader(data), len(data), nil)
+}
+
+func (s *S3Backend) UploadCompressible(ctx context.Context, key string, data []byte) error {
+	b := &bytes.Buffer{}
+	w := gzip.NewWriter(b)
+	if _, err := w.Write(data); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return s.upload(ctx, key, b, b.Len(), aws.String("gzip"))
+}
+
+func (s *S3Backend) upload(ctx context.Context, key string, data io.Reader, length int, ce *string) error {
 	start := time.Now()
 	// TODO: give up on slow requests and retry.
 	_, err := s.putClient.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-		Body:   bytes.NewReader(data),
+		Bucket:          aws.String(s.bucket),
+		Key:             aws.String(key),
+		Body:            data,
+		ContentLength:   aws.Int64(int64(length)),
+		ContentEncoding: ce,
 	})
-	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", len(data),
-		"elapsed", time.Since(start), "error", err)
+	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", length,
+		"compress", ce != nil, "elapsed", time.Since(start), "error", err)
 	return err
 }
 
