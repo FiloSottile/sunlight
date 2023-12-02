@@ -41,6 +41,9 @@ type Log struct {
 	// will never add to a pool that already started sequencing.
 	poolMu      sync.Mutex
 	currentPool *pool
+
+	issuersMu sync.RWMutex
+	issuers   *x509util.PEMCertPool
 }
 
 type treeWithTimestamp struct {
@@ -73,6 +76,10 @@ func CreateLog(ctx context.Context, config *Config) error {
 	_, err := config.Backend.Fetch(ctx, "checkpoint")
 	if err == nil {
 		return errors.New("STH file already exist, refusing to initialize log")
+	}
+
+	if err := config.Backend.UploadCompressible(ctx, "issuers.pem", []byte{}); err != nil {
+		return err
 	}
 
 	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
@@ -127,7 +134,17 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		return nil, fmt.Errorf("unexpected STH extension %q", c.Extension)
 	}
 
-	config.Log.InfoContext(ctx, "loaded log", "size", tree.N, "timestamp", timestamp)
+	pemIssuers, err := config.Backend.Fetch(ctx, "issuers.pem")
+	if err != nil {
+		return nil, err
+	}
+	issuers := x509util.NewPEMCertPool()
+	if len(pemIssuers) > 0 && !issuers.AppendCertsFromPEM(pemIssuers) {
+		return nil, errors.New("invalid issuers.pem")
+	}
+
+	config.Log.InfoContext(ctx, "loaded log", "size", tree.N, "timestamp", timestamp,
+		"issuers", len(issuers.RawCertificates()))
 
 	edgeTiles := make(map[int]tileWithBytes)
 	if c.N > 0 {
@@ -179,10 +196,11 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	return &Log{
 		c:           config,
 		logID:       logID,
+		m:           initMetrics(),
 		tree:        treeWithTimestamp{tree, timestamp},
 		edgeTiles:   edgeTiles,
 		currentPool: &pool{done: make(chan struct{})},
-		m:           initMetrics(),
+		issuers:     issuers,
 	}, nil
 }
 

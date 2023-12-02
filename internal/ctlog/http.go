@@ -1,10 +1,12 @@
 package ctlog
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/trillian/ctfe"
 	"github.com/google/certificate-transparency-go/x509"
+	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -193,7 +196,20 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		return nil, http.StatusBadRequest, err
 	}
 
-	// TODO: upload any new issuers.
+	var newIssuers bool
+	l.issuersMu.RLock()
+	for _, issuer := range issuers {
+		if !l.issuers.Included(issuer) {
+			l.c.Log.InfoContext(ctx, "new issuer", "issuer", x509util.NameToString(issuer.Subject))
+			newIssuers = true
+		}
+	}
+	l.issuersMu.RUnlock()
+	if newIssuers {
+		if err := l.uploadIssuers(ctx, issuers); err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to upload issuers: %s", err)
+		}
+	}
 
 	waitLeaf := l.addLeafToPool(e)
 	seq, err := waitLeaf(ctx)
@@ -222,6 +238,31 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	}
 
 	return rsp, http.StatusOK, nil
+}
+
+func (l *Log) uploadIssuers(ctx context.Context, issuers []*x509.Certificate) error {
+	l.issuersMu.Lock()
+	defer l.issuersMu.Unlock()
+
+	oldCount := len(l.issuers.RawCertificates())
+	for _, issuer := range issuers {
+		l.issuers.AddCert(issuer)
+	}
+
+	pemIssuers := &bytes.Buffer{}
+	for _, c := range l.issuers.RawCertificates() {
+		if err := pem.Encode(pemIssuers, &pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: c.Raw,
+		}); err != nil {
+			return err
+		}
+	}
+
+	err := l.c.Backend.UploadCompressible(ctx, "issuers.pem", pemIssuers.Bytes())
+	l.c.Log.InfoContext(ctx, "uploaded issuers", "size", pemIssuers.Len(),
+		"old", oldCount, "new", len(l.issuers.RawCertificates()), "err", err)
+	return err
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {

@@ -268,7 +268,7 @@ func (b *MemoryBackend) UploadCompressible(ctx context.Context, key string, data
 
 func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte) error {
 	// TODO: check key format is expected.
-	if len(data) == 0 {
+	if len(data) == 0 && key != "issuers.pem" {
 		b.t.Errorf("uploaded key %q with empty data", key)
 	}
 	if err := ctx.Err(); err != nil {
