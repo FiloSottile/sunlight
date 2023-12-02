@@ -32,12 +32,13 @@ type Log struct {
 	logID [sha256.Size]byte
 	m     metrics
 
+	// tree and edgeTiles are owned by sequencePool.
 	tree treeWithTimestamp
 	// edgeTiles is a map from level to the right-most tile of that level.
 	edgeTiles map[int]tileWithBytes
 
 	// poolMu is held for the entire duration of addLeafToPool, and by
-	// sequencePool while swapping the pool. This guarantees that addLeafToPool
+	// RunSequencer while swapping the pool. This guarantees that addLeafToPool
 	// will never add to a pool that already started sequencing.
 	poolMu      sync.Mutex
 	currentPool *pool
@@ -364,6 +365,9 @@ func (l *Log) addLeafToPool(leaf *LogEntry) func(ctx context.Context) (*Sequence
 			if p.err != nil {
 				return nil, p.err
 			}
+			if p.timestamp == 0 {
+				panic("internal error: pool is ready but result is missing")
+			}
 			return &SequencedLogEntry{
 				LogEntry:  *leaf,
 				LeafIndex: p.firstLeafIndex + int64(n),
@@ -374,13 +378,14 @@ func (l *Log) addLeafToPool(leaf *LogEntry) func(ctx context.Context) (*Sequence
 }
 
 func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error) {
+	// If the sequencer stops, return errors for all pending and future leaves.
 	defer func() {
 		l.poolMu.Lock()
-		p := l.currentPool
-		l.poolMu.Unlock()
-		p.err = err
-		close(p.done)
+		defer l.poolMu.Unlock()
+		l.currentPool.err = err
+		close(l.currentPool.done)
 	}()
+
 	t := time.NewTicker(period)
 	defer t.Stop()
 	for {
@@ -392,9 +397,8 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 			p := l.currentPool
 			l.currentPool = &pool{done: make(chan struct{})}
 			l.poolMu.Unlock()
+
 			if err := l.sequencePool(ctx, p); err != nil {
-				p.err = err
-				close(p.done)
 				return err
 			}
 		}
@@ -403,7 +407,25 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 
 const sequenceTimeout = 5 * time.Second
 
-func (l *Log) sequencePool(ctx context.Context, p *pool) error {
+var errFatal = errors.New("fatal sequencing error")
+
+func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
+	defer func() {
+		if err != nil {
+			p.err = err
+			l.c.Log.WarnContext(ctx, "pool sequencing failed", "tree_size", l.tree.N,
+				"pool_size", len(p.pendingLeaves), "err", err)
+
+			// Non-fatal errors are delivered to the requests waiting on this
+			// pool, but do not break the sequencer loop.
+			if !errors.Is(err, errFatal) {
+				err = nil
+			}
+		}
+
+		close(p.done)
+	}()
+
 	var tileCount int
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, sequenceTimeout)
@@ -413,7 +435,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 
 	timestamp := timeNowUnixMilli()
 	if timestamp <= l.tree.Time {
-		return fmt.Errorf("time did not progress! %d -> %d", l.tree.Time, timestamp)
+		return errors.Join(errFatal, fmt.Errorf("time did not progress! %d -> %d", l.tree.Time, timestamp))
 	}
 
 	edgeTiles := maps.Clone(l.edgeTiles)
@@ -487,10 +509,10 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 		return err
 	}
 	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
-		// TODO: this is a critical error to handle, since if the STH actually
-		// got committed before the error we need to make very very sure we
-		// don't sign an inconsistent version when we retry.
-		return err
+		// This is a critical error, since if the STH actually got committed
+		// before the error we need to make very very sure we don't sign an
+		// inconsistent version next round.
+		return errors.Join(errFatal, err)
 	}
 
 	l.c.Log.Info("sequenced pool",
@@ -501,7 +523,6 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) error {
 		l.c.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
 
-	defer close(p.done)
 	p.timestamp = timestamp
 	p.firstLeafIndex = l.tree.N
 	l.tree = tree
