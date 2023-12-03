@@ -3,6 +3,8 @@ package ctlog_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
 	"flag"
@@ -115,9 +117,6 @@ func TestReloadLog(t *testing.T) {
 
 func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Context) (*ctlog.SequencedLogEntry, error)) {
 	// TODO: test reloading after uploading tiles but before uploading STH.
-	// This will be related to how partial tiles are handled, and tile trailing
-	// data GREASE.
-
 	tl := NewEmptyTestLog(t)
 	n := int64(1024 + 2)
 	if testing.Short() {
@@ -168,6 +167,32 @@ func TestSubmit(t *testing.T) {
 	_, err := logClient.AddChain(context.Background(), []ct.ASN1Cert{
 		{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
 	fatalIfErr(t, err)
+}
+
+func TestReloadWrongName(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	_, err := ctlog.LoadLog(context.Background(), tl.Config)
+	fatalIfErr(t, err)
+
+	c := tl.Config
+	c.Name = "wrong"
+	if _, err := ctlog.LoadLog(context.Background(), c); err == nil {
+		t.Error("expected loading to fail")
+	}
+}
+
+func TestReloadWrongKey(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	_, err := ctlog.LoadLog(context.Background(), tl.Config)
+	fatalIfErr(t, err)
+
+	c := tl.Config
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	fatalIfErr(t, err)
+	c.Key = key
+	if _, err := ctlog.LoadLog(context.Background(), c); err == nil {
+		t.Error("expected loading to fail")
+	}
 }
 
 func TestSubmitPrecert(t *testing.T) {
