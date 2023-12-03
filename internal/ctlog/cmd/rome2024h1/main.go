@@ -17,6 +17,7 @@ import (
 	"filippo.io/litetlog/internal/ctlog"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -76,10 +77,11 @@ func main() {
 	}
 
 	metrics := prometheus.NewRegistry()
-	prometheus.WrapRegistererWith(
-		prometheus.Labels{"log": "rome2024h1"},
-		prometheus.WrapRegistererWithPrefix("sunlight_", metrics),
-	).MustRegister(l.Metrics()...)
+	registry := prometheus.WrapRegistererWithPrefix("sunlight_", metrics)
+	registry.MustRegister(collectors.NewGoCollector())
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	prometheus.WrapRegistererWith(prometheus.Labels{"log": "rome2024h1"},
+		registry).MustRegister(l.Metrics()...)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)

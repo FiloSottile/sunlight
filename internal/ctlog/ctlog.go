@@ -209,10 +209,15 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	config.Log.InfoContext(ctx, "loaded log", "logID", base64.StdEncoding.EncodeToString(logID[:]),
 		"size", tree.N, "timestamp", timestamp, "issuers", len(issuers.RawCertificates()))
 
+	m := initMetrics()
+	m.ConfigRoots.Set(float64(len(config.Roots.RawCertificates())))
+	m.ConfigStart.Set(float64(config.NotAfterStart.Unix()))
+	m.ConfigEnd.Set(float64(config.NotAfterLimit.Unix()))
+
 	return &Log{
 		c:           config,
 		logID:       logID,
-		m:           initMetrics(),
+		m:           m,
 		tree:        treeWithTimestamp{tree, timestamp},
 		edgeTiles:   edgeTiles,
 		currentPool: &pool{done: make(chan struct{})},
@@ -446,23 +451,28 @@ const sequenceTimeout = 5 * time.Second
 var errFatal = errors.New("fatal sequencing error")
 
 func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
+	defer prometheus.NewTimer(l.m.SeqDuration).ObserveDuration()
 	defer func() {
 		if err != nil {
 			p.err = err
 			l.c.Log.ErrorContext(ctx, "pool sequencing failed", "old_tree_size", l.tree.N,
 				"entries", len(p.pendingLeaves), "err", err)
+			l.m.SeqCount.With(prometheus.Labels{"result": "error"}).Inc()
 
 			// Non-fatal errors are delivered to the requests waiting on this
 			// pool, but do not break the sequencer loop.
 			if !errors.Is(err, errFatal) {
 				err = nil
 			}
+		} else {
+			l.m.SeqCount.With(prometheus.Labels{"result": "ok"}).Inc()
 		}
+		l.m.SeqSize.Observe(float64(len(p.pendingLeaves)))
 
 		close(p.done)
 	}()
 
-	var tileCount int
+	var tileCount, dataTilesSize int
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, sequenceTimeout)
 	defer cancel()
@@ -479,6 +489,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	// Load the current partial data tile, if any.
 	if t, ok := edgeTiles[-1]; ok && t.W < tileWidth {
 		dataTile = bytes.Clone(t.B)
+		dataTilesSize -= len(dataTile)
 	}
 	newHashes := make(map[int64]tlog.Hash)
 	hashReader := l.hashReader(newHashes)
@@ -509,6 +520,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			l.c.Log.DebugContext(ctx, "uploading full data tile",
 				"tree_size", n, "tile", tile, "size", len(dataTile))
 			tileCount++
+			dataTilesSize += len(dataTile)
 			data := dataTile // data is captured by the g.Go function.
 			g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), data) })
 			dataTile = nil
@@ -523,6 +535,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		l.c.Log.DebugContext(ctx, "uploading partial data tile",
 			"tree_size", n, "tile", tile, "size", len(dataTile))
 		tileCount++
+		dataTilesSize += len(dataTile)
 		g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), dataTile) })
 	}
 
@@ -574,6 +587,10 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		"tree_size", tree.N, "entries", n-l.tree.N,
 		"tiles", tileCount, "timestamp", timestamp,
 		"elapsed", time.Since(start))
+	l.m.SeqTiles.Add(float64(tileCount))
+	l.m.SeqDataTileSize.Add(float64(dataTilesSize))
+	l.m.TreeSize.Set(float64(tree.N))
+	l.m.TreeTime.Set(float64(timestamp) / 1000)
 
 	p.timestamp = timestamp
 	p.firstLeafIndex = l.tree.N

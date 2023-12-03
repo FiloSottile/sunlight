@@ -21,64 +21,24 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type metrics struct {
-	inFlight *prometheus.GaugeVec
-	requests *prometheus.CounterVec
-	duration *prometheus.SummaryVec
-}
-
-func initMetrics() metrics {
-	m := metrics{}
-	m.inFlight = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "in_flight_requests",
-		},
-		[]string{"endpoint"},
-	)
-	m.requests = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "requests_total",
-		},
-		[]string{"endpoint", "code"},
-	)
-	m.duration = prometheus.NewSummaryVec(
-		prometheus.SummaryOpts{
-			Name:       "request_duration_seconds",
-			Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
-			MaxAge:     1 * time.Minute,
-			AgeBuckets: 6,
-		},
-		[]string{"endpoint", "code"},
-	)
-	return m
-}
-
-func (l *Log) Metrics() []prometheus.Collector {
-	return append([]prometheus.Collector{
-		l.m.duration,
-		l.m.inFlight,
-		l.m.requests,
-	}, l.c.Backend.Metrics()...)
-}
-
 func (l *Log) Handler() http.Handler {
 	addChainLabels := prometheus.Labels{"endpoint": "add-chain"}
 	addChain := http.Handler(http.HandlerFunc(l.addChain))
-	addChain = promhttp.InstrumentHandlerCounter(l.m.requests.MustCurryWith(addChainLabels), addChain)
-	addChain = promhttp.InstrumentHandlerDuration(l.m.duration.MustCurryWith(addChainLabels), addChain)
-	addChain = promhttp.InstrumentHandlerInFlight(l.m.inFlight.With(addChainLabels), addChain)
+	addChain = promhttp.InstrumentHandlerCounter(l.m.ReqCount.MustCurryWith(addChainLabels), addChain)
+	addChain = promhttp.InstrumentHandlerDuration(l.m.ReqDuration.MustCurryWith(addChainLabels), addChain)
+	addChain = promhttp.InstrumentHandlerInFlight(l.m.ReqInFlight.With(addChainLabels), addChain)
 
 	addPreChainLabels := prometheus.Labels{"endpoint": "add-pre-chain"}
 	addPreChain := http.Handler(http.HandlerFunc(l.addPreChain))
-	addPreChain = promhttp.InstrumentHandlerCounter(l.m.requests.MustCurryWith(addPreChainLabels), addPreChain)
-	addPreChain = promhttp.InstrumentHandlerDuration(l.m.duration.MustCurryWith(addPreChainLabels), addPreChain)
-	addPreChain = promhttp.InstrumentHandlerInFlight(l.m.inFlight.With(addPreChainLabels), addPreChain)
+	addPreChain = promhttp.InstrumentHandlerCounter(l.m.ReqCount.MustCurryWith(addPreChainLabels), addPreChain)
+	addPreChain = promhttp.InstrumentHandlerDuration(l.m.ReqDuration.MustCurryWith(addPreChainLabels), addPreChain)
+	addPreChain = promhttp.InstrumentHandlerInFlight(l.m.ReqInFlight.With(addPreChainLabels), addPreChain)
 
 	getRootsLabels := prometheus.Labels{"endpoint": "get-roots"}
 	getRoots := http.Handler(http.HandlerFunc(l.getRoots))
-	getRoots = promhttp.InstrumentHandlerCounter(l.m.requests.MustCurryWith(getRootsLabels), getRoots)
-	getRoots = promhttp.InstrumentHandlerDuration(l.m.duration.MustCurryWith(getRootsLabels), getRoots)
-	getRoots = promhttp.InstrumentHandlerInFlight(l.m.inFlight.With(getRootsLabels), getRoots)
+	getRoots = promhttp.InstrumentHandlerCounter(l.m.ReqCount.MustCurryWith(getRootsLabels), getRoots)
+	getRoots = promhttp.InstrumentHandlerDuration(l.m.ReqDuration.MustCurryWith(getRootsLabels), getRoots)
+	getRoots = promhttp.InstrumentHandlerInFlight(l.m.ReqInFlight.With(getRootsLabels), getRoots)
 
 	mux := http.NewServeMux()
 	mux.Handle("/ct/v1/add-chain", addChain)
@@ -268,6 +228,7 @@ func (l *Log) uploadIssuers(ctx context.Context, issuers []*x509.Certificate) er
 	err := l.c.Backend.Upload(ctx, "issuers.pem", pemIssuers.Bytes())
 	l.c.Log.InfoContext(ctx, "uploaded issuers", "size", pemIssuers.Len(),
 		"old", oldCount, "new", len(l.issuers.RawCertificates()), "err", err)
+	l.m.Issuers.Set(float64(len(l.issuers.RawCertificates())))
 	return err
 }
 
