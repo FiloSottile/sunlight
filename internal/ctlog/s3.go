@@ -85,10 +85,10 @@ func (s *S3Backend) UploadCompressible(ctx context.Context, key string, data []b
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("failed to compress %q: %w", key, err)
 	}
-	return s.upload(ctx, key, b, b.Len(), aws.String("gzip"))
+	return s.upload(ctx, key, bytes.NewReader(b.Bytes()), b.Len(), aws.String("gzip"))
 }
 
-func (s *S3Backend) upload(ctx context.Context, key string, data io.Reader, length int, ce *string) error {
+func (s *S3Backend) upload(ctx context.Context, key string, data io.ReadSeeker, length int, ce *string) error {
 	start := time.Now()
 	// TODO: give up on slow requests and retry.
 	_, err := s.putClient.PutObject(ctx, &s3.PutObjectInput{
