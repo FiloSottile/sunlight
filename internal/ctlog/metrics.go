@@ -1,7 +1,9 @@
 package ctlog
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,6 +28,9 @@ type metrics struct {
 	ConfigEnd   prometheus.Gauge
 
 	Issuers prometheus.Gauge
+
+	AddChainCount *prometheus.CounterVec
+	AddChainWait  prometheus.Summary
 }
 
 func initMetrics() metrics {
@@ -58,9 +63,9 @@ func initMetrics() metrics {
 		SeqCount: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "sequencing_rounds_total",
-				Help: "Number of sequencing rounds, by whether they are successful.",
+				Help: "Number of sequencing rounds, by error category if failed.",
 			},
-			[]string{"result"},
+			[]string{"error"},
 		),
 		SeqSize: prometheus.NewSummary(
 			prometheus.SummaryOpts{
@@ -131,6 +136,23 @@ func initMetrics() metrics {
 				Help: "Number of certificates in the issuers bundle.",
 			},
 		),
+
+		AddChainCount: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "addchain_requests_total",
+				Help: "Number of add-[pre-]chain requests, by chain characteristics and errors if any.",
+			},
+			[]string{"error", "issuer", "root", "precert", "preissuer", "chain_len"},
+		),
+		AddChainWait: prometheus.NewSummary(
+			prometheus.SummaryOpts{
+				Name:       "addchain_wait_seconds",
+				Help:       "Duration of add-[pre-]chain pauses waiting for a leaf to be sequenced.",
+				Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
+				MaxAge:     1 * time.Minute,
+				AgeBuckets: 6,
+			},
+		),
 	}
 }
 
@@ -140,4 +162,21 @@ func (l *Log) Metrics() []prometheus.Collector {
 		collectors = append(collectors, reflect.ValueOf(l.m).Field(i).Interface().(prometheus.Collector))
 	}
 	return append(collectors, l.c.Backend.Metrics()...)
+}
+
+type categoryError struct {
+	category string
+	err      error
+}
+
+func (e categoryError) Error() string { return e.err.Error() }
+func (e categoryError) Unwrap() error { return e.err }
+
+// fmtErrorf returns an error like fmt.Errorf, but with a category derived from
+// the format suitable for a metrics label.
+func fmtErrorf(format string, args ...interface{}) error {
+	category, _, _ := strings.Cut(format, ":")
+	category, _, _ = strings.Cut(category, "%")
+	category = strings.TrimSpace(category)
+	return categoryError{category: category, err: fmt.Errorf(format, args...)}
 }

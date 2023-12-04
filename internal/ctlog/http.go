@@ -56,7 +56,7 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 
 	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *LogEntry) error {
 		if le.IsPrecert {
-			return fmt.Errorf("pre-certificate submitted to add-chain")
+			return fmtErrorf("pre-certificate submitted to add-chain")
 		}
 		return nil
 	})
@@ -83,7 +83,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 
 	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *LogEntry) error {
 		if !le.IsPrecert {
-			return fmt.Errorf("final certificate submitted to add-pre-chain")
+			return fmtErrorf("final certificate submitted to add-pre-chain")
 		}
 		return nil
 	})
@@ -102,50 +102,67 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*LogEntry) error) (response []byte, code int, err error) {
+	labels := prometheus.Labels{"error": "", "issuer": "", "root": "",
+		"precert": "", "preissuer": "", "chain_len": ""}
+	defer func() {
+		if categoryErr := (categoryError{}); errors.As(err, &categoryErr) {
+			labels["error"] = categoryErr.category
+		} else if err != nil {
+			labels["error"] = "?"
+		}
+		l.m.AddChainCount.With(labels).Inc()
+	}()
+
 	body, err := io.ReadAll(reqBody)
 	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to read body: %w", err)
+		return nil, http.StatusInternalServerError, fmtErrorf("failed to read body: %w", err)
 	}
 	var req struct {
 		Chain [][]byte
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, http.StatusBadRequest, fmt.Errorf("failed to parse request: %w", err)
+		return nil, http.StatusBadRequest, fmtErrorf("failed to parse request: %w", err)
 	}
+	labels["chain_len"] = fmt.Sprintf("%d", len(req.Chain))
 	if len(req.Chain) == 0 {
-		return nil, http.StatusBadRequest, errors.New("empty chain")
+		return nil, http.StatusBadRequest, fmtErrorf("empty chain")
 	}
 
 	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.c.Roots, time.Time{}, true, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
 	if err != nil {
-		return nil, http.StatusBadRequest, fmt.Errorf("invalid chain: %w", err)
+		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: %w", err)
 	}
+	labels["root"] = x509util.NameToString(chain[len(chain)-1].Subject)
+	labels["issuer"] = x509util.NameToString(chain[0].Issuer)
 
 	e := &LogEntry{Certificate: chain[0].Raw}
 	issuers := chain[1:]
 	if isPrecert, err := ctfe.IsPrecertificate(chain[0]); err != nil {
 		l.c.Log.WarnContext(ctx, "invalid precertificate", "err", err, "body", body)
-		return nil, http.StatusBadRequest, fmt.Errorf("invalid precertificate: %w", err)
+		return nil, http.StatusBadRequest, fmtErrorf("invalid precertificate: %w", err)
 	} else if isPrecert {
+		labels["precert"] = "true"
 		if len(issuers) == 0 {
 			l.c.Log.WarnContext(ctx, "missing precertificate issuer", "err", err, "body", body)
-			return nil, http.StatusBadRequest, errors.New("missing precertificate issuer")
+			return nil, http.StatusBadRequest, fmtErrorf("missing precertificate issuer")
 		}
 
 		var preIssuer *x509.Certificate
 		if ct.IsPreIssuer(issuers[0]) {
 			preIssuer = issuers[0]
 			issuers = issuers[1:]
+			labels["preissuer"] = "true"
+			labels["issuer"] = x509util.NameToString(preIssuer.Issuer)
 			if len(issuers) == 0 {
 				l.c.Log.WarnContext(ctx, "missing precertificate signing certificate issuer", "err", err, "body", body)
-				return nil, http.StatusBadRequest, errors.New("missing precertificate signing certificate issuer")
+				return nil, http.StatusBadRequest, fmtErrorf("missing precertificate signing certificate issuer")
 			}
 		}
 
 		defangedTBS, err := x509.BuildPrecertTBS(chain[0].RawTBSCertificate, preIssuer)
 		if err != nil {
 			l.c.Log.ErrorContext(ctx, "failed to build TBSCertificate", "err", err, "body", body)
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to build TBSCertificate: %w", err)
+			return nil, http.StatusInternalServerError, fmtErrorf("failed to build TBSCertificate: %w", err)
 		}
 
 		e.IsPrecert = true
@@ -171,14 +188,16 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	l.issuersMu.RUnlock()
 	if newIssuers {
 		if err := l.uploadIssuers(ctx, issuers); err != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("failed to upload issuers: %w", err)
+			return nil, http.StatusInternalServerError, fmtErrorf("failed to upload issuers: %w", err)
 		}
 	}
 
 	waitLeaf := l.addLeafToPool(e)
+	waitTimer := prometheus.NewTimer(l.m.AddChainWait)
 	seq, err := waitLeaf(ctx)
+	waitTimer.ObserveDuration()
 	if err != nil {
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to sequence leaves: %w", err)
+		return nil, http.StatusInternalServerError, fmtErrorf("failed to sequence leaves: %w", err)
 	}
 
 	// The digitally-signed data of an SCT is technically not a MerkleTreeLeaf,
@@ -188,7 +207,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	sctSignature, err := digitallySign(l.c.Key, seq.MerkleTreeLeaf())
 	if err != nil {
 		l.c.Log.ErrorContext(ctx, "failed to sign SCT", "err", err, "body", body)
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to sign SCT: %w", err)
+		return nil, http.StatusInternalServerError, fmtErrorf("failed to sign SCT: %w", err)
 	}
 
 	rsp, err := json.Marshal(&ct.AddChainResponse{
@@ -200,7 +219,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	})
 	if err != nil {
 		l.c.Log.ErrorContext(ctx, "failed to encode response", "err", err, "body", body)
-		return nil, http.StatusInternalServerError, fmt.Errorf("failed to encode response: %w", err)
+		return nil, http.StatusInternalServerError, fmtErrorf("failed to encode response: %w", err)
 	}
 
 	return rsp, http.StatusOK, nil

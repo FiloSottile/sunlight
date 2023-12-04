@@ -457,7 +457,11 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			p.err = err
 			l.c.Log.ErrorContext(ctx, "pool sequencing failed", "old_tree_size", l.tree.N,
 				"entries", len(p.pendingLeaves), "err", err)
-			l.m.SeqCount.With(prometheus.Labels{"result": "error"}).Inc()
+			if categoryErr := (categoryError{}); errors.As(err, &categoryErr) {
+				l.m.SeqCount.With(prometheus.Labels{"error": categoryErr.category}).Inc()
+			} else {
+				l.m.SeqCount.With(prometheus.Labels{"error": "?"}).Inc()
+			}
 
 			// Non-fatal errors are delivered to the requests waiting on this
 			// pool, but do not break the sequencer loop.
@@ -465,7 +469,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 				err = nil
 			}
 		} else {
-			l.m.SeqCount.With(prometheus.Labels{"result": "ok"}).Inc()
+			l.m.SeqCount.With(prometheus.Labels{"error": ""}).Inc()
 		}
 		l.m.SeqSize.Observe(float64(len(p.pendingLeaves)))
 
@@ -481,7 +485,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 	timestamp := timeNowUnixMilli()
 	if timestamp <= l.tree.Time {
-		return errors.Join(errFatal, fmt.Errorf("time did not progress! %d -> %d", l.tree.Time, timestamp))
+		return errors.Join(errFatal, fmtErrorf("time did not progress! %d -> %d", l.tree.Time, timestamp))
 	}
 
 	edgeTiles := maps.Clone(l.edgeTiles)
@@ -503,7 +507,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		// the new tiles).
 		hashes, err := tlog.StoredHashes(n, leaf.MerkleTreeLeaf(), hashReader)
 		if err != nil {
-			return fmt.Errorf("couldn't compute new hashes for leaf %d: %w", n, err)
+			return fmtErrorf("couldn't compute new hashes for leaf %d: %w", n, err)
 		}
 		for i, h := range hashes {
 			id := tlog.StoredHashIndex(0, n) + int64(i)
@@ -545,7 +549,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		tile := tile // tile is captured by the g.Go function.
 		data, err := tlog.ReadTileData(tile, hashReader)
 		if err != nil {
-			return fmt.Errorf("couldn't generate tile %v: %w", tile, err)
+			return fmtErrorf("couldn't generate tile %v: %w", tile, err)
 		}
 		// Assuming NewTilesForSize produces tiles in order, this tile should
 		// always be further right than the one in edgeTiles, but double check.
@@ -559,25 +563,25 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	}
 
 	if err := g.Wait(); err != nil {
-		return fmt.Errorf("couldn't upload a tile: %w", err)
+		return fmtErrorf("couldn't upload a tile: %w", err)
 	}
 
 	rootHash, err := tlog.TreeHash(n, hashReader)
 	if err != nil {
-		return fmt.Errorf("couldn't compute tree hash: %w", err)
+		return fmtErrorf("couldn't compute tree hash: %w", err)
 	}
 	tree := treeWithTimestamp{Tree: tlog.Tree{N: n, Hash: rootHash}, Time: timestamp}
 
 	checkpoint, err := signTreeHead(l.c.Name, l.logID, l.c.Key, tree)
 	if err != nil {
-		return fmt.Errorf("couldn't sign checkpoint: %w", err)
+		return fmtErrorf("couldn't sign checkpoint: %w", err)
 	}
 	l.c.Log.DebugContext(ctx, "uploading checkpoint", "size", len(checkpoint))
 	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
 		// This is a critical error, since if the STH actually got committed
 		// before the error we need to make very very sure we don't sign an
 		// inconsistent version next round.
-		return errors.Join(errFatal, fmt.Errorf("couldn't upload checkpoint: %w", err))
+		return errors.Join(errFatal, fmtErrorf("couldn't upload checkpoint: %w", err))
 	}
 
 	for _, t := range edgeTiles {
