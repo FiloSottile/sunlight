@@ -15,10 +15,11 @@ type metrics struct {
 	ReqDuration *prometheus.SummaryVec
 
 	SeqCount        *prometheus.CounterVec
-	SeqSize         prometheus.Summary
+	SeqPoolSize     prometheus.Summary
 	SeqDuration     prometheus.Summary
+	SeqLeafSize     prometheus.Summary
 	SeqTiles        prometheus.Counter
-	SeqDataTileSize prometheus.Counter
+	SeqDataTileSize prometheus.Summary
 
 	TreeTime prometheus.Gauge
 	TreeSize prometheus.Gauge
@@ -67,7 +68,7 @@ func initMetrics() metrics {
 			},
 			[]string{"error"},
 		),
-		SeqSize: prometheus.NewSummary(
+		SeqPoolSize: prometheus.NewSummary(
 			prometheus.SummaryOpts{
 				Name:       "sequencing_pool_entries",
 				Help:       "Number of entries in the pools being sequenced.",
@@ -85,16 +86,28 @@ func initMetrics() metrics {
 				AgeBuckets: 6,
 			},
 		),
+		SeqLeafSize: prometheus.NewSummary(
+			prometheus.SummaryOpts{
+				Name:       "sequencing_leaf_bytes",
+				Help:       "Size of leaves in sequencing rounds, successful or not.",
+				Objectives: map[float64]float64{0.5: 0.05, 0.99: 0.001},
+				MaxAge:     1 * time.Minute,
+				AgeBuckets: 6,
+			},
+		),
 		SeqTiles: prometheus.NewCounter(
 			prometheus.CounterOpts{
 				Name: "sequencing_uploaded_tiles_total",
 				Help: "Number of tiles uploaded in successful rounds, including partials.",
 			},
 		),
-		SeqDataTileSize: prometheus.NewCounter(
-			prometheus.CounterOpts{
-				Name: "sequencing_data_tiles_bytes_total",
-				Help: "Size of data tiles uploaded in successful rounds, ignoring partials overlap.",
+		SeqDataTileSize: prometheus.NewSummary(
+			prometheus.SummaryOpts{
+				Name:       "sequencing_data_tiles_bytes",
+				Help:       "Uncompressed size of uploaded data tiles, including partials.",
+				Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+				MaxAge:     1 * time.Minute,
+				AgeBuckets: 6,
 			},
 		),
 

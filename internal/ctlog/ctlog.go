@@ -210,6 +210,9 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		"size", tree.N, "timestamp", timestamp, "issuers", len(issuers.RawCertificates()))
 
 	m := initMetrics()
+	m.TreeSize.Set(float64(tree.N))
+	m.TreeTime.Set(float64(timestamp))
+	m.Issuers.Set(float64(len(issuers.RawCertificates())))
 	m.ConfigRoots.Set(float64(len(config.Roots.RawCertificates())))
 	m.ConfigStart.Set(float64(config.NotAfterStart.Unix()))
 	m.ConfigEnd.Set(float64(config.NotAfterLimit.Unix()))
@@ -471,12 +474,12 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		} else {
 			l.m.SeqCount.With(prometheus.Labels{"error": ""}).Inc()
 		}
-		l.m.SeqSize.Observe(float64(len(p.pendingLeaves)))
+		l.m.SeqPoolSize.Observe(float64(len(p.pendingLeaves)))
 
 		close(p.done)
 	}()
 
-	var tileCount, dataTilesSize int
+	var tileCount int
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, sequenceTimeout)
 	defer cancel()
@@ -493,14 +496,15 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	// Load the current partial data tile, if any.
 	if t, ok := edgeTiles[-1]; ok && t.W < tileWidth {
 		dataTile = bytes.Clone(t.B)
-		dataTilesSize -= len(dataTile)
 	}
 	newHashes := make(map[int64]tlog.Hash)
 	hashReader := l.hashReader(newHashes)
 	n := l.tree.N
 	for _, leaf := range p.pendingLeaves {
 		leaf := &SequencedLogEntry{LogEntry: *leaf, Timestamp: timestamp, LeafIndex: n}
-		dataTile = append(dataTile, leaf.TileLeaf()...)
+		leafData := leaf.TileLeaf()
+		dataTile = append(dataTile, leafData...)
+		l.m.SeqLeafSize.Observe(float64(len(leafData)))
 
 		// Compute the new tree hashes and add them to the hashReader overlay
 		// (we will use them later to insert more leaves and finally to produce
@@ -523,8 +527,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			edgeTiles[-1] = tileWithBytes{tile, dataTile}
 			l.c.Log.DebugContext(ctx, "uploading full data tile",
 				"tree_size", n, "tile", tile, "size", len(dataTile))
+			l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 			tileCount++
-			dataTilesSize += len(dataTile)
 			data := dataTile // data is captured by the g.Go function.
 			g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), data) })
 			dataTile = nil
@@ -538,8 +542,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}
 		l.c.Log.DebugContext(ctx, "uploading partial data tile",
 			"tree_size", n, "tile", tile, "size", len(dataTile))
+		l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 		tileCount++
-		dataTilesSize += len(dataTile)
 		g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), dataTile) })
 	}
 
@@ -592,7 +596,6 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		"tiles", tileCount, "timestamp", timestamp,
 		"elapsed", time.Since(start))
 	l.m.SeqTiles.Add(float64(tileCount))
-	l.m.SeqDataTileSize.Add(float64(dataTilesSize))
 	l.m.TreeSize.Set(float64(tree.N))
 	l.m.TreeTime.Set(float64(timestamp) / 1000)
 

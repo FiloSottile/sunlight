@@ -123,7 +123,6 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, http.StatusBadRequest, fmtErrorf("failed to parse request: %w", err)
 	}
-	labels["chain_len"] = fmt.Sprintf("%d", len(req.Chain))
 	if len(req.Chain) == 0 {
 		return nil, http.StatusBadRequest, fmtErrorf("empty chain")
 	}
@@ -132,6 +131,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	if err != nil {
 		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: %w", err)
 	}
+	labels["chain_len"] = fmt.Sprintf("%d", len(chain))
 	labels["root"] = x509util.NameToString(chain[len(chain)-1].Subject)
 	labels["issuer"] = x509util.NameToString(chain[0].Issuer)
 

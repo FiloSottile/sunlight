@@ -18,55 +18,67 @@ import (
 )
 
 type S3Backend struct {
-	getClient *s3.Client
-	putClient *s3.Client
-	bucket    string
-	metrics   []prometheus.Collector
-	log       *slog.Logger
+	client        *s3.Client
+	bucket        string
+	metrics       []prometheus.Collector
+	uploadSize    prometheus.Summary
+	compressRatio prometheus.Summary
+	log           *slog.Logger
 }
 
 func NewS3Backend(ctx context.Context, region, bucket string, l *slog.Logger) (*S3Backend, error) {
 	counter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "s3_requests_total",
+			Help: "S3 HTTP requests performed, by method and response code.",
 		},
-		[]string{"action", "code"},
+		[]string{"method", "code"},
 	)
 	duration := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Name:       "s3_request_duration_seconds",
+			Help:       "S3 HTTP request latencies, by method and response code.",
 			Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
 			MaxAge:     1 * time.Minute,
 			AgeBuckets: 6,
 		},
-		[]string{"action", "code"},
+		[]string{"method", "code"},
+	)
+	uploadSize := prometheus.NewSummary(
+		prometheus.SummaryOpts{
+			Name:       "s3_upload_size_bytes",
+			Help:       "S3 (compressed) body size in bytes for object puts.",
+			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+			MaxAge:     1 * time.Minute,
+			AgeBuckets: 6,
+		},
+	)
+	compressRatio := prometheus.NewSummary(
+		prometheus.SummaryOpts{
+			Name:       "s3_compress_ratio",
+			Help:       "Ratio of compressed to uncompressed body size for compressible object puts.",
+			MaxAge:     1 * time.Minute,
+			AgeBuckets: 6,
+		},
 	)
 
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	transport := http.RoundTripper(http.DefaultTransport.(*http.Transport).Clone())
+	transport = promhttp.InstrumentRoundTripperCounter(counter, transport)
+	transport = promhttp.InstrumentRoundTripperDuration(duration, transport)
+
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region),
+		config.WithHTTPClient(&http.Client{Transport: transport}))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config for S3 backend: %w", err)
 	}
 
-	getLabels := prometheus.Labels{"action": "get"}
-	getTransport := http.RoundTripper(http.DefaultTransport.(*http.Transport).Clone())
-	getTransport = promhttp.InstrumentRoundTripperCounter(counter.MustCurryWith(getLabels), getTransport)
-	getTransport = promhttp.InstrumentRoundTripperDuration(duration.MustCurryWith(getLabels), getTransport)
-	getCfg := cfg.Copy()
-	getCfg.HTTPClient = &http.Client{Transport: getTransport}
-
-	putLabels := prometheus.Labels{"action": "put"}
-	putTransport := http.RoundTripper(http.DefaultTransport.(*http.Transport).Clone())
-	putTransport = promhttp.InstrumentRoundTripperCounter(counter.MustCurryWith(putLabels), putTransport)
-	putTransport = promhttp.InstrumentRoundTripperDuration(duration.MustCurryWith(putLabels), putTransport)
-	putCfg := cfg.Copy()
-	putCfg.HTTPClient = &http.Client{Transport: putTransport}
-
 	return &S3Backend{
-		getClient: s3.NewFromConfig(getCfg),
-		putClient: s3.NewFromConfig(putCfg),
-		bucket:    bucket,
-		metrics:   []prometheus.Collector{counter, duration},
-		log:       l,
+		client:        s3.NewFromConfig(cfg),
+		bucket:        bucket,
+		metrics:       []prometheus.Collector{counter, duration, uploadSize, compressRatio},
+		uploadSize:    uploadSize,
+		compressRatio: compressRatio,
+		log:           l,
 	}, nil
 }
 
@@ -85,13 +97,14 @@ func (s *S3Backend) UploadCompressible(ctx context.Context, key string, data []b
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("failed to compress %q: %w", key, err)
 	}
+	s.compressRatio.Observe(float64(b.Len()) / float64(len(data)))
 	return s.upload(ctx, key, bytes.NewReader(b.Bytes()), b.Len(), aws.String("gzip"))
 }
 
 func (s *S3Backend) upload(ctx context.Context, key string, data io.ReadSeeker, length int, ce *string) error {
 	start := time.Now()
 	// TODO: give up on slow requests and retry.
-	_, err := s.putClient.PutObject(ctx, &s3.PutObjectInput{
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:          aws.String(s.bucket),
 		Key:             aws.String(key),
 		Body:            data,
@@ -100,6 +113,7 @@ func (s *S3Backend) upload(ctx context.Context, key string, data io.ReadSeeker, 
 	})
 	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", length,
 		"compress", ce != nil, "elapsed", time.Since(start), "error", err)
+	s.uploadSize.Observe(float64(length))
 	if err != nil {
 		return fmt.Errorf("failed to upload %q to S3: %w", key, err)
 	}
@@ -107,7 +121,7 @@ func (s *S3Backend) upload(ctx context.Context, key string, data io.ReadSeeker, 
 }
 
 func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
-	out, err := s.getClient.GetObject(ctx, &s3.GetObjectInput{
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
