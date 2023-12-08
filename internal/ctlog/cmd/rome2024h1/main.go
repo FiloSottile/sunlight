@@ -77,11 +77,10 @@ func main() {
 	}
 
 	metrics := prometheus.NewRegistry()
-	registry := prometheus.WrapRegistererWithPrefix("sunlight_", metrics)
-	registry.MustRegister(collectors.NewGoCollector())
-	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	metrics.MustRegister(collectors.NewGoCollector())
+	metrics.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	prometheus.WrapRegistererWith(prometheus.Labels{"log": "rome2024h1"},
-		registry).MustRegister(l.Metrics()...)
+		prometheus.WrapRegistererWithPrefix("sunlight_", metrics)).MustRegister(l.Metrics()...)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
