@@ -7,11 +7,7 @@ func (l *Log) AddLeafToPool(e *LogEntry) func(ctx context.Context) (*SequencedLo
 }
 
 func (l *Log) Sequence() error {
-	l.poolMu.Lock()
-	p := l.currentPool
-	l.currentPool = &pool{done: make(chan struct{})}
-	l.poolMu.Unlock()
-	return l.sequencePool(context.Background(), p)
+	return l.sequence(context.Background())
 }
 
 func SetTimeNowUnixMilli(f func() int64) {

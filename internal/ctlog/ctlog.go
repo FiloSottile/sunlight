@@ -43,6 +43,10 @@ type Log struct {
 	// will never add to a pool that already started sequencing.
 	poolMu      sync.Mutex
 	currentPool *pool
+	// inSequencing is the pool.byHash map of the pool that's currently being
+	// sequenced. These entries might not be sequenced yet or might not yet be
+	// committed to the deduplication cache.
+	inSequencing map[cacheHash]waitEntryFunc
 
 	issuersMu sync.RWMutex
 	issuers   *x509util.PEMCertPool
@@ -223,7 +227,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		m:           m,
 		tree:        treeWithTimestamp{tree, timestamp},
 		edgeTiles:   edgeTiles,
-		currentPool: &pool{done: make(chan struct{})},
+		currentPool: newPool(),
 		issuers:     issuers,
 	}, nil
 }
@@ -285,24 +289,18 @@ type LogEntry struct {
 	PrecertSigningCert []byte
 }
 
-type SequencedLogEntry struct {
-	LogEntry
-	LeafIndex int64
-	Timestamp int64
-}
+// SignedEntry returns the entry_type and signed_entry fields of
+// a RFC 6962 TimestampedEntry.
+func (e *LogEntry) SignedEntry() []byte {
+	// struct {
+	//     LogEntryType entry_type;
+	//     select(entry_type) {
+	//         case x509_entry: ASN.1Cert;
+	//         case precert_entry: PreCert;
+	//     } signed_entry;
+	// } SignedEntry;
 
-// MerkleTreeLeaf returns a RFC 6962 MerkleTreeLeaf.
-func (e *SequencedLogEntry) MerkleTreeLeaf() []byte {
 	b := &cryptobyte.Builder{}
-	b.AddUint8(0 /* version = v1 */)
-	b.AddUint8(0 /* leaf_type = timestamped_entry */)
-	e.timestampedEntry(b)
-	return b.BytesOrPanic()
-}
-
-// timestampedEntry appends a RFC 6962 TimestampedEntry to b.
-func (e *SequencedLogEntry) timestampedEntry(b *cryptobyte.Builder) {
-	b.AddUint64(uint64(e.Timestamp))
 	if !e.IsPrecert {
 		b.AddUint16(0 /* entry_type = x509_entry */)
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
@@ -315,9 +313,26 @@ func (e *SequencedLogEntry) timestampedEntry(b *cryptobyte.Builder) {
 			b.AddBytes(e.Certificate)
 		})
 	}
+	return b.BytesOrPanic()
+}
+
+type SequencedLogEntry struct {
+	LogEntry
+	LeafIndex int64
+	Timestamp int64
+}
+
+// MerkleTreeLeaf returns a RFC 6962 MerkleTreeLeaf.
+func (e *SequencedLogEntry) MerkleTreeLeaf() []byte {
+	b := &cryptobyte.Builder{}
+	b.AddUint8(0 /* version = v1 */)
+	b.AddUint8(0 /* leaf_type = timestamped_entry */)
+	b.AddUint64(uint64(e.Timestamp))
+	b.AddBytes(e.SignedEntry())
 	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
 		b.AddBytes(e.Extensions())
 	})
+	return b.BytesOrPanic()
 }
 
 // Extensions returns the custom structure that's encoded in the
@@ -361,7 +376,11 @@ func (e *SequencedLogEntry) TileLeaf() []byte {
 	// } PreCertExtraData;
 
 	b := &cryptobyte.Builder{}
-	e.timestampedEntry(b)
+	b.AddUint64(uint64(e.Timestamp))
+	b.AddBytes(e.SignedEntry())
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		b.AddBytes(e.Extensions())
+	})
 	if e.IsPrecert {
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 			b.AddBytes(e.PreCertificate)
@@ -375,6 +394,7 @@ func (e *SequencedLogEntry) TileLeaf() []byte {
 
 type pool struct {
 	pendingLeaves []*LogEntry
+	byHash        map[cacheHash]waitEntryFunc
 
 	// done is closed when the pool has been sequenced and
 	// the results below are ready.
@@ -390,16 +410,34 @@ type pool struct {
 	timestamp int64
 }
 
+type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
+type waitEntryFunc func(ctx context.Context) (*SequencedLogEntry, error)
+
+func newPool() *pool {
+	return &pool{
+		done:   make(chan struct{}),
+		byHash: make(map[cacheHash]waitEntryFunc),
+	}
+}
+
 // addLeafToPool adds leaf to the current pool, and returns a function that will
 // wait until the pool is sequenced and returns the sequenced leaf.
-func (l *Log) addLeafToPool(leaf *LogEntry) func(ctx context.Context) (*SequencedLogEntry, error) {
+func (l *Log) addLeafToPool(leaf *LogEntry) waitEntryFunc {
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
 	p := l.currentPool
-	n := len(p.pendingLeaves)
+	hh := sha256.Sum256(leaf.SignedEntry())
+	h := cacheHash(hh[:16])
+	if f, ok := p.byHash[h]; ok {
+		return f
+	}
+	if f, ok := l.inSequencing[h]; ok {
+		return f
+	}
 	// TODO: check if the pool is full.
+	n := len(p.pendingLeaves)
 	p.pendingLeaves = append(p.pendingLeaves, leaf)
-	return func(ctx context.Context) (*SequencedLogEntry, error) {
+	f := func(ctx context.Context) (*SequencedLogEntry, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -417,6 +455,8 @@ func (l *Log) addLeafToPool(leaf *LogEntry) func(ctx context.Context) (*Sequence
 			}, nil
 		}
 	}
+	p.byHash[h] = f
+	return f
 }
 
 func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error) {
@@ -436,12 +476,7 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 			l.c.Log.InfoContext(ctx, "sequencer stopped")
 			return ctx.Err()
 		case <-t.C:
-			l.poolMu.Lock()
-			p := l.currentPool
-			l.currentPool = &pool{done: make(chan struct{})}
-			l.poolMu.Unlock()
-
-			if err := l.sequencePool(ctx, p); err != nil {
+			if err := l.sequence(ctx); err != nil {
 				l.c.Log.ErrorContext(ctx, "fatal sequencing error", "err", err)
 				return err
 			}
@@ -452,6 +487,16 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 const sequenceTimeout = 5 * time.Second
 
 var errFatal = errors.New("fatal sequencing error")
+
+func (l *Log) sequence(ctx context.Context) error {
+	l.poolMu.Lock()
+	p := l.currentPool
+	l.currentPool = newPool()
+	l.inSequencing = p.byHash
+	l.poolMu.Unlock()
+
+	return l.sequencePool(ctx, p)
+}
 
 func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	defer prometheus.NewTimer(l.m.SeqDuration).ObserveDuration()
