@@ -45,6 +45,7 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 	config := &ctlog.Config{
 		Name:          "example.com/TestLog",
 		Key:           key,
+		Cache:         filepath.Join(t.TempDir(), "cache.db"),
 		Backend:       backend,
 		Log:           slog.New(logHandler),
 		Roots:         x509util.NewPEMCertPool(),
@@ -58,6 +59,7 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 	fatalIfErr(t, err)
 	log, err := ctlog.LoadLog(context.Background(), config)
 	fatalIfErr(t, err)
+	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
 	return &TestLog{t: t,
 		Log:    log,
 		Config: config,
@@ -98,6 +100,7 @@ func (tl *TestLog) Quiet() {
 func ReloadLog(t testing.TB, tl *TestLog) *TestLog {
 	log, err := ctlog.LoadLog(context.Background(), tl.Config)
 	fatalIfErr(t, err)
+	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
 	return &TestLog{t: t,
 		Log:    log,
 		Config: tl.Config,

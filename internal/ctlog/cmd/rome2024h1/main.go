@@ -58,6 +58,7 @@ func main() {
 	c := &ctlog.Config{
 		Name:          "rome.ct.filippo.io/2024h1",
 		Key:           k.(crypto.Signer),
+		Cache:         "rome2024h1.db",
 		Backend:       b,
 		Log:           slog.Default(),
 		Roots:         r,
@@ -75,6 +76,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer l.CloseCache()
 
 	metrics := prometheus.NewRegistry()
 	metrics.MustRegister(collectors.NewGoCollector())

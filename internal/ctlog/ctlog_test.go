@@ -139,7 +139,8 @@ func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Con
 func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
 	cert := make([]byte, mathrand.Intn(4)+1)
 	rand.Read(cert)
-	return tl.Log.AddLeafToPool(&ctlog.LogEntry{Certificate: cert})
+	f, _ := tl.Log.AddLeafToPool(&ctlog.LogEntry{Certificate: cert})
+	return f
 }
 
 func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
@@ -153,7 +154,8 @@ func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ct
 		e.PrecertSigningCert = make([]byte, mathrand.Intn(4)+1)
 		rand.Read(e.PrecertSigningCert)
 	}
-	return tl.Log.AddLeafToPool(e)
+	f, _ := tl.Log.AddLeafToPool(e)
+	return f
 }
 
 func TestSubmit(t *testing.T) {
@@ -171,8 +173,9 @@ func TestSubmit(t *testing.T) {
 
 func TestReloadWrongName(t *testing.T) {
 	tl := NewEmptyTestLog(t)
-	_, err := ctlog.LoadLog(context.Background(), tl.Config)
+	log, err := ctlog.LoadLog(context.Background(), tl.Config)
 	fatalIfErr(t, err)
+	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
 
 	c := tl.Config
 	c.Name = "wrong"
@@ -183,8 +186,9 @@ func TestReloadWrongName(t *testing.T) {
 
 func TestReloadWrongKey(t *testing.T) {
 	tl := NewEmptyTestLog(t)
-	_, err := ctlog.LoadLog(context.Background(), tl.Config)
+	log, err := ctlog.LoadLog(context.Background(), tl.Config)
 	fatalIfErr(t, err)
+	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
 
 	c := tl.Config
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

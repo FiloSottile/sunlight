@@ -1,6 +1,7 @@
 package ctlog
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -32,6 +33,10 @@ type metrics struct {
 
 	AddChainCount *prometheus.CounterVec
 	AddChainWait  prometheus.Summary
+
+	CacheGetDuration prometheus.Summary
+	CachePutDuration prometheus.Summary
+	CachePutErrors   prometheus.Counter
 }
 
 func initMetrics() metrics {
@@ -155,15 +160,40 @@ func initMetrics() metrics {
 				Name: "addchain_requests_total",
 				Help: "Number of add-[pre-]chain requests, by chain characteristics and errors if any.",
 			},
-			[]string{"error", "issuer", "root", "precert", "preissuer", "chain_len"},
+			[]string{"error", "issuer", "root", "precert", "preissuer", "chain_len", "source"},
 		),
 		AddChainWait: prometheus.NewSummary(
 			prometheus.SummaryOpts{
 				Name:       "addchain_wait_seconds",
-				Help:       "Duration of add-[pre-]chain pauses waiting for a leaf to be sequenced.",
+				Help:       "Duration of add-[pre-]chain pauses waiting for a leaf to be sequenced, excluding deduplicated entries.",
 				Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
 				MaxAge:     1 * time.Minute,
 				AgeBuckets: 6,
+			},
+		),
+
+		CacheGetDuration: prometheus.NewSummary(
+			prometheus.SummaryOpts{
+				Name:       "cache_get_duration_seconds",
+				Help:       "Duration of individual deduplication cache lookups.",
+				Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+				MaxAge:     1 * time.Minute,
+				AgeBuckets: 6,
+			},
+		),
+		CachePutDuration: prometheus.NewSummary(
+			prometheus.SummaryOpts{
+				Name:       "cache_put_duration_seconds",
+				Help:       "Duration of batch deduplication cache inserts.",
+				Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+				MaxAge:     1 * time.Minute,
+				AgeBuckets: 6,
+			},
+		),
+		CachePutErrors: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "cache_put_errors_total",
+				Help: "Number of failed deduplication cache inserts.",
 			},
 		),
 	}
@@ -188,8 +218,20 @@ func (e categoryError) Unwrap() error { return e.err }
 // fmtErrorf returns an error like fmt.Errorf, but with a category derived from
 // the format suitable for a metrics label.
 func fmtErrorf(format string, args ...interface{}) error {
-	category, _, _ := strings.Cut(format, ":")
-	category, _, _ = strings.Cut(category, "%")
+	category, _, _ := strings.Cut(format, "%")
 	category = strings.TrimSpace(category)
-	return categoryError{category: category, err: fmt.Errorf(format, args...)}
+	category = strings.TrimSuffix(category, ":")
+	err := fmt.Errorf(format, args...)
+	if err, ok := errors.Unwrap(err).(categoryError); ok {
+		category = category + ": " + err.category
+	}
+	return categoryError{category: category, err: err}
+}
+
+func errorCategory(err error) string {
+	var categoryErr categoryError
+	if errors.As(err, &categoryErr) {
+		return categoryErr.category
+	}
+	return "?"
 }

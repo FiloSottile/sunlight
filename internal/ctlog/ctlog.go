@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"crawshaw.io/sqlite"
 	"filippo.io/litetlog/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/x509util"
@@ -37,16 +38,23 @@ type Log struct {
 	tree treeWithTimestamp
 	// edgeTiles is a map from level to the right-most tile of that level.
 	edgeTiles map[int]tileWithBytes
+	// cacheWrite is used to update the deduplication cache at the end of each
+	// sequencing batch, before inSequencing and currentPool are rotated.
+	cacheWrite *sqlite.Conn
 
 	// poolMu is held for the entire duration of addLeafToPool, and by
-	// RunSequencer while swapping the pool. This guarantees that addLeafToPool
-	// will never add to a pool that already started sequencing.
+	// RunSequencer while rotating currentPool and inSequencing.
+	// This guarantees that addLeafToPool will never add to a pool that already
+	// started sequencing, and that cacheRead will see entries from older pools
+	// before they are rotated out of inSequencing.
 	poolMu      sync.Mutex
 	currentPool *pool
 	// inSequencing is the pool.byHash map of the pool that's currently being
 	// sequenced. These entries might not be sequenced yet or might not yet be
 	// committed to the deduplication cache.
 	inSequencing map[cacheHash]waitEntryFunc
+	// cacheRead is used to check the deduplication cache under poolMu.
+	cacheRead *sqlite.Conn
 
 	issuersMu sync.RWMutex
 	issuers   *x509util.PEMCertPool
@@ -69,6 +77,8 @@ func (t tileWithBytes) String() string {
 type Config struct {
 	Name string
 	Key  crypto.Signer
+
+	Cache string
 
 	Backend Backend
 	Log     *slog.Logger
@@ -158,6 +168,11 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		return nil, errors.New("invalid issuers.pem")
 	}
 
+	cacheRead, cacheWrite, err := initCache(config.Cache)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't initialize cache database: %w", err)
+	}
+
 	edgeTiles := make(map[int]tileWithBytes)
 	if c.N > 0 {
 		// Fetch the right-most edge tiles by reading the last leaf.
@@ -227,7 +242,9 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		m:           m,
 		tree:        treeWithTimestamp{tree, timestamp},
 		edgeTiles:   edgeTiles,
+		cacheRead:   cacheRead,
 		currentPool: newPool(),
+		cacheWrite:  cacheWrite,
 		issuers:     issuers,
 	}, nil
 }
@@ -314,6 +331,13 @@ func (e *LogEntry) SignedEntry() []byte {
 		})
 	}
 	return b.BytesOrPanic()
+}
+
+type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
+
+func (e *LogEntry) cacheHash() cacheHash {
+	h := sha256.Sum256(e.SignedEntry())
+	return cacheHash(h[:16])
 }
 
 type SequencedLogEntry struct {
@@ -410,7 +434,6 @@ type pool struct {
 	timestamp int64
 }
 
-type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
 type waitEntryFunc func(ctx context.Context) (*SequencedLogEntry, error)
 
 func newPool() *pool {
@@ -420,24 +443,34 @@ func newPool() *pool {
 	}
 }
 
-// addLeafToPool adds leaf to the current pool, and returns a function that will
-// wait until the pool is sequenced and returns the sequenced leaf.
-func (l *Log) addLeafToPool(leaf *LogEntry) waitEntryFunc {
+// addLeafToPool adds leaf to the current pool, unless it is found in a
+// deduplication cache. It returns a function that will wait until the pool is
+// sequenced and return the sequenced leaf, as well as the source of the
+// sequenced leaf (pool or cache if deduplicated, sequencer otherwise).
+func (l *Log) addLeafToPool(leaf *LogEntry) (f waitEntryFunc, source string) {
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
 	p := l.currentPool
-	hh := sha256.Sum256(leaf.SignedEntry())
-	h := cacheHash(hh[:16])
+	h := leaf.cacheHash()
 	if f, ok := p.byHash[h]; ok {
-		return f
+		return f, "pool"
 	}
 	if f, ok := l.inSequencing[h]; ok {
-		return f
+		return f, "pool"
+	}
+	if leaf, err := l.cacheGet(leaf); err != nil {
+		return func(ctx context.Context) (*SequencedLogEntry, error) {
+			return nil, fmtErrorf("deduplication cache get failed: %w", err)
+		}, "cache"
+	} else if leaf != nil {
+		return func(ctx context.Context) (*SequencedLogEntry, error) {
+			return leaf, nil
+		}, "cache"
 	}
 	// TODO: check if the pool is full.
 	n := len(p.pendingLeaves)
 	p.pendingLeaves = append(p.pendingLeaves, leaf)
-	f := func(ctx context.Context) (*SequencedLogEntry, error) {
+	f = func(ctx context.Context) (*SequencedLogEntry, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -456,7 +489,7 @@ func (l *Log) addLeafToPool(leaf *LogEntry) waitEntryFunc {
 		}
 	}
 	p.byHash[h] = f
-	return f
+	return f, "sequencer"
 }
 
 func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error) {
@@ -505,11 +538,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			p.err = err
 			l.c.Log.ErrorContext(ctx, "pool sequencing failed", "old_tree_size", l.tree.N,
 				"entries", len(p.pendingLeaves), "err", err)
-			if categoryErr := (categoryError{}); errors.As(err, &categoryErr) {
-				l.m.SeqCount.With(prometheus.Labels{"error": categoryErr.category}).Inc()
-			} else {
-				l.m.SeqCount.With(prometheus.Labels{"error": "?"}).Inc()
-			}
+			l.m.SeqCount.With(prometheus.Labels{"error": errorCategory(err)}).Inc()
 
 			// Non-fatal errors are delivered to the requests waiting on this
 			// pool, but do not break the sequencer loop.
@@ -545,8 +574,10 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	newHashes := make(map[int64]tlog.Hash)
 	hashReader := l.hashReader(newHashes)
 	n := l.tree.N
+	var sequencedLeaves []*SequencedLogEntry
 	for _, leaf := range p.pendingLeaves {
 		leaf := &SequencedLogEntry{LogEntry: *leaf, Timestamp: timestamp, LeafIndex: n}
+		sequencedLeaves = append(sequencedLeaves, leaf)
 		leafData := leaf.TileLeaf()
 		dataTile = append(dataTile, leafData...)
 		l.m.SeqLeafSize.Observe(float64(len(leafData)))
@@ -633,6 +664,16 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		return errors.Join(errFatal, fmtErrorf("couldn't upload checkpoint: %w", err))
 	}
 
+	// We update the deduplication cache only once the pool is fully sequenced.
+	// At this point if the cache put fails, there's no reason to return errors
+	// to users. The only consequence of cache false negatives are duplicated
+	// leaves anyway.
+	if err := l.cachePut(sequencedLeaves); err != nil {
+		l.c.Log.ErrorContext(ctx, "cache put failed",
+			"tree_size", tree.N, "entries", n-l.tree.N, "err", err)
+		l.m.CachePutErrors.Inc()
+	}
+
 	for _, t := range edgeTiles {
 		l.c.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
@@ -662,7 +703,7 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, t
 		SHA256RootHash: ct.SHA256Hash(tree.Hash),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("couldn't serialize STH signature input: %w", err)
+		return nil, fmtErrorf("couldn't serialize STH signature input: %w", err)
 	}
 
 	// We compute the signature here and inject it in a fixed note.Signer to
@@ -670,7 +711,7 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, t
 
 	treeHeadSignature, err := digitallySign(privKey, sthBytes)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't produce signature: %w", err)
+		return nil, fmtErrorf("couldn't produce signature: %w", err)
 	}
 
 	// struct {
@@ -682,12 +723,12 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, t
 	b.AddBytes(treeHeadSignature)
 	sig, err := b.Bytes()
 	if err != nil {
-		return nil, fmt.Errorf("couldn't encode RFC6962NoteSignature: %w", err)
+		return nil, fmtErrorf("couldn't encode RFC6962NoteSignature: %w", err)
 	}
 
 	signer, err := tlogx.NewInjectedSigner(name, 0x05, logID[:], sig)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't construct signer: %w", err)
+		return nil, fmtErrorf("couldn't construct signer: %w", err)
 	}
 	signedNote, err := note.Sign(&note.Note{
 		Text: tlogx.MarshalCheckpoint(tlogx.Checkpoint{
@@ -696,7 +737,7 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, t
 		}),
 	}, signer)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't sign note: %w", err)
+		return nil, fmtErrorf("couldn't sign note: %w", err)
 	}
 	return signedNote, nil
 }
@@ -721,7 +762,7 @@ func digitallySign(k crypto.Signer, msg []byte) ([]byte, error) {
 	case *ecdsa.PublicKey:
 		b.AddUint8(3 /* signature = ecdsa */)
 	default:
-		return nil, fmt.Errorf("unsupported key type %T", k.Public())
+		return nil, fmtErrorf("unsupported key type %T", k.Public())
 	}
 	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
 		b.AddBytes(sig)
@@ -756,14 +797,14 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 	var entryType uint16
 	var extensions cryptobyte.String
 	if !s.ReadUint64(&timestamp) || !s.ReadUint16(&entryType) || timestamp > math.MaxInt64 {
-		return nil, s, errors.New("invalid data tile")
+		return nil, s, fmtErrorf("invalid data tile")
 	}
 	e.Timestamp = int64(timestamp)
 	switch entryType {
 	case 0: // x509_entry
 		if !s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
 			!s.ReadUint16LengthPrefixed(&extensions) {
-			return nil, s, errors.New("invalid data tile x509_entry")
+			return nil, s, fmtErrorf("invalid data tile x509_entry")
 		}
 	case 1: // precert_entry
 		e.IsPrecert = true
@@ -772,10 +813,10 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 			!s.ReadUint16LengthPrefixed(&extensions) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PrecertSigningCert)) {
-			return nil, s, errors.New("invalid data tile precert_entry")
+			return nil, s, fmtErrorf("invalid data tile precert_entry")
 		}
 	default:
-		return nil, s, fmt.Errorf("invalid data tile: unknown type %d", entryType)
+		return nil, s, fmtErrorf("invalid data tile: unknown type %d", entryType)
 	}
 	var extensionType uint8
 	var extensionData cryptobyte.String
@@ -783,7 +824,7 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 		!extensions.ReadUint16LengthPrefixed(&extensionData) ||
 		!readUint48(&extensionData, &e.LeafIndex) || !extensionData.Empty() ||
 		!extensions.Empty() {
-		return nil, s, errors.New("invalid data tile extensions")
+		return nil, s, fmtErrorf("invalid data tile extensions")
 	}
 	return e, s, nil
 }

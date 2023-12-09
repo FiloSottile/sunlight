@@ -2,7 +2,7 @@ package ctlog
 
 import "context"
 
-func (l *Log) AddLeafToPool(e *LogEntry) func(ctx context.Context) (*SequencedLogEntry, error) {
+func (l *Log) AddLeafToPool(e *LogEntry) (waitEntryFunc, string) {
 	return l.addLeafToPool(e)
 }
 

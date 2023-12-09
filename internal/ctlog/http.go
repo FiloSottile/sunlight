@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -103,13 +102,9 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 
 func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*LogEntry) error) (response []byte, code int, err error) {
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "",
-		"precert": "", "preissuer": "", "chain_len": ""}
+		"precert": "", "preissuer": "", "chain_len": "", "source": ""}
 	defer func() {
-		if categoryErr := (categoryError{}); errors.As(err, &categoryErr) {
-			labels["error"] = categoryErr.category
-		} else if err != nil {
-			labels["error"] = "?"
-		}
+		labels["error"] = errorCategory(err)
 		l.m.AddChainCount.With(labels).Inc()
 	}()
 
@@ -192,12 +187,15 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		}
 	}
 
-	waitLeaf := l.addLeafToPool(e)
+	waitLeaf, source := l.addLeafToPool(e)
+	labels["source"] = source
 	waitTimer := prometheus.NewTimer(l.m.AddChainWait)
 	seq, err := waitLeaf(ctx)
-	waitTimer.ObserveDuration()
+	if source == "sequencer" {
+		waitTimer.ObserveDuration()
+	}
 	if err != nil {
-		return nil, http.StatusInternalServerError, fmtErrorf("failed to sequence leaves: %w", err)
+		return nil, http.StatusInternalServerError, fmtErrorf("failed to sequence leaf: %w", err)
 	}
 
 	// The digitally-signed data of an SCT is technically not a MerkleTreeLeaf,
