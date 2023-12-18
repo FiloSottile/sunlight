@@ -271,8 +271,8 @@ type Backend interface {
 	Metrics() []prometheus.Collector
 }
 
-const tileHeight = 10
-const tileWidth = 1 << tileHeight
+const TileHeight = 8
+const tileWidth = 1 << TileHeight
 
 type tileReader struct {
 	fetch     func(key string) ([]byte, error)
@@ -280,7 +280,7 @@ type tileReader struct {
 }
 
 func (r *tileReader) Height() int {
-	return tileHeight
+	return TileHeight
 }
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
@@ -598,7 +598,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 		// If the data tile is full, upload it.
 		if n%tileWidth == 0 {
-			tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
+			tile := tlog.TileForIndex(TileHeight, tlog.StoredHashIndex(0, n-1))
 			tile.L = -1
 			edgeTiles[-1] = tileWithBytes{tile, dataTile}
 			l.c.Log.DebugContext(ctx, "uploading full data tile",
@@ -613,7 +613,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 	// Upload leftover partial data tile, if any.
 	if n%tileWidth != 0 {
-		tile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, n-1))
+		tile := tlog.TileForIndex(TileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}
 		l.c.Log.DebugContext(ctx, "uploading partial data tile",
@@ -624,7 +624,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	}
 
 	// Produce and upload new tree tiles.
-	tiles := tlogx.NewTilesForSize(tileHeight, l.tree.N, n)
+	tiles := tlogx.NewTilesForSize(TileHeight, l.tree.N, n)
 	for _, tile := range tiles {
 		tile := tile // tile is captured by the g.Go function.
 		data, err := tlog.ReadTileData(tile, hashReader)
@@ -779,7 +779,7 @@ func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 				list = append(list, h)
 				continue
 			}
-			t := l.edgeTiles[tlog.TileForIndex(tileHeight, id).L]
+			t := l.edgeTiles[tlog.TileForIndex(TileHeight, id).L]
 			h, err := tlog.HashFromTile(t.Tile, t.B, id)
 			if err != nil {
 				return nil, fmt.Errorf("index %d not in overlay and %w", id, err)

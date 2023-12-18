@@ -145,10 +145,10 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 	leafHashes, err := tlog.TileHashReader(tree, (*tileReader)(tl)).ReadHashes(indexes)
 	fatalIfErr(t, err)
 
-	lastTile := tlog.TileForIndex(tileHeight, tlog.StoredHashIndex(0, c.N-1))
+	lastTile := tlog.TileForIndex(ctlog.TileHeight, tlog.StoredHashIndex(0, c.N-1))
 	lastTile.L = -1
 	for n := int64(0); n <= lastTile.N; n++ {
-		tile := tlog.Tile{H: tileHeight, L: -1, N: n, W: tileWidth}
+		tile := tlog.Tile{H: ctlog.TileHeight, L: -1, N: n, W: tileWidth}
 		if n == lastTile.N {
 			tile = lastTile
 		}
@@ -221,13 +221,12 @@ func (tl *TestLog) StartSequencer() {
 	}()
 }
 
-const tileHeight = 10
-const tileWidth = 1 << tileHeight
+const tileWidth = 1 << ctlog.TileHeight
 
 type tileReader TestLog
 
 func (r *tileReader) Height() int {
-	return tileHeight
+	return ctlog.TileHeight
 }
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {

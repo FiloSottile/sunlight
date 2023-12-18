@@ -29,9 +29,9 @@ var longFlag = flag.Bool("long", false, "run especially slow tests")
 func TestSequenceOneLeaf(t *testing.T) {
 	tl := NewEmptyTestLog(t)
 
-	n := int64(1024 + 2)
+	n := int64(tileWidth + 2)
 	if *longFlag {
-		n *= 1024
+		n *= tileWidth
 	}
 	if testing.Short() {
 		n = 3
@@ -98,11 +98,11 @@ func TestSequenceEmptyPool(t *testing.T) {
 	sequenceTwice(tl)
 	addCerts(tl, 5) // 5
 	sequenceTwice(tl)
-	addCerts(tl, 1024-5-1) // 1024 - 1
+	addCerts(tl, tileWidth-5-1) // tileWidth - 1
 	sequenceTwice(tl)
-	addCerts(tl, 1) // 1024
+	addCerts(tl, 1) // tileWidth
 	sequenceTwice(tl)
-	addCerts(tl, 1) // 1024 + 1
+	addCerts(tl, 1) // tileWidth + 1
 	sequenceTwice(tl)
 }
 
@@ -118,7 +118,7 @@ func TestReloadLog(t *testing.T) {
 func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Context) (*ctlog.SequencedLogEntry, error)) {
 	// TODO: test reloading after uploading tiles but before uploading STH.
 	tl := NewEmptyTestLog(t)
-	n := int64(1024 + 2)
+	n := int64(tileWidth + 2)
 	if testing.Short() {
 		n = 3
 	} else {
