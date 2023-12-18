@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	mathrand "math/rand"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -219,6 +221,56 @@ func (tl *TestLog) StartSequencer() {
 			tl.t.Errorf("RunSequencer returned an error: %v", err)
 		}
 	}()
+}
+
+func waitFuncWrapper(t testing.TB, le *ctlog.LogEntry, f func(ctx context.Context) (*ctlog.SequencedLogEntry, error)) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	var called bool
+	fw := func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+		se, err := f(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		if !reflect.DeepEqual(*le, se.LogEntry) {
+			t.Error("LogEntry is different")
+		}
+		return se, err
+	}
+	t.Cleanup(func() {
+		if !called {
+			fw(context.Background())
+		}
+	})
+	return fw
+}
+
+func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	e := &ctlog.LogEntry{}
+	e.Certificate = make([]byte, mathrand.Intn(4)+8) // 2⁻³² chance of collision after 2¹⁶ entries
+	rand.Read(e.Certificate)
+	f, _ := tl.Log.AddLeafToPool(e)
+	return waitFuncWrapper(t, e, f)
+}
+
+func addCertificateFast(t *testing.T, tl *TestLog) {
+	e := &ctlog.LogEntry{}
+	e.Certificate = make([]byte, mathrand.Intn(3)+1)
+	rand.Read(e.Certificate)
+	tl.Log.AddLeafToPool(e)
+}
+
+func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	e := &ctlog.LogEntry{IsPrecert: true}
+	e.Certificate = make([]byte, mathrand.Intn(4)+8) // 2⁻³² chance of collision after 2¹⁶ entries
+	rand.Read(e.Certificate)
+	e.PreCertificate = make([]byte, mathrand.Intn(4)+1)
+	rand.Read(e.PreCertificate)
+	rand.Read(e.IssuerKeyHash[:])
+	if mathrand.Intn(2) == 0 {
+		e.PrecertSigningCert = make([]byte, mathrand.Intn(4)+1)
+		rand.Read(e.PrecertSigningCert)
+	}
+	f, _ := tl.Log.AddLeafToPool(e)
+	return waitFuncWrapper(t, e, f)
 }
 
 const tileWidth = 1 << ctlog.TileHeight

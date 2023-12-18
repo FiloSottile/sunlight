@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"flag"
-	mathrand "math/rand"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,7 +43,7 @@ func TestSequenceOneLeaf(t *testing.T) {
 		if e, err := wait(context.Background()); err != nil {
 			t.Fatal(err)
 		} else if e.LeafIndex != i {
-			t.Errorf("got leaf index %d, expected %d", e.LeafIndex, 0)
+			t.Errorf("got leaf index %d, expected %d", e.LeafIndex, i)
 		}
 
 		if !*longFlag {
@@ -63,14 +62,14 @@ func TestSequenceLargeLog(t *testing.T) {
 	tl := NewEmptyTestLog(t)
 	tl.Quiet()
 	for i := 0; i < 5; i++ {
-		addCertificate(t, tl)
+		addCertificateFast(t, tl)
 	}
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog()
 
 	for i := 0; i < 500; i++ {
 		for i := 0; i < 3000; i++ {
-			addCertificate(t, tl)
+			addCertificateFast(t, tl)
 		}
 		fatalIfErr(t, tl.Log.Sequence())
 	}
@@ -134,28 +133,6 @@ func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Con
 		fatalIfErr(t, tl.Log.Sequence())
 		tl.CheckLog()
 	}
-}
-
-func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
-	cert := make([]byte, mathrand.Intn(4)+1)
-	rand.Read(cert)
-	f, _ := tl.Log.AddLeafToPool(&ctlog.LogEntry{Certificate: cert})
-	return f
-}
-
-func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
-	e := &ctlog.LogEntry{IsPrecert: true}
-	e.Certificate = make([]byte, mathrand.Intn(4)+1)
-	rand.Read(e.Certificate)
-	e.PreCertificate = make([]byte, mathrand.Intn(4)+1)
-	rand.Read(e.PreCertificate)
-	rand.Read(e.IssuerKeyHash[:])
-	if mathrand.Intn(2) == 0 {
-		e.PrecertSigningCert = make([]byte, mathrand.Intn(4)+1)
-		rand.Read(e.PrecertSigningCert)
-	}
-	f, _ := tl.Log.AddLeafToPool(e)
-	return f
 }
 
 func TestSubmit(t *testing.T) {
