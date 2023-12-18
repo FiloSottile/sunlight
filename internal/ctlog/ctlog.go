@@ -384,6 +384,25 @@ func (e *SequencedLogEntry) Extensions() []byte {
 	return b.BytesOrPanic()
 }
 
+func ParseExtensions(extensions []byte) (leafIndex int64, err error) {
+	b := cryptobyte.String(extensions)
+	for !b.Empty() {
+		var extensionType uint8
+		var extension cryptobyte.String
+		if !b.ReadUint8(&extensionType) || !b.ReadUint16LengthPrefixed(&extension) {
+			return 0, errors.New("invalid extension")
+		}
+		if extensionType == 0 /* leaf_index */ {
+			var leafIndex int64
+			if !readUint40(&extension, &leafIndex) || !extension.Empty() {
+				return 0, errors.New("invalid leaf_index extension")
+			}
+			return leafIndex, nil
+		}
+	}
+	return 0, errors.New("missing leaf_index extension")
+}
+
 // TileLeaf returns the custom structure that's encoded in data tiles.
 func (e *SequencedLogEntry) TileLeaf() []byte {
 	// struct {
@@ -646,6 +665,10 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		return fmtErrorf("couldn't upload a tile: %w", err)
 	}
 
+	if testingOnlyPauseSequencing != nil {
+		testingOnlyPauseSequencing()
+	}
+
 	rootHash, err := tlog.TreeHash(n, hashReader)
 	if err != nil {
 		return fmtErrorf("couldn't compute tree hash: %w", err)
@@ -692,6 +715,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 	return nil
 }
+
+var testingOnlyPauseSequencing func()
 
 // signTreeHead signs the tree and returns a checkpoint according to
 // c2sp.org/checkpoint.
@@ -822,7 +847,7 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 	var extensionData cryptobyte.String
 	if !extensions.ReadUint8(&extensionType) || extensionType != 0 ||
 		!extensions.ReadUint16LengthPrefixed(&extensionData) ||
-		!readUint48(&extensionData, &e.LeafIndex) || !extensionData.Empty() ||
+		!readUint40(&extensionData, &e.LeafIndex) || !extensionData.Empty() ||
 		!extensions.Empty() {
 		return nil, s, fmtErrorf("invalid data tile extensions")
 	}
@@ -836,7 +861,7 @@ func addUint40(b *cryptobyte.Builder, v uint64) {
 
 // readUint40 decodes a big-endian, 40-bit value into out and advances over it.
 // It reports whether the read was successful.
-func readUint48(s *cryptobyte.String, out *int64) bool {
+func readUint40(s *cryptobyte.String, out *int64) bool {
 	var v []byte
 	if !s.ReadBytes(&v, 5) {
 		return false

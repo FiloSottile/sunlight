@@ -244,9 +244,14 @@ func waitFuncWrapper(t testing.TB, le *ctlog.LogEntry, f func(ctx context.Contex
 }
 
 func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	return addCertificateWithSeed(t, tl, mathrand.Int63()) // 2⁻³² chance of collision after 2¹⁶ entries
+}
+
+func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.LogEntry{}
-	e.Certificate = make([]byte, mathrand.Intn(4)+8) // 2⁻³² chance of collision after 2¹⁶ entries
-	rand.Read(e.Certificate)
+	e.Certificate = make([]byte, r.Intn(4)+8)
+	r.Read(e.Certificate)
 	f, _ := tl.Log.AddLeafToPool(e)
 	return waitFuncWrapper(t, e, f)
 }
@@ -259,15 +264,20 @@ func addCertificateFast(t *testing.T, tl *TestLog) {
 }
 
 func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	return addPreCertificateWithSeed(t, tl, mathrand.Int63())
+}
+
+func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.LogEntry{IsPrecert: true}
-	e.Certificate = make([]byte, mathrand.Intn(4)+8) // 2⁻³² chance of collision after 2¹⁶ entries
-	rand.Read(e.Certificate)
-	e.PreCertificate = make([]byte, mathrand.Intn(4)+1)
-	rand.Read(e.PreCertificate)
-	rand.Read(e.IssuerKeyHash[:])
-	if mathrand.Intn(2) == 0 {
-		e.PrecertSigningCert = make([]byte, mathrand.Intn(4)+1)
-		rand.Read(e.PrecertSigningCert)
+	e.Certificate = make([]byte, r.Intn(4)+8)
+	r.Read(e.Certificate)
+	e.PreCertificate = make([]byte, r.Intn(4)+1)
+	r.Read(e.PreCertificate)
+	r.Read(e.IssuerKeyHash[:])
+	if r.Intn(2) == 0 {
+		e.PrecertSigningCert = make([]byte, r.Intn(4)+1)
+		r.Read(e.PrecertSigningCert)
 	}
 	f, _ := tl.Log.AddLeafToPool(e)
 	return waitFuncWrapper(t, e, f)

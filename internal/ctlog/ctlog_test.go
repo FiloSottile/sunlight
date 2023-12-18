@@ -6,6 +6,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"flag"
 	"sync/atomic"
@@ -105,6 +107,86 @@ func TestSequenceEmptyPool(t *testing.T) {
 	sequenceTwice(tl)
 }
 
+func TestDuplicates(t *testing.T) {
+	t.Run("Certificates", func(t *testing.T) {
+		testDuplicates(t, addCertificate)
+	})
+	t.Run("Precerts", func(t *testing.T) {
+		testDuplicates(t, addPreCertificate)
+	})
+}
+
+func testDuplicates(t *testing.T, add func(*testing.T, *TestLog) func(context.Context) (*ctlog.SequencedLogEntry, error)) {
+	tl := NewEmptyTestLog(t)
+	addCertificate(t, tl) // 0
+	addCertificate(t, tl) // 1
+	fatalIfErr(t, tl.Log.Sequence())
+	addCertificate(t, tl) // 2
+	addCertificate(t, tl) // 3
+
+	wait01 := addCertificateWithSeed(t, tl, 0) // 4
+	wait02 := addCertificateWithSeed(t, tl, 0)
+	wait11 := addCertificateWithSeed(t, tl, 1) // 5
+	wait12 := addCertificateWithSeed(t, tl, 1)
+	fatalIfErr(t, tl.Log.Sequence())
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog()
+
+	e01, err := wait01(context.Background())
+	fatalIfErr(t, err)
+	e02, err := wait02(context.Background())
+	fatalIfErr(t, err)
+
+	if e02.LeafIndex != e01.LeafIndex {
+		t.Errorf("got leaf index %d, expected %d", e02.LeafIndex, e01.LeafIndex)
+	}
+	if e02.Timestamp != e01.Timestamp {
+		t.Errorf("got timestamp %d, expected %d", e02.Timestamp, e01.Timestamp)
+	}
+
+	e11, err := wait11(context.Background())
+	fatalIfErr(t, err)
+	e12, err := wait12(context.Background())
+	fatalIfErr(t, err)
+
+	if e12.LeafIndex != e11.LeafIndex {
+		t.Errorf("got leaf index %d, expected %d", e12.LeafIndex, e11.LeafIndex)
+	}
+	if e12.Timestamp != e11.Timestamp {
+		t.Errorf("got timestamp %d, expected %d", e12.Timestamp, e11.Timestamp)
+	}
+
+	wait03 := addCertificateWithSeed(t, tl, 0)
+	fatalIfErr(t, tl.Log.Sequence())
+	e03, err := wait03(context.Background())
+	fatalIfErr(t, err)
+
+	if e03.LeafIndex != e01.LeafIndex {
+		t.Errorf("got leaf index %d, expected %d", e03.LeafIndex, e01.LeafIndex)
+	}
+	if e03.Timestamp != e01.Timestamp {
+		t.Errorf("got timestamp %d, expected %d", e03.Timestamp, e01.Timestamp)
+	}
+
+	wait21 := addCertificateWithSeed(t, tl, 2) // 6
+	ctlog.PauseSequencer()
+	go tl.Log.Sequence()
+	wait22 := addCertificateWithSeed(t, tl, 2)
+	ctlog.ResumeSequencer()
+
+	e21, err := wait21(context.Background())
+	fatalIfErr(t, err)
+	e22, err := wait22(context.Background())
+	fatalIfErr(t, err)
+
+	if e22.LeafIndex != e21.LeafIndex {
+		t.Errorf("got leaf index %d, expected %d", e22.LeafIndex, e21.LeafIndex)
+	}
+	if e22.Timestamp != e21.Timestamp {
+		t.Errorf("got timestamp %d, expected %d", e22.Timestamp, e21.Timestamp)
+	}
+}
+
 func TestReloadLog(t *testing.T) {
 	t.Run("Certificates", func(t *testing.T) {
 		testReloadLog(t, addCertificate)
@@ -136,16 +218,65 @@ func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Con
 }
 
 func TestSubmit(t *testing.T) {
+	t.Run("Certificates", func(t *testing.T) {
+		testSubmit(t, false)
+	})
+	t.Run("Precerts", func(t *testing.T) {
+		testSubmit(t, true)
+	})
+}
+
+func testSubmit(t *testing.T, precert bool) {
 	tl := NewEmptyTestLog(t)
+	logClient := tl.LogClient()
 
 	// Don't submit at index 0 as it might hide encoding issues.
 	addCertificate(t, tl)
-	tl.Log.Sequence()
 
-	logClient := tl.LogClient()
-	_, err := logClient.AddChain(context.Background(), []ct.ASN1Cert{
-		{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
+	var err error
+	var sct1, sct2 *ct.SignedCertificateTimestamp
+	if precert {
+		sct1, err = logClient.AddPreChain(context.Background(), []ct.ASN1Cert{
+			{Data: testPrecert}, {Data: testIntermediate}, {Data: testRoot}})
+	} else {
+		sct1, err = logClient.AddChain(context.Background(), []ct.ASN1Cert{
+			{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
+	}
 	fatalIfErr(t, err)
+
+	if sct1.SCTVersion != ct.V1 {
+		t.Errorf("got SCT version %d, expected %d", sct1.SCTVersion, ct.V1)
+	}
+	pkix, err := x509.MarshalPKIXPublicKey(tl.Config.Key.Public())
+	if err != nil {
+		t.Fatalf("couldn't marshal public key: %v", err)
+	}
+	logID := sha256.Sum256(pkix)
+	if sct1.LogID.KeyID != logID {
+		t.Errorf("got log ID %x, expected %x", sct1.LogID.KeyID, logID)
+	}
+	if sct1.Timestamp == 0 {
+		t.Error("got zero timestamp")
+	}
+	if idx, err := ctlog.ParseExtensions(sct1.Extensions); err != nil {
+		t.Errorf("couldn't parse extensions: %v", err)
+	} else if idx != 1 {
+		t.Errorf("got extensions index %d, expected 1", idx)
+	}
+
+	if precert {
+		sct2, err = logClient.AddPreChain(context.Background(), []ct.ASN1Cert{
+			{Data: testPrecert}, {Data: testIntermediate}, {Data: testRoot}})
+	} else {
+		sct2, err = logClient.AddChain(context.Background(), []ct.ASN1Cert{
+			{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
+	}
+	fatalIfErr(t, err)
+
+	if sct1.SCTVersion != sct2.SCTVersion || sct1.LogID != sct2.LogID ||
+		sct1.Timestamp != sct2.Timestamp || !bytes.Equal(sct1.Extensions, sct2.Extensions) {
+		t.Error("got different SCTs for the same entry")
+	}
 }
 
 func TestReloadWrongName(t *testing.T) {
@@ -174,19 +305,6 @@ func TestReloadWrongKey(t *testing.T) {
 	if _, err := ctlog.LoadLog(context.Background(), c); err == nil {
 		t.Error("expected loading to fail")
 	}
-}
-
-func TestSubmitPrecert(t *testing.T) {
-	tl := NewEmptyTestLog(t)
-
-	// Don't submit at index 0 as it might hide encoding issues.
-	addCertificate(t, tl)
-	tl.Log.Sequence()
-
-	logClient := tl.LogClient()
-	_, err := logClient.AddPreChain(context.Background(), []ct.ASN1Cert{
-		{Data: testPrecert}, {Data: testIntermediate}, {Data: testRoot}})
-	fatalIfErr(t, err)
 }
 
 func BenchmarkSequencer(b *testing.B) {

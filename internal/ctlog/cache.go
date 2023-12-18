@@ -48,7 +48,7 @@ func (l *Log) cacheGet(leaf *LogEntry) (*SequencedLogEntry, error) {
 		func(stmt *sqlite.Stmt) error {
 			se = &SequencedLogEntry{
 				LogEntry:  *leaf,
-				LeafIndex: stmt.GetInt64("index"),
+				LeafIndex: stmt.GetInt64("leaf_index"),
 				Timestamp: stmt.GetInt64("timestamp"),
 			}
 			return nil
