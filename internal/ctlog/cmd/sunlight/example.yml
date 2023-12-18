@@ -1,0 +1,40 @@
+listen: ":https"
+
+acme:
+  email: rome-autocert@filippo.io
+  host: rome.ct.filippo.io
+  cache: rome-autocert
+
+logs:
+  - name: rome.ct.filippo.io/2024h1
+    shortname: rome2024h1
+    httpprefix: /2024h1
+    roots: roots.pem
+    key: rome2024h1.pem
+    cache: cache/rome2024h1.db
+    s3region: us-east-2
+    s3bucket: rome2024h1
+    notafterstart: 2024-01-01T00:00:00Z
+    notafterlimit: 2024-07-01T00:00:00Z
+
+  - name: rome.ct.filippo.io/2024h2
+    shortname: rome2024h2
+    httpprefix: /2024h2
+    roots: roots.pem
+    key: rome2024h2.pem
+    cache: cache/rome2024h2.db
+    s3region: us-east-2
+    s3bucket: rome2024h2
+    notafterstart: 2024-07-01T00:00:00Z
+    notafterlimit: 2025-01-01T00:00:00Z
+
+  - name: rome.ct.filippo.io/2025h1
+    shortname: rome2025h1
+    httpprefix: /2025h1
+    roots: roots.pem
+    key: rome2025h1.pem
+    cache: cache/rome2025h1.db
+    s3region: us-east-2
+    s3bucket: rome2025h1
+    notafterstart: 2025-01-01T00:00:00Z
+    notafterlimit: 2025-07-01T00:00:00Z

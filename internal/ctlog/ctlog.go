@@ -88,10 +88,23 @@ type Config struct {
 	NotAfterLimit time.Time
 }
 
+var ErrLogExists = errors.New("checkpoint file already exist, refusing to initialize log")
+
 func CreateLog(ctx context.Context, config *Config) error {
 	_, err := config.Backend.Fetch(ctx, "checkpoint")
 	if err == nil {
-		return errors.New("checkpoint file already exist, refusing to initialize log")
+		return ErrLogExists
+	}
+
+	cacheRead, cacheWrite, err := initCache(config.Cache)
+	if err != nil {
+		return fmt.Errorf("couldn't initialize cache database: %w", err)
+	}
+	if err := cacheRead.Close(); err != nil {
+		return fmt.Errorf("couldn't close cache database: %w", err)
+	}
+	if err := cacheWrite.Close(); err != nil {
+		return fmt.Errorf("couldn't close cache database: %w", err)
 	}
 
 	if err := config.Backend.Upload(ctx, "issuers.pem", []byte{}); err != nil {

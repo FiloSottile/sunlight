@@ -14,6 +14,7 @@ require (
 	golang.org/x/mod v0.14.0
 	golang.org/x/net v0.18.0
 	golang.org/x/sync v0.5.0
+	gopkg.in/yaml.v3 v3.0.1
 	sigsum.org/sigsum-go v0.6.1
 )
 
@@ -38,6 +39,7 @@ require (
 	github.com/go-logr/logr v1.3.0 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/google/trillian v1.5.3 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions/v2 v2.0.0 // indirect
 	github.com/prometheus/client_model v0.5.0 // indirect
 	github.com/prometheus/common v0.45.0 // indirect
