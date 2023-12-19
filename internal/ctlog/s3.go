@@ -112,7 +112,7 @@ func (s *S3Backend) upload(ctx context.Context, key string, data io.ReadSeeker, 
 		ContentEncoding: ce,
 	})
 	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", length,
-		"compress", ce != nil, "elapsed", time.Since(start), "error", err)
+		"compress", ce != nil, "elapsed", time.Since(start), "err", err)
 	s.uploadSize.Observe(float64(length))
 	if err != nil {
 		return fmtErrorf("failed to upload %q to S3: %w", key, err)
@@ -125,12 +125,13 @@ func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
-	s.log.DebugContext(ctx, "S3 GET", "key", key, "size", out.ContentLength,
-		"encoding", out.ContentEncoding, "error", err)
 	if err != nil {
+		s.log.DebugContext(ctx, "S3 GET", "key", key, "err", err)
 		return nil, fmtErrorf("failed to fetch %q from S3: %w", key, err)
 	}
 	defer out.Body.Close()
+	s.log.DebugContext(ctx, "S3 GET", "key", key,
+		"size", out.ContentLength, "encoding", out.ContentEncoding)
 	body := out.Body
 	if out.ContentEncoding != nil && *out.ContentEncoding == "gzip" {
 		body, err = gzip.NewReader(out.Body)

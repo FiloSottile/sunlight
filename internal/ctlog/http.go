@@ -104,7 +104,9 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "",
 		"precert": "", "preissuer": "", "chain_len": "", "source": ""}
 	defer func() {
-		labels["error"] = errorCategory(err)
+		if err != nil {
+			labels["error"] = errorCategory(err)
+		}
 		l.m.AddChainCount.With(labels).Inc()
 	}()
 
