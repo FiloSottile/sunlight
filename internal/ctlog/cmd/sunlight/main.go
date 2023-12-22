@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto"
+	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
@@ -160,6 +160,10 @@ func main() {
 			logger.Error("failed to parse key", "err", err)
 			os.Exit(1)
 		}
+		if _, ok := k.(*ecdsa.PrivateKey); !ok {
+			logger.Error("key is not an ECDSA private key")
+			os.Exit(1)
+		}
 
 		notAfterStart, err := time.Parse(time.RFC3339, lc.NotAfterStart)
 		if err != nil {
@@ -174,7 +178,7 @@ func main() {
 
 		cc := &ctlog.Config{
 			Name:          lc.Name,
-			Key:           k.(crypto.Signer),
+			Key:           k.(*ecdsa.PrivateKey),
 			Cache:         lc.Cache,
 			Backend:       b,
 			Log:           logger,

@@ -4,6 +4,8 @@ go 1.21
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
+	filippo.io/bigmod v0.0.3
+	filippo.io/nistec v0.0.3
 	github.com/aws/aws-sdk-go-v2 v1.23.0
 	github.com/aws/aws-sdk-go-v2/config v1.25.3
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.43.0

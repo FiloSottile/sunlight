@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto"
+	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
@@ -57,7 +57,7 @@ func main() {
 	}
 	c := &ctlog.Config{
 		Name:          "rome.ct.filippo.io/2024h1",
-		Key:           k.(crypto.Signer),
+		Key:           k.(*ecdsa.PrivateKey),
 		Cache:         "rome2024h1.db",
 		Backend:       b,
 		Log:           slog.Default(),

@@ -5,8 +5,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -19,6 +17,7 @@ import (
 	"time"
 
 	"crawshaw.io/sqlite"
+	"filippo.io/litetlog/internal/rfc6979"
 	"filippo.io/litetlog/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/x509util"
@@ -76,7 +75,7 @@ func (t tileWithBytes) String() string {
 
 type Config struct {
 	Name string
-	Key  crypto.Signer
+	Key  *ecdsa.PrivateKey
 
 	Cache string
 
@@ -733,7 +732,7 @@ var testingOnlyPauseSequencing func()
 
 // signTreeHead signs the tree and returns a checkpoint according to
 // c2sp.org/checkpoint.
-func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, tree treeWithTimestamp) (checkpoint []byte, err error) {
+func signTreeHead(name string, logID [sha256.Size]byte, privKey *ecdsa.PrivateKey, tree treeWithTimestamp) (checkpoint []byte, err error) {
 	sthBytes, err := ct.SerializeSTHSignatureInput(ct.SignedTreeHead{
 		Version:        ct.V1,
 		TreeSize:       uint64(tree.N),
@@ -786,22 +785,19 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey crypto.Signer, t
 // github.com/google/certificate-transparency-go/tls, in part to limit
 // complexity and in part because tls.CreateSignature expects non-pointer
 // {rsa,ecdsa}.PrivateKey types, which is unusual.
-func digitallySign(k crypto.Signer, msg []byte) ([]byte, error) {
+//
+// We use deterministic RFC 6979 ECDSA signatures so that when fetching a
+// previous SCT's timestamp and index from the deduplication cache, the new SCT
+// we produce is identical.
+func digitallySign(k *ecdsa.PrivateKey, msg []byte) ([]byte, error) {
 	h := sha256.Sum256(msg)
-	sig, err := k.Sign(rand.Reader, h[:], crypto.SHA256)
+	sig, err := rfc6979.Sign(k, h[:], crypto.SHA256)
 	if err != nil {
 		return nil, err
 	}
 	var b cryptobyte.Builder
 	b.AddUint8(4 /* hash = sha256 */)
-	switch k.Public().(type) {
-	case *rsa.PublicKey:
-		b.AddUint8(1 /* signature = rsa */)
-	case *ecdsa.PublicKey:
-		b.AddUint8(3 /* signature = ecdsa */)
-	default:
-		return nil, fmtErrorf("unsupported key type %T", k.Public())
-	}
+	b.AddUint8(3 /* signature = ecdsa */)
 	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
 		b.AddBytes(sig)
 	})

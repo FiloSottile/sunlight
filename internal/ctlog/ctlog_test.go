@@ -16,6 +16,7 @@ import (
 
 	"filippo.io/litetlog/internal/ctlog"
 	ct "github.com/google/certificate-transparency-go"
+	"github.com/google/certificate-transparency-go/tls"
 )
 
 func init() {
@@ -273,8 +274,11 @@ func testSubmit(t *testing.T, precert bool) {
 	}
 	fatalIfErr(t, err)
 
-	if sct1.SCTVersion != sct2.SCTVersion || sct1.LogID != sct2.LogID ||
-		sct1.Timestamp != sct2.Timestamp || !bytes.Equal(sct1.Extensions, sct2.Extensions) {
+	sct1Bytes, err := tls.Marshal(*sct1)
+	fatalIfErr(t, err)
+	sct2Bytes, err := tls.Marshal(*sct2)
+	fatalIfErr(t, err)
+	if !bytes.Equal(sct1Bytes, sct2Bytes) {
 		t.Error("got different SCTs for the same entry")
 	}
 }
