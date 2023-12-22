@@ -33,8 +33,9 @@ type Log struct {
 	logID [sha256.Size]byte
 	m     metrics
 
-	// tree and edgeTiles are owned by sequencePool.
-	tree treeWithTimestamp
+	// tree, edgeTiles, lockCheckpoint, and cacheWrite are owned by sequencePool.
+	tree           treeWithTimestamp
+	lockCheckpoint LockedCheckpoint
 	// edgeTiles is a map from level to the right-most tile of that level.
 	edgeTiles map[int]tileWithBytes
 	// cacheWrite is used to update the deduplication cache at the end of each
@@ -80,6 +81,7 @@ type Config struct {
 	Cache string
 
 	Backend Backend
+	Lock    LockBackend
 	Log     *slog.Logger
 
 	Roots         *x509util.PEMCertPool
@@ -87,12 +89,20 @@ type Config struct {
 	NotAfterLimit time.Time
 }
 
-var ErrLogExists = errors.New("checkpoint file already exist, refusing to initialize log")
+var ErrLogExists = errors.New("checkpoint already exist, refusing to initialize log")
 
 func CreateLog(ctx context.Context, config *Config) error {
-	_, err := config.Backend.Fetch(ctx, "checkpoint")
-	if err == nil {
+	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
+	if err != nil {
+		return fmt.Errorf("couldn't marshal public key: %w", err)
+	}
+	logID := sha256.Sum256(pkix)
+
+	if _, err := config.Backend.Fetch(ctx, "checkpoint"); err == nil {
 		return ErrLogExists
+	}
+	if _, err := config.Lock.Fetch(ctx, logID); err == nil {
+		return fmt.Errorf("checkpoint missing from database but present in object storage")
 	}
 
 	cacheRead, cacheWrite, err := initCache(config.Cache)
@@ -110,12 +120,6 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return fmt.Errorf("couldn't upload issuers.pem: %w", err)
 	}
 
-	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
-	if err != nil {
-		return fmt.Errorf("couldn't marshal public key: %w", err)
-	}
-	logID := sha256.Sum256(pkix)
-
 	timestamp := timeNowUnixMilli()
 	tree := treeWithTimestamp{tlog.Tree{}, timestamp}
 	checkpoint, err := signTreeHead(config.Name, logID, config.Key, tree)
@@ -123,6 +127,9 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return fmt.Errorf("couldn't sign empty tree head: %w", err)
 	}
 
+	if err := config.Lock.Create(ctx, logID, checkpoint); err != nil {
+		return fmt.Errorf("couldn't create checkpoint in lock database: %w", err)
+	}
 	if err := config.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
 		return fmt.Errorf("couldn't upload checkpoint: %w", err)
 	}
@@ -139,18 +146,18 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	}
 	logID := sha256.Sum256(pkix)
 
-	sth, err := config.Backend.Fetch(ctx, "checkpoint")
+	lock, err := config.Lock.Fetch(ctx, logID)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch checkpoint: %w", err)
+		return nil, fmt.Errorf("couldn't fetch checkpoint from lock database: %w", err)
 	}
-	config.Log.DebugContext(ctx, "loaded checkpoint", "checkpoint", sth)
+	config.Log.DebugContext(ctx, "loaded checkpoint", "checkpoint", lock.Bytes())
 	v, err := tlogx.NewRFC6962Verifier(config.Name, config.Key.Public())
 	if err != nil {
 		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
 	}
 	var timestamp int64
 	v.Timestamp = func(t uint64) { timestamp = int64(t) }
-	n, err := note.Open(sth, note.VerifierList(v))
+	n, err := note.Open(lock.Bytes(), note.VerifierList(v))
 	if err != nil {
 		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
 	}
@@ -163,11 +170,43 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		return nil, fmt.Errorf("current time %d is before checkpoint time %d", now, timestamp)
 	}
 	if c.Origin != config.Name {
-		return nil, fmt.Errorf("checkpoint name is %q, not %q", c.Origin, config.Name)
+		return nil, fmt.Errorf("checkpoint name for log ID is %q, not %q", c.Origin, config.Name)
 	}
 	tree := tlog.Tree{N: c.N, Hash: c.Hash}
 	if c.Extension != "" {
 		return nil, fmt.Errorf("unexpected checkpoint extension %q", c.Extension)
+	}
+
+	sth, err := config.Backend.Fetch(ctx, "checkpoint")
+	if err != nil {
+		return nil, fmt.Errorf("couldn't fetch checkpoint: %w", err)
+	}
+	config.Log.DebugContext(ctx, "loaded checkpoint from object storage", "checkpoint", sth)
+	v.Timestamp = func(t uint64) {}
+	n1, err := note.Open(sth, note.VerifierList(v))
+	if err != nil {
+		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
+	}
+	c1, err := tlogx.ParseCheckpoint(n1.Text)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't parse checkpoint: %w", err)
+	}
+	if c1.Origin != config.Name {
+		return nil, fmt.Errorf("checkpoint name from object storage is %q, not %q", c1.Origin, config.Name)
+	}
+	if c1.N == c.N && c1.Hash != c.Hash {
+		return nil, fmt.Errorf("checkpoint hash mismatch: %x != %x", c1.Hash, c.Hash)
+	}
+	if c1.N > c.N {
+		return nil, fmt.Errorf("checkpoint in object storage is newer than lock checkpoint: %d > %d", c1.N, c.N)
+	}
+	if c1.N < c.N {
+		// It's possible that we crashed between committing a new checkpoint to
+		// the lock backend and uploading it to the object storage backend.
+		// That's ok, as long as the rest of the tree load correctly against the
+		// lock checkpoint.
+		config.Log.WarnContext(ctx, "checkpoint in object storage is older than lock checkpoint",
+			"old_size", c1.N, "size", c.N)
 	}
 
 	pemIssuers, err := config.Backend.Fetch(ctx, "issuers.pem")
@@ -249,21 +288,24 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	m.ConfigEnd.Set(float64(config.NotAfterLimit.Unix()))
 
 	return &Log{
-		c:           config,
-		logID:       logID,
-		m:           m,
-		tree:        treeWithTimestamp{tree, timestamp},
-		edgeTiles:   edgeTiles,
-		cacheRead:   cacheRead,
-		currentPool: newPool(),
-		cacheWrite:  cacheWrite,
-		issuers:     issuers,
+		c:              config,
+		logID:          logID,
+		m:              m,
+		tree:           treeWithTimestamp{tree, timestamp},
+		lockCheckpoint: lock,
+		edgeTiles:      edgeTiles,
+		cacheRead:      cacheRead,
+		currentPool:    newPool(),
+		cacheWrite:     cacheWrite,
+		issuers:        issuers,
 	}, nil
 }
 
 var timeNowUnixMilli = func() int64 { return time.Now().UnixMilli() }
 
 // Backend is a strongly consistent object storage.
+//
+// It is dedicated to a single log instance.
 type Backend interface {
 	// Upload is expected to retry transient errors, and only return an error
 	// for unrecoverable errors. When Upload returns, the object must be fully
@@ -281,6 +323,35 @@ type Backend interface {
 	// Metrics returns the metrics to register for this log. The metrics should
 	// not be shared by any other logs.
 	Metrics() []prometheus.Collector
+}
+
+// A LockBackend is a database that supports compare-and-swap operations.
+//
+// It is shared across multiple Log instances, and is used only to store the
+// latest checkpoint before making it publicly available.
+type LockBackend interface {
+	// Fetch obtains the current checkpoint for a given log, as well as the data
+	// necessary to perform a compare-and-swap operation.
+	Fetch(ctx context.Context, logID [sha256.Size]byte) (LockedCheckpoint, error)
+
+	// Replace uploads a new checkpoint, atomically checking that the old
+	// checkpoint is the provided one, and returning the new one. Replace is
+	// expected to retry transient errors, and only return an error for
+	// unrecoverable errors (such as a conflict).
+	Replace(ctx context.Context, old LockedCheckpoint, new []byte) (LockedCheckpoint, error)
+
+	// Create uploads a new checkpoint, atomically checking that none exist for
+	// the log yet.
+	Create(ctx context.Context, logID [sha256.Size]byte, new []byte) error
+
+	// Since a LockBackend is intended to be shared across logs, its metrics
+	// should be collected by the application, not by the Log.
+}
+
+// A LockedCheckpoint is a checkpoint, along with the backend-specific
+// information necessary to perform a compare-and-swap operation.
+type LockedCheckpoint interface {
+	Bytes() []byte
 }
 
 const TileHeight = 8
@@ -563,11 +634,12 @@ func (l *Log) sequence(ctx context.Context) error {
 }
 
 func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
+	oldSize := l.tree.N
 	defer prometheus.NewTimer(l.m.SeqDuration).ObserveDuration()
 	defer func() {
 		if err != nil {
 			p.err = err
-			l.c.Log.ErrorContext(ctx, "pool sequencing failed", "old_tree_size", l.tree.N,
+			l.c.Log.ErrorContext(ctx, "pool sequencing failed", "old_tree_size", oldSize,
 				"entries", len(p.pendingLeaves), "err", err)
 			l.m.SeqCount.With(prometheus.Labels{"error": errorCategory(err)}).Inc()
 
@@ -667,7 +739,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		if t0, ok := edgeTiles[tile.L]; !ok || t0.N < tile.N || (t0.N == tile.N && t0.W < tile.W) {
 			edgeTiles[tile.L] = tileWithBytes{tile, data}
 		}
-		l.c.Log.DebugContext(ctx, "uploading tree tile", "old_tree_size", l.tree.N,
+		l.c.Log.DebugContext(ctx, "uploading tree tile", "old_tree_size", oldSize,
 			"tree_size", n, "tile", tile, "size", len(data))
 		tileCount++
 		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
@@ -692,20 +764,38 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		return fmtErrorf("couldn't sign checkpoint: %w", err)
 	}
 	l.c.Log.DebugContext(ctx, "uploading checkpoint", "size", len(checkpoint))
-	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
-		// This is a critical error, since if the STH actually got committed
-		// before the error we need to make very very sure we don't sign an
-		// inconsistent version next round.
-		return errors.Join(errFatal, fmtErrorf("couldn't upload checkpoint: %w", err))
+	newLock, err := l.c.Lock.Replace(ctx, l.lockCheckpoint, checkpoint)
+	if err != nil {
+		// This is a critical error, since we don't know the state of the
+		// checkpoint in the database at this point. Bail and let LoadLog get us
+		// to a good state after restart.
+		return errors.Join(errFatal, fmtErrorf("couldn't upload checkpoint to database: %w", err))
 	}
 
-	// We update the deduplication cache only once the pool is fully sequenced.
+	// At this point the pool is fully serialized: the new tree was uploaded to
+	// object storage and the checkpoint was committed to the database. If the
+	// checkpoint upload to object storage were to fail, we'd still be in a
+	// consistent state and able to make progress. If we were to crash after
+	// this, recovery would be clean from database and object storage.
+	p.timestamp = timestamp
+	p.firstLeafIndex = l.tree.N
+	l.tree = tree
+	l.lockCheckpoint = newLock
+	l.edgeTiles = edgeTiles
+
+	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
+		// Return an error so we don't produce SCTs that, although safely
+		// serialized, wouldn't be part of a publicly visible tree.
+		return fmtErrorf("couldn't upload checkpoint to object storage: %w", err)
+	}
+
 	// At this point if the cache put fails, there's no reason to return errors
 	// to users. The only consequence of cache false negatives are duplicated
-	// leaves anyway.
+	// leaves anyway. In fact, an error might cause the clients to resumbit,
+	// producing more cache false negatives and duplicates.
 	if err := l.cachePut(sequencedLeaves); err != nil {
 		l.c.Log.ErrorContext(ctx, "cache put failed",
-			"tree_size", tree.N, "entries", n-l.tree.N, "err", err)
+			"tree_size", tree.N, "entries", n-oldSize, "err", err)
 		l.m.CachePutErrors.Inc()
 	}
 
@@ -713,17 +803,12 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		l.c.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
 	l.c.Log.Info("sequenced pool",
-		"tree_size", tree.N, "entries", n-l.tree.N,
+		"tree_size", tree.N, "entries", n-oldSize,
 		"tiles", tileCount, "timestamp", timestamp,
 		"elapsed", time.Since(start))
 	l.m.SeqTiles.Add(float64(tileCount))
 	l.m.TreeSize.Set(float64(tree.N))
 	l.m.TreeTime.Set(float64(timestamp) / 1000)
-
-	p.timestamp = timestamp
-	p.firstLeafIndex = l.tree.N
-	l.tree = tree
-	l.edgeTiles = edgeTiles
 
 	return nil
 }

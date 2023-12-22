@@ -38,6 +38,22 @@ type Config struct {
 		Cache string
 	}
 
+	DynamoDB struct {
+		// Region is the AWS region for the DynamoDB table.
+		Region string
+
+		// Table is the name of the DynamoDB table that stores the latest
+		// checkpoint for each log, with compare-and-swap semantics.
+		//
+		// Note that this is a global table as an extra safety measure: entries
+		// in this table are keyed by log ID (the hash of the public key), so
+		// even in case of misconfiguration of the logs entries, even across
+		// different concurrent instances of Sunlight, a log can't split.
+		//
+		// The table must have a primary key named "logID" of type binary.
+		Table string
+	}
+
 	Logs []LogConfig
 }
 
@@ -122,6 +138,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	db, err := ctlog.NewDynamoDBBackend(ctx, c.DynamoDB.Region, c.DynamoDB.Table, logger)
+	if err != nil {
+		logger.Error("failed to create DynamoDB backend", "err", err)
+		os.Exit(1)
+	}
+	sunlightMetrics.MustRegister(db.Metrics()...)
+
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 
 	for _, lc := range c.Logs {
@@ -181,6 +204,7 @@ func main() {
 			Key:           k.(*ecdsa.PrivateKey),
 			Cache:         lc.Cache,
 			Backend:       b,
+			Lock:          db,
 			Log:           logger,
 			Roots:         r,
 			NotAfterStart: notAfterStart,

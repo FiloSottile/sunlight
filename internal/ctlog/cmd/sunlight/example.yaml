@@ -5,6 +5,10 @@ acme:
   host: rome.ct.filippo.io
   cache: rome-autocert
 
+dynamodb:
+  region: us-east-2
+  table: sunlight
+
 logs:
   - name: rome.ct.filippo.io/2024h1
     shortname: rome2024h1
