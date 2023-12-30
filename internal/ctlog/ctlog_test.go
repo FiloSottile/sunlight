@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"filippo.io/litetlog/internal/ctlog"
+	"filippo.io/sunlight/internal/ctlog"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/tls"
 )

@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"filippo.io/litetlog/internal/ctlog"
-	"filippo.io/litetlog/internal/tlogx"
+	"filippo.io/sunlight/internal/ctlog"
+	"filippo.io/sunlight/internal/tlogx"
 	"github.com/google/certificate-transparency-go/client"
 	"github.com/google/certificate-transparency-go/jsonclient"
 	"github.com/google/certificate-transparency-go/x509"

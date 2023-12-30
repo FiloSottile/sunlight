@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"filippo.io/litetlog/internal/ctlog"
+	"filippo.io/sunlight/internal/ctlog"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"

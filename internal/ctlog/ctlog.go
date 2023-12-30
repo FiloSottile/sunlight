@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"crawshaw.io/sqlite"
-	"filippo.io/litetlog/internal/rfc6979"
-	"filippo.io/litetlog/internal/tlogx"
+	"filippo.io/sunlight/internal/rfc6979"
+	"filippo.io/sunlight/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
