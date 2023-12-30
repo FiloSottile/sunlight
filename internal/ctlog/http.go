@@ -9,7 +9,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	ct "github.com/google/certificate-transparency-go"
@@ -44,6 +46,14 @@ func (l *Log) Handler() http.Handler {
 	mux.Handle("/ct/v1/add-pre-chain", addPreChain)
 	mux.Handle("/ct/v1/get-roots", getRoots)
 	return http.MaxBytesHandler(mux, 128*1024)
+}
+
+type reusedConnContextKey struct{}
+
+// ReusedConnContext must be used as the http.Server.ConnContext field to allow
+// tracking of reused connections.
+func ReusedConnContext(ctx context.Context, c net.Conn) context.Context {
+	return context.WithValue(ctx, reusedConnContextKey{}, &atomic.Bool{})
 }
 
 func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
@@ -101,7 +111,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*LogEntry) error) (response []byte, code int, err error) {
-	labels := prometheus.Labels{"error": "", "issuer": "", "root": "",
+	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
 		"precert": "", "preissuer": "", "chain_len": "", "source": ""}
 	defer func() {
 		if err != nil {
@@ -109,6 +119,9 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		}
 		l.m.AddChainCount.With(labels).Inc()
 	}()
+	if b, ok := ctx.Value(reusedConnContextKey{}).(*atomic.Bool); ok && b.Swap(true) {
+		labels["reused"] = "true"
+	}
 
 	body, err := io.ReadAll(reqBody)
 	if err != nil {

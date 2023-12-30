@@ -263,6 +263,7 @@ func main() {
 		Addr:         c.Listen,
 		TLSConfig:    m.TLSConfig(),
 		Handler:      mux,
+		ConnContext:  ctlog.ReusedConnContext,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		ErrorLog: slog.NewLogLogger(filterHandler{

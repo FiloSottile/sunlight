@@ -160,7 +160,7 @@ func initMetrics() metrics {
 				Name: "addchain_requests_total",
 				Help: "Number of add-[pre-]chain requests, by chain characteristics and errors if any.",
 			},
-			[]string{"error", "issuer", "root", "precert", "preissuer", "chain_len", "source"},
+			[]string{"error", "issuer", "root", "precert", "preissuer", "chain_len", "source", "reused"},
 		),
 		AddChainWait: prometheus.NewSummary(
 			prometheus.SummaryOpts{
