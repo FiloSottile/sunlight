@@ -16,6 +16,7 @@ logs:
     roots: roots.pem
     key: rome2024h1.pem
     cache: cache/rome2024h1.db
+    poolsize: 750
     s3region: us-east-2
     s3bucket: rome2024h1
     notafterstart: 2024-01-01T00:00:00Z
@@ -27,6 +28,7 @@ logs:
     roots: roots.pem
     key: rome2024h2.pem
     cache: cache/rome2024h2.db
+    poolsize: 750
     s3region: us-east-2
     s3bucket: rome2024h2
     notafterstart: 2024-07-01T00:00:00Z
@@ -38,6 +40,7 @@ logs:
     roots: roots.pem
     key: rome2025h1.pem
     cache: cache/rome2025h1.db
+    poolsize: 750
     s3region: us-east-2
     s3bucket: rome2025h1
     notafterstart: 2025-01-01T00:00:00Z

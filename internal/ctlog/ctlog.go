@@ -75,10 +75,10 @@ func (t tileWithBytes) String() string {
 }
 
 type Config struct {
-	Name string
-	Key  *ecdsa.PrivateKey
-
-	Cache string
+	Name     string
+	Key      *ecdsa.PrivateKey
+	PoolSize int
+	Cache    string
 
 	Backend Backend
 	Lock    LockBackend
@@ -545,6 +545,8 @@ func newPool() *pool {
 	}
 }
 
+var errPoolFull = fmtErrorf("rate limited")
+
 // addLeafToPool adds leaf to the current pool, unless it is found in a
 // deduplication cache. It returns a function that will wait until the pool is
 // sequenced and return the sequenced leaf, as well as the source of the
@@ -569,8 +571,12 @@ func (l *Log) addLeafToPool(leaf *LogEntry) (f waitEntryFunc, source string) {
 			return leaf, nil
 		}, "cache"
 	}
-	// TODO: check if the pool is full.
 	n := len(p.pendingLeaves)
+	if l.c.PoolSize > 0 && n >= l.c.PoolSize {
+		return func(ctx context.Context) (*SequencedLogEntry, error) {
+			return nil, errPoolFull
+		}, "ratelimit"
+	}
 	p.pendingLeaves = append(p.pendingLeaves, leaf)
 	f = func(ctx context.Context) (*SequencedLogEntry, error) {
 		select {

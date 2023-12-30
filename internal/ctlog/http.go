@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -71,6 +72,11 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		l.c.Log.DebugContext(r.Context(), "add-chain error", "code", code, "err", err)
+		if code == http.StatusServiceUnavailable {
+			rw.Header().Set("Retry-After", fmt.Sprintf("%d", 30+rand.Intn(60)))
+			http.Error(rw, "😮‍💨 this party is popular and the pool is full ✨ please retry later 🥺", code)
+			return
+		}
 		http.Error(rw, err.Error(), code)
 		return
 	}
@@ -98,6 +104,11 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		l.c.Log.DebugContext(r.Context(), "add-pre-chain error", "code", code, "err", err)
+		if code == http.StatusServiceUnavailable {
+			rw.Header().Set("Retry-After", fmt.Sprintf("%d", 30+rand.Intn(60)))
+			http.Error(rw, "😮‍💨 this party is popular and the pool is full ✨ please retry later 🥺", code)
+			return
+		}
 		http.Error(rw, err.Error(), code)
 		return
 	}
@@ -209,7 +220,9 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	if source == "sequencer" {
 		waitTimer.ObserveDuration()
 	}
-	if err != nil {
+	if err == errPoolFull {
+		return nil, http.StatusServiceUnavailable, err
+	} else if err != nil {
 		return nil, http.StatusInternalServerError, fmtErrorf("failed to sequence leaf: %w", err)
 	}
 

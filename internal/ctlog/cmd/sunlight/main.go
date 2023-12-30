@@ -87,6 +87,12 @@ type LogConfig struct {
 	// Cache is the path to the SQLite deduplication cache file.
 	Cache string
 
+	// PoolSize is the maximum number of chains pending in the sequencing pool.
+	// Since the pool is sequenced every second, it works as a qps limit. If the
+	// pool is full, add-chain requests will be rejected with a 503. Zero means
+	// no limit.
+	PoolSize int
+
 	// S3Region is the AWS region for the S3 bucket.
 	S3Region string
 
@@ -216,6 +222,7 @@ func main() {
 			Name:          lc.Name,
 			Key:           k.(*ecdsa.PrivateKey),
 			Cache:         lc.Cache,
+			PoolSize:      lc.PoolSize,
 			Backend:       b,
 			Lock:          db,
 			Log:           logger,
