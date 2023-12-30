@@ -1,10 +1,12 @@
 package ctlog_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -37,7 +39,6 @@ type TestLog struct {
 }
 
 func NewEmptyTestLog(t testing.TB) *TestLog {
-	backend := NewMemoryBackend(t)
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	fatalIfErr(t, err)
 	k, err := x509.MarshalPKCS8PrivateKey(key)
@@ -48,7 +49,8 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 		Name:          "example.com/TestLog",
 		Key:           key,
 		Cache:         filepath.Join(t.TempDir(), "cache.db"),
-		Backend:       backend,
+		Backend:       NewMemoryBackend(t),
+		Lock:          NewMemoryLockBackend(t),
 		Log:           slog.New(logHandler),
 		Roots:         x509util.NewPEMCertPool(),
 		NotAfterStart: time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
@@ -358,6 +360,73 @@ func (b *MemoryBackend) Fetch(ctx context.Context, key string) ([]byte, error) {
 }
 
 func (b *MemoryBackend) Metrics() []prometheus.Collector { return nil }
+
+type MemoryLockBackend struct {
+	t  testing.TB
+	mu sync.Mutex
+	m  map[[sha256.Size]byte][]byte
+}
+
+type memoryLockCheckpoint struct {
+	logID [sha256.Size]byte
+	data  []byte
+}
+
+func (c *memoryLockCheckpoint) Bytes() []byte {
+	return c.data
+}
+
+func NewMemoryLockBackend(t testing.TB) *MemoryLockBackend {
+	return &MemoryLockBackend{
+		t: t, m: make(map[[sha256.Size]byte][]byte),
+	}
+}
+
+func (b *MemoryLockBackend) Fetch(ctx context.Context, logID [sha256.Size]byte) (ctlog.LockedCheckpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, ok := b.m[logID]
+	if !ok {
+		return nil, fmt.Errorf("log %x not found", logID)
+	}
+	return &memoryLockCheckpoint{logID: logID, data: data}, nil
+}
+
+func (b *MemoryLockBackend) Create(ctx context.Context, logID [sha256.Size]byte, new []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.m[logID]; ok {
+		return fmt.Errorf("log %x already exists", logID)
+	}
+	b.m[logID] = new
+	return nil
+}
+
+func (b *MemoryLockBackend) Replace(ctx context.Context, old ctlog.LockedCheckpoint, new []byte) (ctlog.LockedCheckpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if old == nil {
+		b.t.Errorf("Replace called with nil old checkpoint")
+		return nil, fmt.Errorf("old checkpoint is nil")
+	}
+	oldc := old.(*memoryLockCheckpoint)
+	if current, ok := b.m[oldc.logID]; !ok {
+		return nil, fmt.Errorf("log %x not found", oldc.logID)
+	} else if !bytes.Equal(current, oldc.data) {
+		return nil, fmt.Errorf("log %x has changed", oldc.logID)
+	}
+	b.m[oldc.logID] = new
+	return &memoryLockCheckpoint{logID: oldc.logID, data: new}, nil
+}
 
 func fatalIfErr(t testing.TB, err error) {
 	t.Helper()
