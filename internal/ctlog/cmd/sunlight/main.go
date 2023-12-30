@@ -289,4 +289,6 @@ func main() {
 	if err := s.Shutdown(ctx); err != nil {
 		logger.Error("Shutdown error", "err", err)
 	}
+
+	os.Exit(1)
 }

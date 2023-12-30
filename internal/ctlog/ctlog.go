@@ -575,7 +575,7 @@ func (l *Log) addLeafToPool(leaf *LogEntry) (f waitEntryFunc, source string) {
 	f = func(ctx context.Context) (*SequencedLogEntry, error) {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmtErrorf("context canceled while waiting for sequencing: %w", ctx.Err())
 		case <-p.done:
 			if p.err != nil {
 				return nil, p.err
