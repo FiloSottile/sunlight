@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/prometheus/client_golang/prometheus"
@@ -23,6 +25,8 @@ type S3Backend struct {
 	metrics       []prometheus.Collector
 	uploadSize    prometheus.Summary
 	compressRatio prometheus.Summary
+	hedgeRequests prometheus.Counter
+	hedgeWins     prometheus.Counter
 	log           *slog.Logger
 }
 
@@ -61,23 +65,41 @@ func NewS3Backend(ctx context.Context, region, bucket string, l *slog.Logger) (*
 			AgeBuckets: 6,
 		},
 	)
+	hedgeRequests := prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "s3_hedges_total",
+			Help: "S3 hedge requests that were launched because the main request was too slow.",
+		},
+	)
+	hedgeWins := prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "s3_hedges_successful_total",
+			Help: "S3 hedge requests that completed before the main request.",
+		},
+	)
 
 	transport := http.RoundTripper(http.DefaultTransport.(*http.Transport).Clone())
 	transport = promhttp.InstrumentRoundTripperCounter(counter, transport)
 	transport = promhttp.InstrumentRoundTripperDuration(duration, transport)
 
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region),
-		config.WithHTTPClient(&http.Client{Transport: transport}))
+		config.WithHTTPClient(&http.Client{Transport: transport}),
+		config.WithRetryer(func() aws.Retryer {
+			return retry.AddWithMaxBackoffDelay(retry.NewStandard(), 5*time.Millisecond)
+		}))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config for S3 backend: %w", err)
 	}
 
 	return &S3Backend{
-		client:        s3.NewFromConfig(cfg),
-		bucket:        bucket,
-		metrics:       []prometheus.Collector{counter, duration, uploadSize, compressRatio},
+		client: s3.NewFromConfig(cfg),
+		bucket: bucket,
+		metrics: []prometheus.Collector{counter, duration,
+			uploadSize, compressRatio, hedgeRequests, hedgeWins},
 		uploadSize:    uploadSize,
 		compressRatio: compressRatio,
+		hedgeRequests: hedgeRequests,
+		hedgeWins:     hedgeWins,
 		log:           l,
 	}, nil
 }
@@ -85,7 +107,7 @@ func NewS3Backend(ctx context.Context, region, bucket string, l *slog.Logger) (*
 var _ Backend = &S3Backend{}
 
 func (s *S3Backend) Upload(ctx context.Context, key string, data []byte) error {
-	return s.upload(ctx, key, bytes.NewReader(data), len(data), nil)
+	return s.upload(ctx, key, data, len(data), nil)
 }
 
 func (s *S3Backend) UploadCompressible(ctx context.Context, key string, data []byte) error {
@@ -98,22 +120,48 @@ func (s *S3Backend) UploadCompressible(ctx context.Context, key string, data []b
 		return fmtErrorf("failed to compress %q: %w", key, err)
 	}
 	s.compressRatio.Observe(float64(b.Len()) / float64(len(data)))
-	return s.upload(ctx, key, bytes.NewReader(b.Bytes()), b.Len(), aws.String("gzip"))
+	return s.upload(ctx, key, b.Bytes(), b.Len(), aws.String("gzip"))
 }
 
-func (s *S3Backend) upload(ctx context.Context, key string, data io.ReadSeeker, length int, ce *string) error {
+func (s *S3Backend) upload(ctx context.Context, key string, data []byte, length int, ce *string) error {
 	start := time.Now()
-	// TODO: give up on slow requests and retry.
+	s.uploadSize.Observe(float64(length))
+	ctx, cancel := context.WithCancelCause(ctx)
+	hedgeErr := make(chan error, 1)
+	go func() {
+		timer := time.NewTimer(75 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+			s.hedgeRequests.Inc()
+			_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket:          aws.String(s.bucket),
+				Key:             aws.String(key),
+				Body:            bytes.NewReader(data),
+				ContentLength:   aws.Int64(int64(length)),
+				ContentEncoding: ce,
+			})
+			s.log.DebugContext(ctx, "S3 PUT hedge", "key", key, "err", err)
+			hedgeErr <- err
+			cancel(errors.New("competing request succeeded"))
+		}
+	}()
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:          aws.String(s.bucket),
 		Key:             aws.String(key),
-		Body:            data,
+		Body:            bytes.NewReader(data),
 		ContentLength:   aws.Int64(int64(length)),
 		ContentEncoding: ce,
 	})
+	select {
+	case err = <-hedgeErr:
+		s.hedgeWins.Inc()
+	default:
+		cancel(errors.New("competing request succeeded"))
+	}
 	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", length,
 		"compress", ce != nil, "elapsed", time.Since(start), "err", err)
-	s.uploadSize.Observe(float64(length))
 	if err != nil {
 		return fmtErrorf("failed to upload %q to S3: %w", key, err)
 	}

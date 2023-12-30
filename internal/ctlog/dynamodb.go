@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -48,7 +49,10 @@ func NewDynamoDBBackend(ctx context.Context, region, table string, l *slog.Logge
 	transport = promhttp.InstrumentRoundTripperDuration(duration, transport)
 
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region),
-		config.WithHTTPClient(&http.Client{Transport: transport}))
+		config.WithHTTPClient(&http.Client{Transport: transport}),
+		config.WithRetryer(func() aws.Retryer {
+			return retry.AddWithMaxBackoffDelay(retry.NewStandard(), 5*time.Millisecond)
+		}))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config for DynamoDB backend: %w", err)
 	}
