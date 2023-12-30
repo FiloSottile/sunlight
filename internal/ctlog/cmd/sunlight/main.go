@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strings"
+	"syscall"
 	"time"
 
 	"filippo.io/litetlog/internal/ctlog"
@@ -104,6 +106,7 @@ type LogConfig struct {
 func main() {
 	configFlag := flag.String("c", "sunlight.yaml", "path to the config file")
 	createFlag := flag.Bool("create", false, "create any logs that don't exist and exit")
+	cpuprofileFlag := flag.Bool("cpuprofile", false, "write midnight CPU profile to file")
 	flag.Parse()
 
 	logHandler := multiHandler([]slog.Handler{
@@ -111,6 +114,36 @@ func main() {
 		slog.Handler(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	logger := slog.New(logHandler)
+
+	if *cpuprofileFlag {
+		// At midnight UTC, write a CPU profile to the current directory.
+		go func() {
+			for {
+				next := time.Now().UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+				sigC := make(chan os.Signal, 1)
+				signal.Notify(sigC, syscall.SIGUSR1)
+				select {
+				case <-time.After(time.Until(next)):
+				case <-sigC:
+				}
+				f, err := os.Create("sunlight.pprof")
+				if err != nil {
+					logger.Error("failed to create CPU profile", "err", err)
+					continue
+				}
+				if err := pprof.StartCPUProfile(f); err != nil {
+					logger.Error("failed to start CPU profile", "err", err)
+					continue
+				}
+				time.Sleep(1 * time.Minute)
+				pprof.StopCPUProfile()
+				if err := f.Close(); err != nil {
+					logger.Error("failed to close CPU profile", "err", err)
+					continue
+				}
+			}
+		}()
+	}
 
 	yml, err := os.ReadFile(*configFlag)
 	if err != nil {
