@@ -1,3 +1,15 @@
+// Command sunlight runs a Certificate Transparency log write-path server.
+//
+// A YAML config file is required (specified with -c, by default sunlight.yaml),
+// the keys are documented in the [Config] type. See also example.yaml.
+//
+// If the command line flag -create is passed, the command will create any logs
+// that don't exist and exit.
+//
+// Metrics are exposed publicly at /metrics, and logs are written to stderr in
+// human-readable format, and to stdout in JSON format.
+//
+// A private HTTP debug server is also started on a random port on localhost.
 package main
 
 import (
