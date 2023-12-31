@@ -1,0 +1,21 @@
+name: Go tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Install Go (from go.mod)
+        uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Run tests
+        run: go test ./...
+      - name: Run tests (short + race)
+        run: go test -short -race ./...
