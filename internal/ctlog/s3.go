@@ -30,7 +30,7 @@ type S3Backend struct {
 	log           *slog.Logger
 }
 
-func NewS3Backend(ctx context.Context, region, bucket string, l *slog.Logger) (*S3Backend, error) {
+func NewS3Backend(ctx context.Context, region, bucket, endpoint string, l *slog.Logger) (*S3Backend, error) {
 	counter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "s3_requests_total",
@@ -92,7 +92,11 @@ func NewS3Backend(ctx context.Context, region, bucket string, l *slog.Logger) (*
 	}
 
 	return &S3Backend{
-		client: s3.NewFromConfig(cfg),
+		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
+			if endpoint != "" {
+				o.BaseEndpoint = aws.String(endpoint)
+			}
+		}),
 		bucket: bucket,
 		metrics: []prometheus.Collector{counter, duration,
 			uploadSize, compressRatio, hedgeRequests, hedgeWins},

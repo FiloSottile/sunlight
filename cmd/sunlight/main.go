@@ -66,6 +66,9 @@ type Config struct {
 		//
 		// The table must have a primary key named "logID" of type binary.
 		Table string
+
+		// Endpoint is the base URL the AWS SDK will use to connect to DynamoDB.
+		Endpoint string
 	}
 
 	Logs []LogConfig
@@ -111,6 +114,9 @@ type LogConfig struct {
 	// S3Bucket is the name of the S3 bucket. This bucket must be dedicated to
 	// this specific log instance.
 	S3Bucket string
+
+	// S3Endpoint is the base URL the AWS SDK will use to connect to S3.
+	S3Endpoint string
 
 	// NotAfterStart is the start of the validity range for certificates
 	// accepted by this log instance, as and RFC 3339 date.
@@ -169,7 +175,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	db, err := ctlog.NewDynamoDBBackend(ctx, c.DynamoDB.Region, c.DynamoDB.Table, logger)
+	db, err := ctlog.NewDynamoDBBackend(ctx, c.DynamoDB.Region, c.DynamoDB.Table, c.DynamoDB.Endpoint, logger)
 	if err != nil {
 		logger.Error("failed to create DynamoDB backend", "err", err)
 		os.Exit(1)
@@ -187,7 +193,7 @@ func main() {
 			slog.String("log", lc.ShortName),
 		}))
 
-		b, err := ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, logger)
+		b, err := ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, lc.S3Endpoint, logger)
 		if err != nil {
 			logger.Error("failed to create backend", "err", err)
 			os.Exit(1)
