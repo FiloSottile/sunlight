@@ -25,7 +25,7 @@ type DynamoDBBackend struct {
 	log     *slog.Logger
 }
 
-func NewDynamoDBBackend(ctx context.Context, region, table string, l *slog.Logger) (*DynamoDBBackend, error) {
+func NewDynamoDBBackend(ctx context.Context, region, table, endpoint string, l *slog.Logger) (*DynamoDBBackend, error) {
 	counter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "dynamodb_requests_total",
@@ -58,7 +58,11 @@ func NewDynamoDBBackend(ctx context.Context, region, table string, l *slog.Logge
 	}
 
 	return &DynamoDBBackend{
-		client:  dynamodb.NewFromConfig(cfg),
+		client: dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+			if endpoint != "" {
+				o.BaseEndpoint = aws.String(endpoint)
+			}
+		}),
 		table:   table,
 		metrics: []prometheus.Collector{counter, duration},
 		log:     l,
