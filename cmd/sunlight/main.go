@@ -9,7 +9,9 @@
 // Metrics are exposed publicly at /metrics, and logs are written to stderr in
 // human-readable format, and to stdout in JSON format.
 //
-// A private HTTP debug server is also started on a random port on localhost.
+// A private HTTP debug server is also started on a random port on localhost. It
+// serves the net/http/pprof endpoints, as well as /debug/logson and
+// /debug/logsoff which enable and disable debug logging, respectively.
 package main
 
 import (
@@ -137,12 +139,23 @@ func main() {
 	createFlag := flag.Bool("create", false, "create any logs that don't exist and exit")
 	flag.Parse()
 
+	logLevel := new(slog.LevelVar)
 	logHandler := multiHandler([]slog.Handler{
-		slog.Handler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})),
-		slog.Handler(slog.NewTextHandler(os.Stderr, nil)),
+		slog.Handler(slog.NewJSONHandler(os.Stdout,
+			&slog.HandlerOptions{AddSource: true, Level: logLevel})),
+		slog.Handler(slog.NewTextHandler(os.Stderr,
+			&slog.HandlerOptions{Level: logLevel})),
 	})
 	logger := slog.New(logHandler)
 
+	http.HandleFunc("/debug/logson", func(w http.ResponseWriter, r *http.Request) {
+		logLevel.Set(slog.LevelDebug)
+		w.WriteHeader(http.StatusOK)
+	})
+	http.HandleFunc("/debug/logsoff", func(w http.ResponseWriter, r *http.Request) {
+		logLevel.Set(slog.LevelInfo)
+		w.WriteHeader(http.StatusOK)
+	})
 	go func() {
 		ln, err := net.Listen("tcp", "localhost:")
 		if err != nil {
@@ -305,7 +318,18 @@ func main() {
 				[]slog.Attr{slog.String("source", "http.Server")},
 			),
 			filter: func(r slog.Record) bool {
-				return !strings.HasPrefix(r.Message, "http: TLS handshake error")
+				// Unless debug logging is enabled, hide Internet background radiation.
+				if logHandler.Enabled(context.Background(), slog.LevelDebug) {
+					return true
+				}
+				if !strings.HasPrefix(r.Message, "http: TLS handshake error") {
+					return true
+				}
+				return strings.Contains(r.Message, "acme/autocert") &&
+					!strings.HasSuffix(r.Message, "missing server name") &&
+					!strings.HasSuffix(r.Message, "not configured in HostWhitelist") &&
+					!strings.HasSuffix(r.Message, "server name contains invalid character") &&
+					!strings.HasSuffix(r.Message, "server name component count invalid")
 			},
 		}, slog.LevelWarn),
 	}
