@@ -67,7 +67,7 @@ type Config struct {
 		// The table must have a primary key named "logID" of type binary.
 		Table string
 
-		// Endpoint is the base URL the AWS SDK will use to connect to DynamoDB.
+		// Endpoint is the base URL the AWS SDK will use to connect to DynamoDB. Optional.
 		Endpoint string
 	}
 
@@ -115,7 +115,7 @@ type LogConfig struct {
 	// this specific log instance.
 	S3Bucket string
 
-	// S3Endpoint is the base URL the AWS SDK will use to connect to S3.
+	// S3Endpoint is the base URL the AWS SDK will use to connect to S3. Optional.
 	S3Endpoint string
 
 	// NotAfterStart is the start of the validity range for certificates
