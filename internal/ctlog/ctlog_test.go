@@ -108,6 +108,47 @@ func TestSequenceEmptyPool(t *testing.T) {
 	sequenceTwice(tl)
 }
 
+func TestSequenceUploadCount(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	for i := 0; i < tileWidth+1; i++ {
+		addCertificate(t, tl)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+
+	var old int
+	uploads := func() int {
+		new := tl.Config.Backend.(*MemoryBackend).uploads
+		n := new - old
+		old = new
+		return n
+	}
+	uploads()
+
+	// Empty rounds should cause only one upload (the checkpoint).
+	fatalIfErr(t, tl.Log.Sequence())
+	if n := uploads(); n != 1 {
+		t.Errorf("got %d uploads, expected 1", n)
+	}
+
+	// One entry in steady state (not at tile boundary) should cause three
+	// uploads (the checkpoint, a level -1 tile, and a level 0 tile).
+	addCertificate(t, tl)
+	fatalIfErr(t, tl.Log.Sequence())
+	if n := uploads(); n != 3 {
+		t.Errorf("got %d uploads, expected 3", n)
+	}
+
+	// A tile width worth of entries should cause six uploads (the checkpoint,
+	// two level -1 tiles, two level 0 tiles, and one level 1 tile).
+	for i := 0; i < tileWidth; i++ {
+		addCertificate(t, tl)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	if n := uploads(); n != 6 {
+		t.Errorf("got %d uploads, expected 6", n)
+	}
+}
+
 func TestDuplicates(t *testing.T) {
 	t.Run("Certificates", func(t *testing.T) {
 		testDuplicates(t, addCertificate)

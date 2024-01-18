@@ -721,7 +721,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	}
 
 	// Upload leftover partial data tile, if any.
-	if n%tileWidth != 0 {
+	if n != l.tree.N && n%tileWidth != 0 {
 		tile := tlog.TileForIndex(TileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}

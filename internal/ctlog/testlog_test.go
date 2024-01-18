@@ -320,6 +320,8 @@ type MemoryBackend struct {
 	t  testing.TB
 	mu sync.Mutex
 	m  map[string][]byte
+
+	uploads int
 }
 
 func NewMemoryBackend(t testing.TB) *MemoryBackend {
@@ -333,6 +335,7 @@ func (b *MemoryBackend) UploadCompressible(ctx context.Context, key string, data
 }
 
 func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte) error {
+	b.uploads++
 	// TODO: check key format is expected.
 	if len(data) == 0 && key != "issuers.pem" {
 		b.t.Errorf("uploaded key %q with empty data", key)
