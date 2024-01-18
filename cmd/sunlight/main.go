@@ -32,6 +32,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
@@ -50,6 +51,10 @@ type Config struct {
 
 		// Cache is the path to the autocert cache directory.
 		Cache string
+
+		// Directory is an ACME directory URL to request a certificate from.
+		// Defaults to Let's Encrypt Production. Optional.
+		Directory string
 	}
 
 	DynamoDB struct {
@@ -283,6 +288,10 @@ func main() {
 		Prompt:     autocert.AcceptTOS,
 		Email:      c.ACME.Email,
 		HostPolicy: autocert.HostWhitelist(c.ACME.Host),
+		Client: &acme.Client{
+			DirectoryURL: c.ACME.Directory,
+			UserAgent:    "filippo.io/sunlight",
+		},
 	}
 	s := &http.Server{
 		Addr:         c.Listen,
