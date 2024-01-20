@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
@@ -44,7 +45,9 @@ type Config struct {
 	// Listen is the address to listen on, e.g. ":443".
 	Listen string
 
-	ACME struct {
+	// ACME configuration for obtaining a certificate.
+	// Optional if TLS CertFile and KeyFile are specified.
+	ACME *struct {
 		// Email is the email address to use for ACME account registration.
 		Email string
 
@@ -57,6 +60,14 @@ type Config struct {
 		// Directory is an ACME directory URL to request a certificate from.
 		// Defaults to Let's Encrypt Production. Optional.
 		Directory string
+	}
+
+	TLS struct {
+		// Path to a certificate file. Optional if ACME is configured.
+		CertFile string
+
+		// Path to a key file. Optional if ACME is configured.
+		KeyFile string
 	}
 
 	DynamoDB struct {
@@ -296,19 +307,24 @@ func main() {
 		return
 	}
 
-	m := &autocert.Manager{
-		Cache:      autocert.DirCache(c.ACME.Cache),
-		Prompt:     autocert.AcceptTOS,
-		Email:      c.ACME.Email,
-		HostPolicy: autocert.HostWhitelist(c.ACME.Host),
-		Client: &acme.Client{
-			DirectoryURL: c.ACME.Directory,
-			UserAgent:    "filippo.io/sunlight",
-		},
+	var tlsConfig *tls.Config
+	if c.ACME != nil {
+		m := &autocert.Manager{
+			Cache:      autocert.DirCache(c.ACME.Cache),
+			Prompt:     autocert.AcceptTOS,
+			Email:      c.ACME.Email,
+			HostPolicy: autocert.HostWhitelist(c.ACME.Host),
+			Client: &acme.Client{
+				DirectoryURL: c.ACME.Directory,
+				UserAgent:    "filippo.io/sunlight",
+			},
+		}
+		tlsConfig = m.TLSConfig()
 	}
+
 	s := &http.Server{
 		Addr:         c.Listen,
-		TLSConfig:    m.TLSConfig(),
+		TLSConfig:    tlsConfig,
 		Handler:      mux,
 		ConnContext:  ctlog.ReusedConnContext,
 		ReadTimeout:  5 * time.Second,
@@ -335,7 +351,7 @@ func main() {
 	}
 
 	go func() {
-		err := s.ListenAndServeTLS("", "")
+		err := s.ListenAndServeTLS(c.TLS.CertFile, c.TLS.KeyFile)
 		logger.Error("ListenAndServeTLS error", "err", err)
 		stop()
 	}()
