@@ -6,6 +6,9 @@
 // If the command line flag -create is passed, the command will create any logs
 // that don't exist and exit.
 //
+// If the command line flag -testcert is passed, ACME will be disabled and the
+// certificate will be loaded from sunlight.pem and sunlight-key.pem.
+//
 // Metrics are exposed publicly at /metrics, and logs are written to stderr in
 // human-readable format, and to stdout in JSON format.
 //
@@ -17,6 +20,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
@@ -137,6 +141,7 @@ type LogConfig struct {
 func main() {
 	configFlag := flag.String("c", "sunlight.yaml", "path to the config file")
 	createFlag := flag.Bool("create", false, "create any logs that don't exist and exit")
+	testCertFlag := flag.Bool("testcert", false, "use sunlight.pem and sunlight-key.pem instead of ACME")
 	flag.Parse()
 
 	logLevel := new(slog.LevelVar)
@@ -296,19 +301,8 @@ func main() {
 		return
 	}
 
-	m := &autocert.Manager{
-		Cache:      autocert.DirCache(c.ACME.Cache),
-		Prompt:     autocert.AcceptTOS,
-		Email:      c.ACME.Email,
-		HostPolicy: autocert.HostWhitelist(c.ACME.Host),
-		Client: &acme.Client{
-			DirectoryURL: c.ACME.Directory,
-			UserAgent:    "filippo.io/sunlight",
-		},
-	}
 	s := &http.Server{
 		Addr:         c.Listen,
-		TLSConfig:    m.TLSConfig(),
 		Handler:      mux,
 		ConnContext:  ctlog.ReusedConnContext,
 		ReadTimeout:  5 * time.Second,
@@ -332,6 +326,28 @@ func main() {
 					!strings.HasSuffix(r.Message, "server name component count invalid")
 			},
 		}, slog.LevelWarn),
+	}
+	if *testCertFlag {
+		cert, err := tls.LoadX509KeyPair("sunlight.pem", "sunlight-key.pem")
+		if err != nil {
+			logger.Error("failed to load test cert", "err", err)
+			os.Exit(1)
+		}
+		s.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+	} else {
+		m := &autocert.Manager{
+			Cache:      autocert.DirCache(c.ACME.Cache),
+			Prompt:     autocert.AcceptTOS,
+			Email:      c.ACME.Email,
+			HostPolicy: autocert.HostWhitelist(c.ACME.Host),
+			Client: &acme.Client{
+				DirectoryURL: c.ACME.Directory,
+				UserAgent:    "filippo.io/sunlight",
+			},
+		}
+		s.TLSConfig = m.TLSConfig()
 	}
 
 	go func() {
