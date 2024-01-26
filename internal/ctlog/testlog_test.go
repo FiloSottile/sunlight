@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -321,7 +322,7 @@ type MemoryBackend struct {
 	mu sync.Mutex
 	m  map[string][]byte
 
-	uploads int
+	uploads uint64
 }
 
 func NewMemoryBackend(t testing.TB) *MemoryBackend {
@@ -335,7 +336,7 @@ func (b *MemoryBackend) UploadCompressible(ctx context.Context, key string, data
 }
 
 func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte) error {
-	b.uploads++
+	atomic.AddUint64(&b.uploads, 1)
 	// TODO: check key format is expected.
 	if len(data) == 0 && key != "issuers.pem" {
 		b.t.Errorf("uploaded key %q with empty data", key)
