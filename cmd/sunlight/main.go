@@ -22,6 +22,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"flag"
 	"log/slog"
@@ -109,6 +110,17 @@ type LogConfig struct {
 	//   $ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -outform PEM -out key.pem
 	//
 	Key string
+
+	// PublicKey is the SubjectPublicKeyInfo for this log, base64 encoded.
+	//
+	// This is the same format as used in Google and Apple's log list JSON files.
+	//
+	// To generate from a private key, run:
+	//
+	//   $ openssl pkey -in key.pem -pubout -outform DER | base64 -w0
+	//
+	// If provided, the loaded private Key is required to match it. Optional.
+	PublicKey string
 
 	// Cache is the path to the SQLite deduplication cache file.
 	Cache string
@@ -246,6 +258,32 @@ func main() {
 		if _, ok := k.(*ecdsa.PrivateKey); !ok {
 			logger.Error("key is not an ECDSA private key")
 			os.Exit(1)
+		}
+
+		if lc.PublicKey != "" {
+			cfgPubKey, err := base64.StdEncoding.DecodeString(lc.PublicKey)
+			if err != nil {
+				logger.Error("failed to parse public key base64", "err", err)
+				os.Exit(1)
+			}
+
+			parsedPubKey, err := x509.ParsePKIXPublicKey(cfgPubKey)
+			if err != nil {
+				logger.Error("failed to parse public key", "err", err)
+				os.Exit(1)
+			}
+
+			if !k.(*ecdsa.PrivateKey).PublicKey.Equal(parsedPubKey) {
+				spki, err := x509.MarshalPKIXPublicKey(&k.(*ecdsa.PrivateKey).PublicKey)
+				if err != nil {
+					logger.Error("failed to marshal public key from private key for display", "err", err)
+					os.Exit(1)
+				}
+
+				publicFromPrivate := base64.StdEncoding.EncodeToString(spki)
+				logger.Error("configured private and public keys do not match", "configured", lc.PublicKey, "publicFromPrivate", publicFromPrivate)
+				os.Exit(1)
+			}
 		}
 
 		notAfterStart, err := time.Parse(time.RFC3339, lc.NotAfterStart)
