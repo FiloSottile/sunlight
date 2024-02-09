@@ -43,9 +43,9 @@ func (l *Log) Handler() http.Handler {
 	getRoots = promhttp.InstrumentHandlerInFlight(l.m.ReqInFlight.With(getRootsLabels), getRoots)
 
 	mux := http.NewServeMux()
-	mux.Handle("/ct/v1/add-chain", addChain)
-	mux.Handle("/ct/v1/add-pre-chain", addPreChain)
-	mux.Handle("/ct/v1/get-roots", getRoots)
+	mux.Handle("POST /ct/v1/add-chain", addChain)
+	mux.Handle("POST /ct/v1/add-pre-chain", addPreChain)
+	mux.Handle("GET /ct/v1/get-roots", getRoots)
 	return http.MaxBytesHandler(mux, 128*1024)
 }
 
@@ -58,12 +58,6 @@ func ReusedConnContext(ctx context.Context, c net.Conn) context.Context {
 }
 
 func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		l.c.Log.DebugContext(r.Context(), "got a non-POST request to add-chain", "method", r.Method)
-		http.Error(rw, fmt.Sprintf("unsupported method %q", r.Method), http.StatusMethodNotAllowed)
-		return
-	}
-
 	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *LogEntry) error {
 		if le.IsPrecert {
 			return fmtErrorf("pre-certificate submitted to add-chain")
@@ -90,12 +84,6 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		l.c.Log.DebugContext(r.Context(), "got a non-POST request to add-pre-chain", "method", r.Method)
-		http.Error(rw, fmt.Sprintf("unsupported method %q", r.Method), http.StatusMethodNotAllowed)
-		return
-	}
-
 	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *LogEntry) error {
 		if !le.IsPrecert {
 			return fmtErrorf("final certificate submitted to add-pre-chain")
@@ -278,12 +266,6 @@ func (l *Log) uploadIssuers(ctx context.Context, issuers []*x509.Certificate) er
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		l.c.Log.DebugContext(r.Context(), "got a non-GET request to get-roots", "method", r.Method)
-		http.Error(rw, fmt.Sprintf("unsupported method %q", r.Method), http.StatusMethodNotAllowed)
-		return
-	}
-
 	roots := l.c.Roots.RawCertificates()
 	var res struct {
 		Certificates [][]byte `json:"certificates"`
