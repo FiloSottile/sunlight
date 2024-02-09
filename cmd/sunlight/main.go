@@ -151,10 +151,11 @@ type LogConfig struct {
 }
 
 func main() {
-	configFlag := flag.String("c", "sunlight.yaml", "path to the config file")
-	createFlag := flag.Bool("create", false, "create any logs that don't exist and exit")
-	testCertFlag := flag.Bool("testcert", false, "use sunlight.pem and sunlight-key.pem instead of ACME")
-	flag.Parse()
+	fs := flag.NewFlagSet("sunlight", flag.ExitOnError)
+	configFlag := fs.String("c", "sunlight.yaml", "path to the config file")
+	createFlag := fs.Bool("create", false, "create any logs that don't exist and exit")
+	testCertFlag := fs.Bool("testcert", false, "use sunlight.pem and sunlight-key.pem instead of ACME")
+	fs.Parse(os.Args[1:])
 
 	logLevel := new(slog.LevelVar)
 	logHandler := multiHandler([]slog.Handler{
