@@ -22,6 +22,7 @@ import (
 type S3Backend struct {
 	client        *s3.Client
 	bucket        string
+	keyPrefix     string
 	metrics       []prometheus.Collector
 	uploadSize    prometheus.Summary
 	compressRatio prometheus.Summary
@@ -30,7 +31,7 @@ type S3Backend struct {
 	log           *slog.Logger
 }
 
-func NewS3Backend(ctx context.Context, region, bucket, endpoint string, l *slog.Logger) (*S3Backend, error) {
+func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix string, l *slog.Logger) (*S3Backend, error) {
 	counter := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "s3_requests_total",
@@ -97,7 +98,8 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint string, l *slog.
 				o.BaseEndpoint = aws.String(endpoint)
 			}
 		}),
-		bucket: bucket,
+		bucket:    bucket,
+		keyPrefix: keyPrefix,
 		metrics: []prometheus.Collector{counter, duration,
 			uploadSize, compressRatio, hedgeRequests, hedgeWins},
 		uploadSize:    uploadSize,
@@ -141,7 +143,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 			s.hedgeRequests.Inc()
 			_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 				Bucket:          aws.String(s.bucket),
-				Key:             aws.String(key),
+				Key:             aws.String(s.keyPrefix + "/" + key),
 				Body:            bytes.NewReader(data),
 				ContentLength:   aws.Int64(int64(len(data))),
 				ContentEncoding: contentEncoding,
@@ -154,7 +156,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 	}()
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:          aws.String(s.bucket),
-		Key:             aws.String(key),
+		Key:             aws.String(s.keyPrefix + "/" + key),
 		Body:            bytes.NewReader(data),
 		ContentLength:   aws.Int64(int64(len(data))),
 		ContentEncoding: contentEncoding,
@@ -179,7 +181,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.keyPrefix + "/" + key),
 	})
 	if err != nil {
 		s.log.DebugContext(ctx, "S3 GET", "key", key, "err", err)
