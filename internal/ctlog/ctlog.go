@@ -116,7 +116,7 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return fmt.Errorf("couldn't close cache database: %w", err)
 	}
 
-	if err := config.Backend.Upload(ctx, "issuers.pem", []byte{}); err != nil {
+	if err := config.Backend.Upload(ctx, "issuers.pem", []byte{}, optsText); err != nil {
 		return fmt.Errorf("couldn't upload issuers.pem: %w", err)
 	}
 
@@ -130,7 +130,7 @@ func CreateLog(ctx context.Context, config *Config) error {
 	if err := config.Lock.Create(ctx, logID, checkpoint); err != nil {
 		return fmt.Errorf("couldn't create checkpoint in lock database: %w", err)
 	}
-	if err := config.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
+	if err := config.Backend.Upload(ctx, "checkpoint", checkpoint, optsText); err != nil {
 		return fmt.Errorf("couldn't upload checkpoint: %w", err)
 	}
 
@@ -309,21 +309,30 @@ var timeNowUnixMilli = func() int64 { return time.Now().UnixMilli() }
 type Backend interface {
 	// Upload is expected to retry transient errors, and only return an error
 	// for unrecoverable errors. When Upload returns, the object must be fully
-	// persisted. Upload can be called concurrently.
-	Upload(ctx context.Context, key string, data []byte) error
-
-	// UploadCompressible is like Upload, but the data is compressible and
-	// should be compressed before uploading if possible.
-	UploadCompressible(ctx context.Context, key string, data []byte) error
+	// persisted. Upload can be called concurrently. opts may be nil.
+	Upload(ctx context.Context, key string, data []byte, opts *UploadOptions) error
 
 	// Fetch can be called concurrently. It's expected to decompress any data
-	// uploaded by UploadCompressible.
+	// uploaded with UploadOptions.Compress true.
 	Fetch(ctx context.Context, key string) ([]byte, error)
 
 	// Metrics returns the metrics to register for this log. The metrics should
 	// not be shared by any other logs.
 	Metrics() []prometheus.Collector
 }
+
+type UploadOptions struct {
+	// ContentType is the MIME type of the data. If empty, defaults to
+	// "application/octet-stream".
+	ContentType string
+
+	// Compress is true if the data is compressible and should be compressed
+	// before uploading if possible.
+	Compress bool
+}
+
+var optsCompress = &UploadOptions{Compress: true}
+var optsText = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
 // A LockBackend is a database that supports compare-and-swap operations.
 //
@@ -715,7 +724,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 			tileCount++
 			data := dataTile // data is captured by the g.Go function.
-			g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), data) })
+			g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, optsCompress) })
 			dataTile = nil
 		}
 	}
@@ -729,7 +738,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			"tree_size", n, "tile", tile, "size", len(dataTile))
 		l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 		tileCount++
-		g.Go(func() error { return l.c.Backend.UploadCompressible(gctx, tile.Path(), dataTile) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), dataTile, optsCompress) })
 	}
 
 	// Produce and upload new tree tiles.
@@ -748,7 +757,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		l.c.Log.DebugContext(ctx, "uploading tree tile", "old_tree_size", oldSize,
 			"tree_size", n, "tile", tile, "size", len(data))
 		tileCount++
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, nil) })
 	}
 
 	if err := g.Wait(); err != nil {
@@ -789,7 +798,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	l.lockCheckpoint = newLock
 	l.edgeTiles = edgeTiles
 
-	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint); err != nil {
+	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint, optsText); err != nil {
 		// Return an error so we don't produce SCTs that, although safely
 		// serialized, wouldn't be part of a publicly visible tree.
 		return fmtErrorf("couldn't upload checkpoint to object storage: %w", err)

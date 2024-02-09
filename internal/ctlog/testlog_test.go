@@ -331,11 +331,7 @@ func NewMemoryBackend(t testing.TB) *MemoryBackend {
 	}
 }
 
-func (b *MemoryBackend) UploadCompressible(ctx context.Context, key string, data []byte) error {
-	return b.Upload(ctx, key, data)
-}
-
-func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte) error {
+func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opts *ctlog.UploadOptions) error {
 	atomic.AddUint64(&b.uploads, 1)
 	// TODO: check key format is expected.
 	if len(data) == 0 && key != "issuers.pem" {

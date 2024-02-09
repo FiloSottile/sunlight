@@ -110,26 +110,26 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint string, l *slog.
 
 var _ Backend = &S3Backend{}
 
-func (s *S3Backend) Upload(ctx context.Context, key string, data []byte) error {
-	return s.upload(ctx, key, data, len(data), nil)
-}
-
-func (s *S3Backend) UploadCompressible(ctx context.Context, key string, data []byte) error {
-	b := &bytes.Buffer{}
-	w := gzip.NewWriter(b)
-	if _, err := w.Write(data); err != nil {
-		return fmtErrorf("failed to compress %q: %w", key, err)
-	}
-	if err := w.Close(); err != nil {
-		return fmtErrorf("failed to compress %q: %w", key, err)
-	}
-	s.compressRatio.Observe(float64(b.Len()) / float64(len(data)))
-	return s.upload(ctx, key, b.Bytes(), b.Len(), aws.String("gzip"))
-}
-
-func (s *S3Backend) upload(ctx context.Context, key string, data []byte, length int, ce *string) error {
+func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *UploadOptions) error {
 	start := time.Now()
-	s.uploadSize.Observe(float64(length))
+	contentType := aws.String("application/octet-stream")
+	if opts != nil && opts.ContentType != "" {
+		contentType = aws.String(opts.ContentType)
+	}
+	var contentEncoding *string
+	if opts != nil && opts.Compress {
+		b := &bytes.Buffer{}
+		w := gzip.NewWriter(b)
+		if _, err := w.Write(data); err != nil {
+			return fmtErrorf("failed to compress %q: %w", key, err)
+		}
+		if err := w.Close(); err != nil {
+			return fmtErrorf("failed to compress %q: %w", key, err)
+		}
+		s.compressRatio.Observe(float64(b.Len()) / float64(len(data)))
+		data = b.Bytes()
+		contentEncoding = aws.String("gzip")
+	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	hedgeErr := make(chan error, 1)
 	go func() {
@@ -143,8 +143,9 @@ func (s *S3Backend) upload(ctx context.Context, key string, data []byte, length 
 				Bucket:          aws.String(s.bucket),
 				Key:             aws.String(key),
 				Body:            bytes.NewReader(data),
-				ContentLength:   aws.Int64(int64(length)),
-				ContentEncoding: ce,
+				ContentLength:   aws.Int64(int64(len(data))),
+				ContentEncoding: contentEncoding,
+				ContentType:     contentType,
 			})
 			s.log.DebugContext(ctx, "S3 PUT hedge", "key", key, "err", err)
 			hedgeErr <- err
@@ -155,8 +156,9 @@ func (s *S3Backend) upload(ctx context.Context, key string, data []byte, length 
 		Bucket:          aws.String(s.bucket),
 		Key:             aws.String(key),
 		Body:            bytes.NewReader(data),
-		ContentLength:   aws.Int64(int64(length)),
-		ContentEncoding: ce,
+		ContentLength:   aws.Int64(int64(len(data))),
+		ContentEncoding: contentEncoding,
+		ContentType:     contentType,
 	})
 	select {
 	case err = <-hedgeErr:
@@ -164,8 +166,10 @@ func (s *S3Backend) upload(ctx context.Context, key string, data []byte, length 
 	default:
 		cancel(errors.New("competing request succeeded"))
 	}
-	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", length,
-		"compress", ce != nil, "elapsed", time.Since(start), "err", err)
+	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", len(data),
+		"compress", contentEncoding != nil, "type", *contentType,
+		"elapsed", time.Since(start), "err", err)
+	s.uploadSize.Observe(float64(len(data)))
 	if err != nil {
 		return fmtErrorf("failed to upload %q to S3: %w", key, err)
 	}
