@@ -143,7 +143,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 			s.hedgeRequests.Inc()
 			_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 				Bucket:          aws.String(s.bucket),
-				Key:             aws.String(s.keyPrefix + "/" + key),
+				Key:             aws.String(s.keyPrefix + key),
 				Body:            bytes.NewReader(data),
 				ContentLength:   aws.Int64(int64(len(data))),
 				ContentEncoding: contentEncoding,
@@ -156,7 +156,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 	}()
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:          aws.String(s.bucket),
-		Key:             aws.String(s.keyPrefix + "/" + key),
+		Key:             aws.String(s.keyPrefix + key),
 		Body:            bytes.NewReader(data),
 		ContentLength:   aws.Int64(int64(len(data))),
 		ContentEncoding: contentEncoding,
@@ -181,7 +181,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.keyPrefix + "/" + key),
+		Key:    aws.String(s.keyPrefix + key),
 	})
 	if err != nil {
 		s.log.DebugContext(ctx, "S3 GET", "key", key, "err", err)

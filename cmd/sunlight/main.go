@@ -142,6 +142,9 @@ type LogConfig struct {
 	S3Endpoint string
 
 	// S3KeyPrefix is a prefix on all keys written to S3. Optional.
+	//
+	// S3 doesn't have directories, but using a prefix ending in a "/" is
+	// going to be treated like a directory in many tools using S3.
 	S3KeyPrefix string
 
 	// NotAfterStart is the start of the validity range for certificates
