@@ -141,6 +141,12 @@ type LogConfig struct {
 	// S3Endpoint is the base URL the AWS SDK will use to connect to S3. Optional.
 	S3Endpoint string
 
+	// S3KeyPrefix is a prefix on all keys written to S3. Optional.
+	//
+	// S3 doesn't have directories, but using a prefix ending in a "/" is
+	// going to be treated like a directory in many tools using S3.
+	S3KeyPrefix string
+
 	// NotAfterStart is the start of the validity range for certificates
 	// accepted by this log instance, as and RFC 3339 date.
 	NotAfterStart string
@@ -229,7 +235,7 @@ func main() {
 			slog.String("log", lc.ShortName),
 		}))
 
-		b, err := ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, lc.S3Endpoint, logger)
+		b, err := ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, lc.S3Endpoint, lc.S3KeyPrefix, logger)
 		if err != nil {
 			logger.Error("failed to create backend", "err", err)
 			os.Exit(1)
