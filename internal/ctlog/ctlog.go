@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -617,6 +618,9 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 		l.currentPool.err = err
 		close(l.currentPool.done)
 	}()
+
+	// Randomly stagger the sequencers to avoid conflicting for resources.
+	time.Sleep(time.Duration(rand.Int63n(int64(period))))
 
 	t := time.NewTicker(period)
 	defer t.Stop()
