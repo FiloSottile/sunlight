@@ -64,6 +64,17 @@ type Config struct {
 		Directory string
 	}
 
+	// Checkpoints is the path to the SQLite file that stores the latest
+	// checkpoint for each log, with compare-and-swap semantics.
+	//
+	// This is a global file as an extra safety measure, and must already exist
+	// to protect against accidental misconfiguration. Create the table with:
+	//
+	//     $ sqlite3 checkpoints.db "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, checkpoint TEXT)"
+	//
+	// Only one between this and DynamoDB must be set.
+	Checkpoints string
+
 	DynamoDB struct {
 		// Region is the AWS region for the DynamoDB table.
 		Region string
@@ -217,12 +228,32 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	db, err := ctlog.NewDynamoDBBackend(ctx, c.DynamoDB.Region, c.DynamoDB.Table, c.DynamoDB.Endpoint, logger)
-	if err != nil {
-		logger.Error("failed to create DynamoDB backend", "err", err)
+	var db ctlog.LockBackend
+	switch {
+	case c.Checkpoints != "" && c.DynamoDB.Table != "":
+		logger.Error("both Checkpoints and DynamoDB are set, only one can be used")
+		os.Exit(1)
+	case c.Checkpoints != "":
+		b, err := ctlog.NewSQLiteBackend(ctx, c.Checkpoints, logger)
+		if err != nil {
+			logger.Error("failed to create SQLite checkpoint backend", "err", err)
+			os.Exit(1)
+		}
+		sunlightMetrics.MustRegister(b.Metrics()...)
+		db = b
+	case c.DynamoDB.Table != "":
+		b, err := ctlog.NewDynamoDBBackend(ctx,
+			c.DynamoDB.Region, c.DynamoDB.Table, c.DynamoDB.Endpoint, logger)
+		if err != nil {
+			logger.Error("failed to create DynamoDB backend", "err", err)
+			os.Exit(1)
+		}
+		sunlightMetrics.MustRegister(b.Metrics()...)
+		db = b
+	default:
+		logger.Error("neither Checkpoints nor DynamoDB are set, one must be used")
 		os.Exit(1)
 	}
-	sunlightMetrics.MustRegister(db.Metrics()...)
 
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 

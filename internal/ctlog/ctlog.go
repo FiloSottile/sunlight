@@ -339,6 +339,8 @@ var optsText = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 //
 // It is shared across multiple Log instances, and is used only to store the
 // latest checkpoint before making it publicly available.
+//
+// All its methods must be usable concurrently.
 type LockBackend interface {
 	// Fetch obtains the current checkpoint for a given log, as well as the data
 	// necessary to perform a compare-and-swap operation.
