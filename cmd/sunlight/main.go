@@ -41,6 +41,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 )
@@ -49,6 +51,8 @@ type Config struct {
 	// Listen is the address to listen on, e.g. ":443".
 	Listen string
 
+	// ACME is the configuration for the ACME client. Optional. If missing,
+	// Sunlight will listen for plain HTTP or h2c.
 	ACME struct {
 		// Email is the email address to use for ACME account registration.
 		Email string
@@ -412,7 +416,7 @@ func main() {
 		s.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
-	} else {
+	} else if c.ACME.Host != "" {
 		m := &autocert.Manager{
 			Cache:      autocert.DirCache(c.ACME.Cache),
 			Prompt:     autocert.AcceptTOS,
@@ -424,11 +428,19 @@ func main() {
 			},
 		}
 		s.TLSConfig = m.TLSConfig()
+	} else {
+		s.Handler = h2c.NewHandler(s.Handler, &http2.Server{})
+		s.Handler = http.MaxBytesHandler(s.Handler, 128*1024)
 	}
 
 	go func() {
-		err := s.ListenAndServeTLS("", "")
-		logger.Error("ListenAndServeTLS error", "err", err)
+		if s.TLSConfig != nil {
+			err := s.ListenAndServeTLS("", "")
+			logger.Error("ListenAndServeTLS error", "err", err)
+		} else {
+			err := s.ListenAndServe()
+			logger.Error("ListenAndServe error", "err", err)
+		}
 		stop()
 	}()
 
