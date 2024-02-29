@@ -48,20 +48,19 @@ func NewDynamoDBBackend(ctx context.Context, region, table, endpoint string, l *
 	transport = promhttp.InstrumentRoundTripperCounter(counter, transport)
 	transport = promhttp.InstrumentRoundTripperDuration(duration, transport)
 
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region),
-		config.WithHTTPClient(&http.Client{Transport: transport}),
-		config.WithRetryer(func() aws.Retryer {
-			return retry.AddWithMaxBackoffDelay(retry.NewStandard(), 5*time.Millisecond)
-		}))
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config for DynamoDB backend: %w", err)
 	}
 
 	return &DynamoDBBackend{
 		client: dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+			o.Region = region
 			if endpoint != "" {
 				o.BaseEndpoint = aws.String(endpoint)
 			}
+			o.HTTPClient = &http.Client{Transport: transport}
+			o.Retryer = retry.AddWithMaxBackoffDelay(retry.NewStandard(), 5*time.Millisecond)
 		}),
 		table:   table,
 		metrics: []prometheus.Collector{counter, duration},
@@ -112,7 +111,7 @@ func (b *DynamoDBBackend) Replace(ctx context.Context, old LockedCheckpoint, new
 		},
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmtErrorf("failed to update DynamoDB lock: %w", err)
 	}
 	return &dynamoDBCheckpoint{body: new, logID: o.logID}, nil
 }

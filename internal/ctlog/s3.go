@@ -83,20 +83,19 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 	transport = promhttp.InstrumentRoundTripperCounter(counter, transport)
 	transport = promhttp.InstrumentRoundTripperDuration(duration, transport)
 
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region),
-		config.WithHTTPClient(&http.Client{Transport: transport}),
-		config.WithRetryer(func() aws.Retryer {
-			return retry.AddWithMaxBackoffDelay(retry.NewStandard(), 5*time.Millisecond)
-		}))
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config for S3 backend: %w", err)
 	}
 
 	return &S3Backend{
 		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
+			o.Region = region
 			if endpoint != "" {
 				o.BaseEndpoint = aws.String(endpoint)
 			}
+			o.HTTPClient = &http.Client{Transport: transport}
+			o.Retryer = retry.AddWithMaxBackoffDelay(retry.NewStandard(), 5*time.Millisecond)
 		}),
 		bucket:    bucket,
 		keyPrefix: keyPrefix,

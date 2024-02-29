@@ -68,28 +68,43 @@ type Config struct {
 		Directory string
 	}
 
-	// Checkpoints is the path to the SQLite file that stores the latest
-	// checkpoint for each log, with compare-and-swap semantics.
+	// Checkpoints, ETagS3, or DynamoDB store the latest checkpoint for each
+	// log, with compare-and-swap semantics.
 	//
-	// This is a global file as an extra safety measure, and must already exist
-	// to protect against accidental misconfiguration. Create the table with:
+	// Note that these are global as an extra safety measure: entries are keyed
+	// by log ID (the hash of the public key), so even in case of
+	// misconfiguration of the logs entries, even across different concurrent
+	// instances of Sunlight, a log can't split.
+	//
+	// Only one of these can be set at the same time.
+
+	// Checkpoints is the path to the SQLite file.
+	//
+	// The database must already exist to protect against accidental
+	// misconfiguration. Create the table with:
 	//
 	//     $ sqlite3 checkpoints.db "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, checkpoint TEXT)"
 	//
-	// Only one between this and DynamoDB must be set.
 	Checkpoints string
+
+	// ETagS3 is an S3-compatible object storage bucket that supports ETag on
+	// both reads and writes, and If-Match on writes, such as Tigris.
+	ETagS3 struct {
+		// Region is the AWS region for the S3 bucket.
+		Region string
+
+		// Bucket is the name of the S3 bucket.
+		Bucket string
+
+		// Endpoint is the base URL the AWS SDK will use to connect to S3.
+		Endpoint string
+	}
 
 	DynamoDB struct {
 		// Region is the AWS region for the DynamoDB table.
 		Region string
 
-		// Table is the name of the DynamoDB table that stores the latest
-		// checkpoint for each log, with compare-and-swap semantics.
-		//
-		// Note that this is a global table as an extra safety measure: entries
-		// in this table are keyed by log ID (the hash of the public key), so
-		// even in case of misconfiguration of the logs entries, even across
-		// different concurrent instances of Sunlight, a log can't split.
+		// Table is the name of the DynamoDB table.
 		//
 		// The table must have a primary key named "logID" of type binary.
 		Table string
@@ -234,9 +249,12 @@ func main() {
 
 	var db ctlog.LockBackend
 	switch {
-	case c.Checkpoints != "" && c.DynamoDB.Table != "":
-		logger.Error("both Checkpoints and DynamoDB are set, only one can be used")
+	case c.Checkpoints != "" && c.DynamoDB.Table != "" ||
+		c.Checkpoints != "" && c.ETagS3.Bucket != "" ||
+		c.DynamoDB.Table != "" && c.ETagS3.Bucket != "":
+		logger.Error("only one of Checkpoints, DynamoDB, or ETagS3 can be set at the same time")
 		os.Exit(1)
+
 	case c.Checkpoints != "":
 		b, err := ctlog.NewSQLiteBackend(ctx, c.Checkpoints, logger)
 		if err != nil {
@@ -245,6 +263,7 @@ func main() {
 		}
 		sunlightMetrics.MustRegister(b.Metrics()...)
 		db = b
+
 	case c.DynamoDB.Table != "":
 		b, err := ctlog.NewDynamoDBBackend(ctx,
 			c.DynamoDB.Region, c.DynamoDB.Table, c.DynamoDB.Endpoint, logger)
@@ -254,6 +273,17 @@ func main() {
 		}
 		sunlightMetrics.MustRegister(b.Metrics()...)
 		db = b
+
+	case c.ETagS3.Bucket != "":
+		b, err := ctlog.NewETagBackend(ctx,
+			c.ETagS3.Region, c.ETagS3.Bucket, c.ETagS3.Endpoint, logger)
+		if err != nil {
+			logger.Error("failed to create ETag S3 backend", "err", err)
+			os.Exit(1)
+		}
+		sunlightMetrics.MustRegister(b.Metrics()...)
+		db = b
+
 	default:
 		logger.Error("neither Checkpoints nor DynamoDB are set, one must be used")
 		os.Exit(1)

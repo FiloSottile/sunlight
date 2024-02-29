@@ -89,10 +89,10 @@ func (b *SQLiteBackend) Replace(ctx context.Context, old LockedCheckpoint, new [
 	err := sqlitex.Exec(b.conn, "UPDATE checkpoints SET body = ? WHERE logID = ? AND body = ?",
 		nil, new, o.logID[:], o.body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to update checkpoint: %w", err)
+		return nil, fmtErrorf("failed to update SQLite checkpoint: %w", err)
 	}
 	if b.conn.Changes() == 0 {
-		return nil, errors.New("checkpoint not found or has changed")
+		return nil, fmtErrorf("SQLite checkpoint not found or has changed")
 	}
 	return &sqliteCheckpoint{logID: o.logID, body: new}, nil
 }
