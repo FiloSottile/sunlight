@@ -99,10 +99,10 @@ func CreateLog(ctx context.Context, config *Config) error {
 	}
 	logID := sha256.Sum256(pkix)
 
-	if _, err := config.Backend.Fetch(ctx, "checkpoint"); err == nil {
+	if _, err := config.Lock.Fetch(ctx, logID); err == nil {
 		return ErrLogExists
 	}
-	if _, err := config.Lock.Fetch(ctx, logID); err == nil {
+	if _, err := config.Backend.Fetch(ctx, "checkpoint"); err == nil {
 		return fmt.Errorf("checkpoint missing from database but present in object storage")
 	}
 

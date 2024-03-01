@@ -1,10 +1,7 @@
 // Command sunlight runs a Certificate Transparency log write-path server.
 //
 // A YAML config file is required (specified with -c, by default sunlight.yaml),
-// the keys are documented in the [Config] type. See also example.yaml.
-//
-// If the command line flag -create is passed, the command will create any logs
-// that don't exist and exit.
+// the keys are documented in the [Config] type.
 //
 // If the command line flag -testcert is passed, ACME will be disabled and the
 // certificate will be loaded from sunlight.pem and sunlight-key.pem.
@@ -125,6 +122,13 @@ type LogConfig struct {
 	// ShortName is the short name for the log, used as a metrics and logs label.
 	ShortName string
 
+	// Inception is the creation date of the log, as an RFC 3339 date.
+	//
+	// On the inception date, the log will be created if it doesn't exist. After
+	// that date, a non-existing log will be a fatal error. This assumes it is
+	// due to misconfiguration, and prevents accidental forks.
+	Inception string
+
 	// HTTPPrefix is the prefix for the HTTP endpoint of this log instance,
 	// without trailing slash, but with a leading slash if not empty, and
 	// without "/ct/v1" suffix.
@@ -189,7 +193,6 @@ type LogConfig struct {
 func main() {
 	fs := flag.NewFlagSet("sunlight", flag.ExitOnError)
 	configFlag := fs.String("c", "sunlight.yaml", "path to the config file")
-	createFlag := fs.Bool("create", false, "create any logs that don't exist and exit")
 	testCertFlag := fs.Bool("testcert", false, "use sunlight.pem and sunlight-key.pem instead of ACME")
 	fs.Parse(os.Args[1:])
 
@@ -382,13 +385,13 @@ func main() {
 			NotAfterLimit: notAfterLimit,
 		}
 
-		if *createFlag {
+		if time.Now().Format(time.DateOnly) == lc.Inception {
+			logger.Info("today is the Inception date, creating log")
 			if err := ctlog.CreateLog(ctx, cc); err == ctlog.ErrLogExists {
 				logger.Info("log exists")
 			} else if err != nil {
 				logger.Error("failed to create log", "err", err)
 			}
-			continue
 		}
 
 		l, err := ctlog.LoadLog(ctx, cc)
@@ -406,9 +409,6 @@ func main() {
 
 		prometheus.WrapRegistererWith(prometheus.Labels{"log": lc.ShortName}, sunlightMetrics).
 			MustRegister(l.Metrics()...)
-	}
-	if *createFlag {
-		return
 	}
 
 	s := &http.Server{
