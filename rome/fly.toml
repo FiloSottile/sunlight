@@ -13,6 +13,10 @@ auto_start_machines = false
 [http_service.http_options]
 h2_backend = true
 
+[http_service.concurrency]
+type = "requests"
+hard_limit = 1000
+
 [[http_service.checks]]
 grace_period = "10s"
 interval = "30s"
