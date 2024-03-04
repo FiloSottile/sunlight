@@ -31,8 +31,12 @@ initial_size = "5GB"
 auto_extend_size_threshold = 95
 auto_extend_size_increment = "5GB"
 
-[metrics]
+[[metrics]]
 port = 8080
+path = "/metrics"
+
+[[metrics]]
+port = 9090
 path = "/metrics"
 
 [[vm]]
