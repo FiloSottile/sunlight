@@ -129,6 +129,8 @@ func (b *ETagBackend) Create(ctx context.Context, logID [sha256.Size]byte, new [
 		Body:          bytes.NewReader(new),
 		ContentLength: aws.Int64(int64(len(new))),
 		ContentType:   aws.String("text/plain; charset=utf-8"),
+	}, func(options *s3.Options) {
+		options.APIOptions = append(options.APIOptions, awshttp.AddHeaderValue("If-Match", ""))
 	})
 	if err != nil {
 		return fmt.Errorf("failed to upload %q to ETag backend: %w", key, err)
