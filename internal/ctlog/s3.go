@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	awshttp "github.com/aws/smithy-go/transport/http"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -131,6 +132,32 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 		data = b.Bytes()
 		contentEncoding = aws.String("gzip")
 	}
+	var cacheControl *string
+	if opts != nil && opts.Immutable {
+		cacheControl = aws.String("public, max-age=604800, immutable")
+	}
+	putObject := func() (*s3.PutObjectOutput, error) {
+		return s.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:          aws.String(s.bucket),
+			Key:             aws.String(s.keyPrefix + key),
+			Body:            bytes.NewReader(data),
+			ContentLength:   aws.Int64(int64(len(data))),
+			ContentEncoding: contentEncoding,
+			ContentType:     contentType,
+			CacheControl:    cacheControl,
+		}, func(options *s3.Options) {
+			// As an extra safety measure against concurrent sequencers (which are
+			// especially likely on Fly), use Tigris conditional requests to only
+			// create immutable objects if they don't exist yet. The LockBackend
+			// protects against signing a split tree, but there is a risk that the
+			// losing sequencer will overwrite the data tiles of the winning one.
+			// Without S3 Versioning, that's potentially irrecoverable.
+			if opts.Immutable && options.BaseEndpoint != nil &&
+				*options.BaseEndpoint == "https://fly.storage.tigris.dev" {
+				options.APIOptions = append(options.APIOptions, awshttp.AddHeaderValue("If-Match", ""))
+			}
+		})
+	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	hedgeErr := make(chan error, 1)
 	go func() {
@@ -140,27 +167,13 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 		case <-ctx.Done():
 		case <-timer.C:
 			s.hedgeRequests.Inc()
-			_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-				Bucket:          aws.String(s.bucket),
-				Key:             aws.String(s.keyPrefix + key),
-				Body:            bytes.NewReader(data),
-				ContentLength:   aws.Int64(int64(len(data))),
-				ContentEncoding: contentEncoding,
-				ContentType:     contentType,
-			})
+			_, err := putObject()
 			s.log.DebugContext(ctx, "S3 PUT hedge", "key", key, "err", err)
 			hedgeErr <- err
 			cancel(errors.New("competing request succeeded"))
 		}
 	}()
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:          aws.String(s.bucket),
-		Key:             aws.String(s.keyPrefix + key),
-		Body:            bytes.NewReader(data),
-		ContentLength:   aws.Int64(int64(len(data))),
-		ContentEncoding: contentEncoding,
-		ContentType:     contentType,
-	})
+	_, err := putObject()
 	select {
 	case err = <-hedgeErr:
 		s.hedgeWins.Inc()
@@ -169,6 +182,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 	}
 	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", len(data),
 		"compress", contentEncoding != nil, "type", *contentType,
+		"immutable", cacheControl != nil,
 		"elapsed", time.Since(start), "err", err)
 	s.uploadSize.Observe(float64(len(data)))
 	if err != nil {

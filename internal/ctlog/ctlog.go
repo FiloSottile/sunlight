@@ -330,9 +330,13 @@ type UploadOptions struct {
 	// Compress is true if the data is compressible and should be compressed
 	// before uploading if possible.
 	Compress bool
+
+	// Immutable is true if the data is never updated after being uploaded.
+	Immutable bool
 }
 
-var optsCompress = &UploadOptions{Compress: true}
+var optsHashTile = &UploadOptions{Immutable: true}
+var optsDataTile = &UploadOptions{Compress: true, Immutable: true}
 var optsText = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
 // A LockBackend is a database that supports compare-and-swap operations.
@@ -730,7 +734,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 			tileCount++
 			data := dataTile // data is captured by the g.Go function.
-			g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, optsCompress) })
+			g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, optsDataTile) })
 			dataTile = nil
 		}
 	}
@@ -744,7 +748,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			"tree_size", n, "tile", tile, "size", len(dataTile))
 		l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 		tileCount++
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), dataTile, optsCompress) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), dataTile, optsDataTile) })
 	}
 
 	// Produce and upload new tree tiles.
@@ -763,7 +767,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		l.c.Log.DebugContext(ctx, "uploading tree tile", "old_tree_size", oldSize,
 			"tree_size", n, "tile", tile, "size", len(data))
 		tileCount++
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, nil) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, optsHashTile) })
 	}
 
 	if err := g.Wait(); err != nil {
