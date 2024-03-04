@@ -1,5 +1,5 @@
 app = "sunlight-rome"
-primary_region = "iad"
+primary_region = "sjc"
 
 [build]
 dockerfile = "Dockerfile"
@@ -18,7 +18,7 @@ type = "requests"
 hard_limit = 1000
 
 [[http_service.checks]]
-grace_period = "10s"
+grace_period = "15m" # high to enable Litestream restores
 interval = "30s"
 method = "GET"
 timeout = "5s"
