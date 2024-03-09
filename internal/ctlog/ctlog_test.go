@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"flag"
+	mathrand "math/rand"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -151,25 +152,25 @@ func TestSequenceUploadCount(t *testing.T) {
 
 func TestDuplicates(t *testing.T) {
 	t.Run("Certificates", func(t *testing.T) {
-		testDuplicates(t, addCertificate)
+		testDuplicates(t, addCertificateWithSeed)
 	})
 	t.Run("Precerts", func(t *testing.T) {
-		testDuplicates(t, addPreCertificate)
+		testDuplicates(t, addPreCertificateWithSeed)
 	})
 }
 
-func testDuplicates(t *testing.T, add func(*testing.T, *TestLog) func(context.Context) (*ctlog.SequencedLogEntry, error)) {
+func testDuplicates(t *testing.T, addWithSeed func(*testing.T, *TestLog, int64) func(context.Context) (*ctlog.SequencedLogEntry, error)) {
 	tl := NewEmptyTestLog(t)
-	addCertificate(t, tl) // 0
-	addCertificate(t, tl) // 1
+	addWithSeed(t, tl, mathrand.Int63()) // 0
+	addWithSeed(t, tl, mathrand.Int63()) // 1
 	fatalIfErr(t, tl.Log.Sequence())
-	addCertificate(t, tl) // 2
-	addCertificate(t, tl) // 3
+	addWithSeed(t, tl, mathrand.Int63()) // 2
+	addWithSeed(t, tl, mathrand.Int63()) // 3
 
-	wait01 := addCertificateWithSeed(t, tl, 0) // 4
-	wait02 := addCertificateWithSeed(t, tl, 0)
-	wait11 := addCertificateWithSeed(t, tl, 1) // 5
-	wait12 := addCertificateWithSeed(t, tl, 1)
+	wait01 := addWithSeed(t, tl, 0) // 4
+	wait02 := addWithSeed(t, tl, 0)
+	wait11 := addWithSeed(t, tl, 1) // 5
+	wait12 := addWithSeed(t, tl, 1)
 	fatalIfErr(t, tl.Log.Sequence())
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog()
@@ -198,7 +199,7 @@ func testDuplicates(t *testing.T, add func(*testing.T, *TestLog) func(context.Co
 		t.Errorf("got timestamp %d, expected %d", e12.Timestamp, e11.Timestamp)
 	}
 
-	wait03 := addCertificateWithSeed(t, tl, 0)
+	wait03 := addWithSeed(t, tl, 0)
 	fatalIfErr(t, tl.Log.Sequence())
 	e03, err := wait03(context.Background())
 	fatalIfErr(t, err)
@@ -210,10 +211,10 @@ func testDuplicates(t *testing.T, add func(*testing.T, *TestLog) func(context.Co
 		t.Errorf("got timestamp %d, expected %d", e03.Timestamp, e01.Timestamp)
 	}
 
-	wait21 := addCertificateWithSeed(t, tl, 2) // 6
+	wait21 := addWithSeed(t, tl, 2) // 6
 	ctlog.PauseSequencer()
 	go tl.Log.Sequence()
-	wait22 := addCertificateWithSeed(t, tl, 2)
+	wait22 := addWithSeed(t, tl, 2)
 	ctlog.ResumeSequencer()
 
 	e21, err := wait21(context.Background())
