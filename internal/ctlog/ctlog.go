@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"crawshaw.io/sqlite"
+	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/rfc6979"
 	"filippo.io/sunlight/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
@@ -153,7 +154,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	}
 	config.Log.DebugContext(ctx, "loaded checkpoint", "checkpoint", lock.Bytes())
 	var timestamp int64
-	v, err := tlogx.NewRFC6962Verifier(config.Name, config.Key.Public(),
+	v, err := sunlight.NewRFC6962Verifier(config.Name, config.Key.Public(),
 		func(t uint64) { timestamp = int64(t) })
 	if err != nil {
 		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
@@ -162,7 +163,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
 	}
-	c, err := tlogx.ParseCheckpoint(n.Text)
+	c, err := sunlight.ParseCheckpoint(n.Text)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't parse checkpoint: %w", err)
 	}
@@ -182,7 +183,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		return nil, fmt.Errorf("couldn't fetch checkpoint: %w", err)
 	}
 	config.Log.DebugContext(ctx, "loaded checkpoint from object storage", "checkpoint", sth)
-	v, err = tlogx.NewRFC6962Verifier(config.Name, config.Key.Public(), nil)
+	v, err = sunlight.NewRFC6962Verifier(config.Name, config.Key.Public(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
 	}
@@ -190,7 +191,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
 	}
-	c1, err := tlogx.ParseCheckpoint(n1.Text)
+	c1, err := sunlight.ParseCheckpoint(n1.Text)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't parse checkpoint: %w", err)
 	}
@@ -880,7 +881,7 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey *ecdsa.PrivateKe
 		return nil, fmtErrorf("couldn't construct signer: %w", err)
 	}
 	signedNote, err := note.Sign(&note.Note{
-		Text: tlogx.FormatCheckpoint(tlogx.Checkpoint{
+		Text: sunlight.FormatCheckpoint(sunlight.Checkpoint{
 			Origin: name,
 			Tree:   tlog.Tree{N: tree.N, Hash: tree.Hash},
 		}),

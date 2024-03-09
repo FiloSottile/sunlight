@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
-	"filippo.io/sunlight/internal/tlogx"
 	"github.com/google/certificate-transparency-go/client"
 	"github.com/google/certificate-transparency-go/jsonclient"
 	"github.com/google/certificate-transparency-go/x509"
@@ -118,12 +118,12 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 
 	sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
 	fatalIfErr(t, err)
-	v, err := tlogx.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public(),
+	v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public(),
 		func(t uint64) { sthTimestamp = int64(t) })
 	fatalIfErr(t, err)
 	n, err := note.Open(sth, note.VerifierList(v))
 	fatalIfErr(t, err)
-	c, err := tlogx.ParseCheckpoint(n.Text)
+	c, err := sunlight.ParseCheckpoint(n.Text)
 	fatalIfErr(t, err)
 
 	if c.Origin != "example.com/TestLog" {
