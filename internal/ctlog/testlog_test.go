@@ -118,9 +118,9 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 
 	sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
 	fatalIfErr(t, err)
-	v, err := tlogx.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
+	v, err := tlogx.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public(),
+		func(t uint64) { sthTimestamp = int64(t) })
 	fatalIfErr(t, err)
-	v.Timestamp = func(t uint64) { sthTimestamp = int64(t) }
 	n, err := note.Open(sth, note.VerifierList(v))
 	fatalIfErr(t, err)
 	c, err := tlogx.ParseCheckpoint(n.Text)

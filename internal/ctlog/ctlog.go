@@ -152,12 +152,12 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		return nil, fmt.Errorf("couldn't fetch checkpoint from lock database: %w", err)
 	}
 	config.Log.DebugContext(ctx, "loaded checkpoint", "checkpoint", lock.Bytes())
-	v, err := tlogx.NewRFC6962Verifier(config.Name, config.Key.Public())
+	var timestamp int64
+	v, err := tlogx.NewRFC6962Verifier(config.Name, config.Key.Public(),
+		func(t uint64) { timestamp = int64(t) })
 	if err != nil {
 		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
 	}
-	var timestamp int64
-	v.Timestamp = func(t uint64) { timestamp = int64(t) }
 	n, err := note.Open(lock.Bytes(), note.VerifierList(v))
 	if err != nil {
 		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
@@ -173,7 +173,6 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	if c.Origin != config.Name {
 		return nil, fmt.Errorf("checkpoint name for log ID is %q, not %q", c.Origin, config.Name)
 	}
-	tree := tlog.Tree{N: c.N, Hash: c.Hash}
 	if c.Extension != "" {
 		return nil, fmt.Errorf("unexpected checkpoint extension %q", c.Extension)
 	}
@@ -183,7 +182,10 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		return nil, fmt.Errorf("couldn't fetch checkpoint: %w", err)
 	}
 	config.Log.DebugContext(ctx, "loaded checkpoint from object storage", "checkpoint", sth)
-	v.Timestamp = func(t uint64) {}
+	v, err = tlogx.NewRFC6962Verifier(config.Name, config.Key.Public(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
+	}
 	n1, err := note.Open(sth, note.VerifierList(v))
 	if err != nil {
 		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
@@ -230,7 +232,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		// Fetch the right-most edge tiles by reading the last leaf.
 		// TileHashReader will fetch and verify the right tiles as a
 		// side-effect.
-		if _, err := tlog.TileHashReader(tree, &tileReader{
+		if _, err := tlog.TileHashReader(c.Tree, &tileReader{
 			fetch: func(key string) ([]byte, error) {
 				return config.Backend.Fetch(ctx, key)
 			},
@@ -278,10 +280,10 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	}
 
 	config.Log.InfoContext(ctx, "loaded log", "logID", base64.StdEncoding.EncodeToString(logID[:]),
-		"size", tree.N, "timestamp", timestamp, "issuers", len(issuers.RawCertificates()))
+		"size", c.N, "timestamp", timestamp, "issuers", len(issuers.RawCertificates()))
 
 	m := initMetrics()
-	m.TreeSize.Set(float64(tree.N))
+	m.TreeSize.Set(float64(c.N))
 	m.TreeTime.Set(float64(timestamp))
 	m.Issuers.Set(float64(len(issuers.RawCertificates())))
 	m.ConfigRoots.Set(float64(len(config.Roots.RawCertificates())))
@@ -292,7 +294,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		c:              config,
 		logID:          logID,
 		m:              m,
-		tree:           treeWithTimestamp{tree, timestamp},
+		tree:           treeWithTimestamp{c.Tree, timestamp},
 		lockCheckpoint: lock,
 		edgeTiles:      edgeTiles,
 		cacheRead:      cacheRead,
@@ -878,9 +880,9 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey *ecdsa.PrivateKe
 		return nil, fmtErrorf("couldn't construct signer: %w", err)
 	}
 	signedNote, err := note.Sign(&note.Note{
-		Text: tlogx.MarshalCheckpoint(tlogx.Checkpoint{
+		Text: tlogx.FormatCheckpoint(tlogx.Checkpoint{
 			Origin: name,
-			N:      tree.N, Hash: tree.Hash,
+			Tree:   tlog.Tree{N: tree.N, Hash: tree.Hash},
 		}),
 	}, signer)
 	if err != nil {
