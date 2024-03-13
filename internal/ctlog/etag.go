@@ -113,7 +113,7 @@ func (b *ETagBackend) Replace(ctx context.Context, old LockedCheckpoint, new []b
 		options.APIOptions = append(options.APIOptions, awshttp.AddHeaderValue("If-Match", o.eTag))
 	})
 	if err != nil {
-		return nil, fmtErrorf("failed to upload to ETag backend %q: %w", o.key, err)
+		return nil, fmtErrorf("failed to upload to ETag backend %q with ETag %q: %w", o.key, o.eTag, err)
 	}
 	if out.ETag == nil {
 		return nil, fmtErrorf("no ETag in response for %q from ETag backend", o.key)
