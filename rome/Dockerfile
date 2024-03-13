@@ -9,6 +9,7 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
+COPY *.go ./
 RUN CGO_ENABLED=1 go install -trimpath ./cmd/sunlight
 
 FROM alpine:3.19 as download
