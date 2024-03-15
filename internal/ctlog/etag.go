@@ -86,6 +86,8 @@ func (b *ETagBackend) Fetch(ctx context.Context, logID [sha256.Size]byte) (Locke
 	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(b.bucket),
 		Key:    aws.String(key),
+	}, func(options *s3.Options) {
+		options.APIOptions = append(options.APIOptions, awshttp.AddHeaderValue("Cache-Control", "no-cache"))
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch %q from ETag backend: %w", key, err)

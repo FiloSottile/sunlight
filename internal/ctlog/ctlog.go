@@ -207,6 +207,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	if c1.N < c.N {
 		// It's possible that we crashed between committing a new checkpoint to
 		// the lock backend and uploading it to the object storage backend.
+		// Or maybe the object storage backend GETs are cached.
 		// That's ok, as long as the rest of the tree load correctly against the
 		// lock checkpoint.
 		config.Log.WarnContext(ctx, "checkpoint in object storage is older than lock checkpoint",
