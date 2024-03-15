@@ -49,6 +49,10 @@ operating a Sunlight instance:
     between 5TB and 10TB for a six months shard at current (~75/s) submission
     rates.
 
+    We recommend enabling S3 Object Versioning (see
+    [#11](https://github.com/FiloSottile/sunlight/issues/11)) or overwriting
+    protection (automatically enabled client-side on Tigris).
+
     Currently, S3 and S3-compatible APIs are supported.
 
   * A per-log deduplication cache, to return existing SCTs for previously
