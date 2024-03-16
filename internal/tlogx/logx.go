@@ -15,41 +15,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/mod/sumdb/note"
-	"golang.org/x/mod/sumdb/tlog"
 )
-
-// NewTilesForSize is like [tlog.NewTiles] but only lists the largest partial
-// tile for each coordinate.
-//
-// This makes only the tree of size newTreeSize retrievable, and not the trees
-// of sizes oldTreeSize+1 to newTreeSize-1 (until the relevant full tiles are
-// available), assuming tiles for oldTreeSize were similarly generated.
-//
-// NewTilesForSize also doesn't return tiles that have not grown since
-// oldTreeSize; it's unclear why [tlog.NewTiles] does.
-//
-// Upstreamed as https://go.dev/cl/570295.
-func NewTilesForSize(h int, oldTreeSize, newTreeSize int64) []tlog.Tile {
-	if h <= 0 {
-		panic(fmt.Sprintf("NewTilesForSize: invalid height %d", h))
-	}
-	var tiles []tlog.Tile
-	for level := 0; newTreeSize>>(h*level) > 0; level++ {
-		oldN := oldTreeSize >> (h * level)
-		newN := newTreeSize >> (h * level)
-		if oldN == newN {
-			continue
-		}
-		for n := oldN >> h; n < newN>>h; n++ {
-			tiles = append(tiles, tlog.Tile{H: h, L: int(level), N: n, W: 1 << h})
-		}
-		n := newN >> h
-		if w := int(newN - n<<h); w > 0 {
-			tiles = append(tiles, tlog.Tile{H: h, L: int(level), N: n, W: w})
-		}
-	}
-	return tiles
-}
 
 type verifier struct {
 	name   string

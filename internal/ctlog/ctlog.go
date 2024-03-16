@@ -756,7 +756,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	}
 
 	// Produce and upload new tree tiles.
-	tiles := tlogx.NewTilesForSize(TileHeight, l.tree.N, n)
+	tiles := tlog.NewTiles(TileHeight, l.tree.N, n)
 	for _, tile := range tiles {
 		tile := tile // tile is captured by the g.Go function.
 		data, err := tlog.ReadTileData(tile, hashReader)
