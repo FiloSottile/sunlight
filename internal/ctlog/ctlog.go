@@ -793,6 +793,11 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		return fmtErrorf("couldn't sign checkpoint: %w", err)
 	}
 	l.c.Log.DebugContext(ctx, "uploading checkpoint", "size", len(checkpoint))
+
+	if testingOnlyFailCommit {
+		return errors.Join(errFatal, errors.New("failing commit checkpoint for test"))
+	}
+
 	newLock, err := l.c.Lock.Replace(ctx, l.lockCheckpoint, checkpoint)
 	if err != nil {
 		// This is a critical error, since we don't know the state of the
@@ -843,6 +848,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 }
 
 var testingOnlyPauseSequencing func()
+
+var testingOnlyFailCommit bool
 
 // signTreeHead signs the tree and returns a checkpoint according to
 // c2sp.org/checkpoint.

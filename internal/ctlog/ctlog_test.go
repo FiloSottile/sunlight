@@ -260,6 +260,33 @@ func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Con
 	}
 }
 
+func TestRecoverLogFailCommit(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	n := int64(tileWidth + 2)
+	if testing.Short() {
+		n = 3
+	} else {
+		tl.Quiet()
+	}
+
+	// set to false to make test pass
+	tl.Config.Backend.(*MemoryBackend).errorOnOverwrite = true
+
+	for i := int64(0); i < n; i++ {
+		addCertificateFast(t, tl) // won't complain on error
+		ctlog.SetFailCommit(true)
+		if err := tl.Log.Sequence(); err == nil {
+			t.Fatal("expected sequencer failure")
+		}
+		ctlog.SetFailCommit(false)
+
+		tl = ReloadLog(t, tl)
+		addCertificate(t, tl) // will complain on error
+		fatalIfErr(t, tl.Log.Sequence())
+		tl.CheckLog()
+	}
+}
+
 func TestSubmit(t *testing.T) {
 	t.Run("Certificates", func(t *testing.T) {
 		testSubmit(t, false)

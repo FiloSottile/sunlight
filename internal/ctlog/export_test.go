@@ -26,3 +26,7 @@ func PauseSequencer() {
 func ResumeSequencer() {
 	close(seqRunning)
 }
+
+func SetFailCommit(b bool) {
+	testingOnlyFailCommit = b
+}
