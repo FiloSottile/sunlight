@@ -260,6 +260,31 @@ func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Con
 	}
 }
 
+func TestAsyncUploads(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	n := int64(tileWidth + 2)
+	if testing.Short() {
+		n = 3
+	} else {
+		tl.Quiet()
+	}
+
+	// set to false to make test pass
+	tl.Config.Backend.(*MemoryBackend).asyncUploads = true
+
+	before := ctlog.SequenceTimeout()
+	ctlog.SetSequenceTimeout(100 * time.Millisecond)
+	defer ctlog.SetSequenceTimeout(before)
+
+	for i := int64(0); i < n; i++ {
+		addCertificateFast(t, tl)        // won't complain on error
+		fatalIfErr(t, tl.Log.Sequence()) // won't complain on non-fatal err
+
+		tl = ReloadLog(t, tl)
+		tl.CheckLog()
+	}
+}
+
 func TestSubmit(t *testing.T) {
 	t.Run("Certificates", func(t *testing.T) {
 		testSubmit(t, false)

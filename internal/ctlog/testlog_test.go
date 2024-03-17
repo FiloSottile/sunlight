@@ -322,7 +322,8 @@ type MemoryBackend struct {
 	mu sync.Mutex
 	m  map[string][]byte
 
-	uploads uint64
+	uploads      uint64
+	asyncUploads bool
 }
 
 func NewMemoryBackend(t testing.TB) *MemoryBackend {
@@ -340,6 +341,24 @@ func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opt
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
+	if b.asyncUploads && mathrand.Int31n(100) == 0 {
+		done := make(chan struct{})
+		go func() {
+			time.Sleep(time.Duration(1.5 * float64(ctlog.SequenceTimeout())))
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			b.m[key] = data
+			close(done)
+		}()
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.m[key] = data

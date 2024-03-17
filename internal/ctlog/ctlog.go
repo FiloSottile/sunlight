@@ -648,7 +648,7 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 	}
 }
 
-const sequenceTimeout = 5 * time.Second
+var sequenceTimeout = 5 * time.Second
 
 var errFatal = errors.New("fatal sequencing error")
 
@@ -793,6 +793,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		return fmtErrorf("couldn't sign checkpoint: %w", err)
 	}
 	l.c.Log.DebugContext(ctx, "uploading checkpoint", "size", len(checkpoint))
+
 	newLock, err := l.c.Lock.Replace(ctx, l.lockCheckpoint, checkpoint)
 	if err != nil {
 		// This is a critical error, since we don't know the state of the
