@@ -694,7 +694,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 	timestamp := timeNowUnixMilli()
 	if timestamp <= l.tree.Time {
-		return errors.Join(errFatal, fmtErrorf("time did not progress! %d -> %d", l.tree.Time, timestamp))
+		return fmt.Errorf("%w: time did not progress! %d -> %d", errFatal, l.tree.Time, timestamp)
 	}
 
 	edgeTiles := maps.Clone(l.edgeTiles)
@@ -798,7 +798,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		// This is a critical error, since we don't know the state of the
 		// checkpoint in the database at this point. Bail and let LoadLog get us
 		// to a good state after restart.
-		return errors.Join(errFatal, fmtErrorf("couldn't upload checkpoint to database: %w", err))
+		return fmt.Errorf("%w: couldn't upload checkpoint to database: %w", errFatal, err)
 	}
 
 	// At this point the pool is fully serialized: the new tree was uploaded to

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"flag"
 	mathrand "math/rand"
 	"sync/atomic"
@@ -351,6 +352,36 @@ func TestReloadWrongKey(t *testing.T) {
 	if _, err := ctlog.LoadLog(context.Background(), c); err == nil {
 		t.Error("expected loading to fail")
 	}
+}
+
+func TestFatalError(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	addCertificate(t, tl)
+	addCertificate(t, tl)
+	fatalIfErr(t, tl.Log.Sequence())
+
+	lockErr := errors.New("lock replace error")
+	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = func(
+		old ctlog.LockedCheckpoint, new []byte) error {
+		return lockErr
+	}
+
+	addCertificateExpectFailure(t, tl)
+	addCertificateExpectFailure(t, tl)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	if err := tl.Log.RunSequencer(ctx, 50*time.Millisecond); !errors.Is(err, lockErr) {
+		t.Errorf("expected fatal error, got %v", err)
+	}
+	tl.CheckLog()
+
+	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = nil
+
+	tl = ReloadLog(t, tl)
+	addCertificate(t, tl)
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog()
+	// TODO: expect log size 3.
 }
 
 func BenchmarkSequencer(b *testing.B) {

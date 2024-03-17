@@ -226,14 +226,20 @@ func (tl *TestLog) StartSequencer() {
 	}()
 }
 
-func waitFuncWrapper(t testing.TB, le *ctlog.LogEntry, f func(ctx context.Context) (*ctlog.SequencedLogEntry, error)) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+func waitFuncWrapper(t testing.TB, le *ctlog.LogEntry, expectSuccess bool,
+	f func(ctx context.Context) (*ctlog.SequencedLogEntry, error),
+) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
 	var called bool
 	fw := func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+		called = true
 		se, err := f(ctx)
-		if err != nil {
+		if !expectSuccess {
+			if err == nil {
+				t.Error("expected an error")
+			}
+		} else if err != nil {
 			t.Error(err)
-		}
-		if !reflect.DeepEqual(*le, se.LogEntry) {
+		} else if !reflect.DeepEqual(*le, se.LogEntry) {
 			t.Error("LogEntry is different")
 		}
 		return se, err
@@ -256,7 +262,7 @@ func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx cont
 	e.Certificate = make([]byte, r.Intn(4)+8)
 	r.Read(e.Certificate)
 	f, _ := tl.Log.AddLeafToPool(e)
-	return waitFuncWrapper(t, e, f)
+	return waitFuncWrapper(t, e, true, f)
 }
 
 func addCertificateFast(t *testing.T, tl *TestLog) {
@@ -264,6 +270,14 @@ func addCertificateFast(t *testing.T, tl *TestLog) {
 	e.Certificate = make([]byte, mathrand.Intn(3)+1)
 	rand.Read(e.Certificate)
 	tl.Log.AddLeafToPool(e)
+}
+
+func addCertificateExpectFailure(t *testing.T, tl *TestLog) {
+	e := &ctlog.LogEntry{}
+	e.Certificate = make([]byte, mathrand.Intn(4)+8)
+	rand.Read(e.Certificate)
+	f, _ := tl.Log.AddLeafToPool(e)
+	waitFuncWrapper(t, e, false, f)
 }
 
 func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
@@ -283,7 +297,7 @@ func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx c
 		r.Read(e.PrecertSigningCert)
 	}
 	f, _ := tl.Log.AddLeafToPool(e)
-	return waitFuncWrapper(t, e, f)
+	return waitFuncWrapper(t, e, true, f)
 }
 
 const tileWidth = 1 << ctlog.TileHeight
@@ -365,6 +379,8 @@ type MemoryLockBackend struct {
 	t  testing.TB
 	mu sync.Mutex
 	m  map[[sha256.Size]byte][]byte
+
+	ReplaceCallback func(old ctlog.LockedCheckpoint, new []byte) error
 }
 
 type memoryLockCheckpoint struct {
@@ -411,6 +427,11 @@ func (b *MemoryLockBackend) Create(ctx context.Context, logID [sha256.Size]byte,
 func (b *MemoryLockBackend) Replace(ctx context.Context, old ctlog.LockedCheckpoint, new []byte) (ctlog.LockedCheckpoint, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if b.ReplaceCallback != nil {
+		if err := b.ReplaceCallback(old, new); err != nil {
+			return nil, err
+		}
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()

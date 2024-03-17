@@ -222,8 +222,8 @@ func fmtErrorf(format string, args ...interface{}) error {
 	category = strings.TrimSpace(category)
 	category = strings.TrimSuffix(category, ":")
 	err := fmt.Errorf(format, args...)
-	if err, ok := errors.Unwrap(err).(categoryError); ok {
-		category = category + ": " + err.category
+	if subCatErr := new(categoryError); errors.As(err, subCatErr) {
+		category = category + ": " + subCatErr.category
 	}
 	return categoryError{category: category, err: err}
 }
