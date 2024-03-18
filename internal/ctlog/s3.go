@@ -154,7 +154,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 			// Without S3 Versioning, that's potentially irrecoverable.
 			if opts.Immutable && options.BaseEndpoint != nil &&
 				*options.BaseEndpoint == "https://fly.storage.tigris.dev" {
-				options.APIOptions = append(options.APIOptions, awshttp.AddHeaderValue("If-Match", ""))
+				options.APIOptions = append(options.APIOptions, awshttp.AddHeaderValue("If-Match", `""`))
 			}
 		})
 	}
