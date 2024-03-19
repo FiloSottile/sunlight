@@ -1,6 +1,9 @@
 package ctlog
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 func (l *Log) AddLeafToPool(e *LogEntry) (waitEntryFunc, string) {
 	return l.addLeafToPool(e)
@@ -25,4 +28,12 @@ func PauseSequencer() {
 
 func ResumeSequencer() {
 	close(seqRunning)
+}
+
+func SequenceTimeout() time.Duration {
+	return sequenceTimeout
+}
+
+func SetSequenceTimeout(d time.Duration) {
+	sequenceTimeout = d
 }
