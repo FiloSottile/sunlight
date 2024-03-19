@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	awshttp "github.com/aws/smithy-go/transport/http"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -145,17 +144,6 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 			ContentEncoding: contentEncoding,
 			ContentType:     contentType,
 			CacheControl:    cacheControl,
-		}, func(options *s3.Options) {
-			// As an extra safety measure against concurrent sequencers (which are
-			// especially likely on Fly), use Tigris conditional requests to only
-			// create immutable objects if they don't exist yet. The LockBackend
-			// protects against signing a split tree, but there is a risk that the
-			// losing sequencer will overwrite the data tiles of the winning one.
-			// Without S3 Versioning, that's potentially irrecoverable.
-			if opts.Immutable && options.BaseEndpoint != nil &&
-				*options.BaseEndpoint == "https://fly.storage.tigris.dev" {
-				options.APIOptions = append(options.APIOptions, awshttp.AddHeaderValue("If-Match", `""`))
-			}
 		})
 	}
 	ctx, cancel := context.WithCancelCause(ctx)
