@@ -198,6 +198,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	l.issuersMu.RUnlock()
 	if newIssuers {
 		if err := l.uploadIssuers(ctx, issuers); err != nil {
+			l.c.Log.ErrorContext(ctx, "failed to upload issuers", "err", err, "body", body)
 			return nil, http.StatusInternalServerError, fmtErrorf("failed to upload issuers: %w", err)
 		}
 	}
