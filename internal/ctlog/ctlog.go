@@ -409,9 +409,9 @@ type LogEntry struct {
 	PrecertSigningCert []byte
 }
 
-// SignedEntry returns the entry_type and signed_entry fields of
+// signedEntry returns the entry_type and signed_entry fields of
 // a RFC 6962 TimestampedEntry.
-func (e *LogEntry) SignedEntry() []byte {
+func (e *LogEntry) signedEntry() []byte {
 	// struct {
 	//     LogEntryType entry_type;
 	//     select(entry_type) {
@@ -439,7 +439,7 @@ func (e *LogEntry) SignedEntry() []byte {
 type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
 
 func (e *LogEntry) cacheHash() cacheHash {
-	h := sha256.Sum256(e.SignedEntry())
+	h := sha256.Sum256(e.signedEntry())
 	return cacheHash(h[:16])
 }
 
@@ -455,55 +455,20 @@ func (e *SequencedLogEntry) MerkleTreeLeaf() []byte {
 	b.AddUint8(0 /* version = v1 */)
 	b.AddUint8(0 /* leaf_type = timestamped_entry */)
 	b.AddUint64(uint64(e.Timestamp))
-	b.AddBytes(e.SignedEntry())
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		b.AddBytes(e.Extensions())
-	})
+	b.AddBytes(e.signedEntry())
+	addExtensions(b, e.LeafIndex)
 	return b.BytesOrPanic()
 }
 
-// Extensions returns the custom structure that's encoded in the
-// SignedCertificateTimestamp and TimestampedEntry extensions field.
-func (e *SequencedLogEntry) Extensions() []byte {
-	// enum {
-	//     leaf_index(0), (255)
-	// } ExtensionType;
-	//
-	// struct {
-	//     ExtensionType extension_type;
-	//     opaque extension_data<0..2^16-1>;
-	// } Extension;
-	//
-	// Extension CTExtensions<0..2^16-1>;
-	//
-	// uint8 uint40[5];
-	// uint40 LeafIndex;
-
-	b := &cryptobyte.Builder{}
-	b.AddUint8(0 /* extension_type = leaf_index */)
+func addExtensions(b *cryptobyte.Builder, leafIndex int64) {
 	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		addUint40(b, uint64(e.LeafIndex))
+		ext, err := sunlight.MarshalExtensions(sunlight.Extensions{LeafIndex: leafIndex})
+		if err != nil {
+			b.SetError(err)
+			return
+		}
+		b.AddBytes(ext)
 	})
-	return b.BytesOrPanic()
-}
-
-func ParseExtensions(extensions []byte) (leafIndex int64, err error) {
-	b := cryptobyte.String(extensions)
-	for !b.Empty() {
-		var extensionType uint8
-		var extension cryptobyte.String
-		if !b.ReadUint8(&extensionType) || !b.ReadUint16LengthPrefixed(&extension) {
-			return 0, errors.New("invalid extension")
-		}
-		if extensionType == 0 /* leaf_index */ {
-			var leafIndex int64
-			if !readUint40(&extension, &leafIndex) || !extension.Empty() {
-				return 0, errors.New("invalid leaf_index extension")
-			}
-			return leafIndex, nil
-		}
-	}
-	return 0, errors.New("missing leaf_index extension")
 }
 
 // TileLeaf returns the custom structure that's encoded in data tiles.
@@ -523,10 +488,8 @@ func (e *SequencedLogEntry) TileLeaf() []byte {
 
 	b := &cryptobyte.Builder{}
 	b.AddUint64(uint64(e.Timestamp))
-	b.AddBytes(e.SignedEntry())
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		b.AddBytes(e.Extensions())
-	})
+	b.AddBytes(e.signedEntry())
+	addExtensions(b, e.LeafIndex)
 	if e.IsPrecert {
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 			b.AddBytes(e.PreCertificate)
@@ -975,11 +938,6 @@ func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
 		return nil, s, fmtErrorf("invalid data tile extensions")
 	}
 	return e, s, nil
-}
-
-// addUint40 appends a big-endian, 40-bit value to the byte string.
-func addUint40(b *cryptobyte.Builder, v uint64) {
-	b.AddBytes([]byte{byte(v >> 32), byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)})
 }
 
 // readUint40 decodes a big-endian, 40-bit value into out and advances over it.

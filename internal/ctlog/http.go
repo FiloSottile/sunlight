@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"filippo.io/sunlight"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/trillian/ctfe"
 	"github.com/google/certificate-transparency-go/x509"
@@ -214,6 +215,11 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		return nil, http.StatusInternalServerError, fmtErrorf("failed to sequence leaf: %w", err)
 	}
 
+	ext, err := sunlight.MarshalExtensions(sunlight.Extensions{LeafIndex: seq.LeafIndex})
+	if err != nil {
+		l.c.Log.ErrorContext(ctx, "failed to encode extensions", "err", err, "body", body)
+		return nil, http.StatusInternalServerError, fmtErrorf("failed to encode extensions: %w", err)
+	}
 	// The digitally-signed data of an SCT is technically not a MerkleTreeLeaf,
 	// but it's a completely identical structure, except for the second field,
 	// which is a SignatureType of value 0 and length 1 instead of a
@@ -228,7 +234,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		SCTVersion: ct.V1,
 		Timestamp:  uint64(seq.Timestamp),
 		ID:         l.logID[:],
-		Extensions: base64.StdEncoding.EncodeToString(seq.Extensions()),
+		Extensions: base64.StdEncoding.EncodeToString(ext),
 		Signature:  sctSignature,
 	})
 	if err != nil {

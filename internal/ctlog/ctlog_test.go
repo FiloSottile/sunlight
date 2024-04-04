@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/tls"
@@ -302,9 +303,9 @@ func testSubmit(t *testing.T, precert bool) {
 	if sct1.Timestamp == 0 {
 		t.Error("got zero timestamp")
 	}
-	if idx, err := ctlog.ParseExtensions(sct1.Extensions); err != nil {
+	if idx, err := sunlight.ParseExtensions(sct1.Extensions); err != nil {
 		t.Errorf("couldn't parse extensions: %v", err)
-	} else if idx != 1 {
+	} else if idx.LeafIndex != 1 {
 		t.Errorf("got extensions index %d, expected 1", idx)
 	}
 
