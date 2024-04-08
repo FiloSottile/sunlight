@@ -150,17 +150,17 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 	leafHashes, err := tlog.TileHashReader(tree, (*tileReader)(tl)).ReadHashes(indexes)
 	fatalIfErr(t, err)
 
-	lastTile := tlog.TileForIndex(ctlog.TileHeight, tlog.StoredHashIndex(0, c.N-1))
+	lastTile := tlog.TileForIndex(sunlight.TileHeight, tlog.StoredHashIndex(0, c.N-1))
 	lastTile.L = -1
 	for n := int64(0); n <= lastTile.N; n++ {
-		tile := tlog.Tile{H: ctlog.TileHeight, L: -1, N: n, W: tileWidth}
+		tile := tlog.Tile{H: sunlight.TileHeight, L: -1, N: n, W: tileWidth}
 		if n == lastTile.N {
 			tile = lastTile
 		}
 		b, err := tl.Config.Backend.Fetch(context.Background(), tile.Path())
 		fatalIfErr(t, err)
 		for i := 0; i < tile.W; i++ {
-			e, rest, err := ctlog.ReadTileLeaf(b)
+			e, rest, err := sunlight.ReadTileLeaf(b)
 			if err != nil {
 				t.Fatalf("invalid data tile %v", tile)
 			}
@@ -226,11 +226,11 @@ func (tl *TestLog) StartSequencer() {
 	}()
 }
 
-func waitFuncWrapper(t testing.TB, le *ctlog.LogEntry, expectSuccess bool,
-	f func(ctx context.Context) (*ctlog.SequencedLogEntry, error),
-) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+func waitFuncWrapper(t testing.TB, le *ctlog.PendingLogEntry, expectSuccess bool,
+	f func(ctx context.Context) (*sunlight.LogEntry, error),
+) func(ctx context.Context) (*sunlight.LogEntry, error) {
 	var called bool
-	fw := func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+	fw := func(ctx context.Context) (*sunlight.LogEntry, error) {
 		called = true
 		se, err := f(ctx)
 		if !expectSuccess {
@@ -239,7 +239,13 @@ func waitFuncWrapper(t testing.TB, le *ctlog.LogEntry, expectSuccess bool,
 			}
 		} else if err != nil {
 			t.Error(err)
-		} else if !reflect.DeepEqual(*le, se.LogEntry) {
+		} else if !reflect.DeepEqual(le, &ctlog.PendingLogEntry{
+			Certificate:        se.Certificate,
+			IsPrecert:          se.IsPrecert,
+			IssuerKeyHash:      se.IssuerKeyHash,
+			PreCertificate:     se.PreCertificate,
+			PrecertSigningCert: se.PrecertSigningCert,
+		}) {
 			t.Error("LogEntry is different")
 		}
 		return se, err
@@ -252,13 +258,13 @@ func waitFuncWrapper(t testing.TB, le *ctlog.LogEntry, expectSuccess bool,
 	return fw
 }
 
-func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*sunlight.LogEntry, error) {
 	return addCertificateWithSeed(t, tl, mathrand.Int63()) // 2⁻³² chance of collision after 2¹⁶ entries
 }
 
-func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*sunlight.LogEntry, error) {
 	r := mathrand.New(mathrand.NewSource(seed))
-	e := &ctlog.LogEntry{}
+	e := &ctlog.PendingLogEntry{}
 	e.Certificate = make([]byte, r.Intn(4)+8)
 	r.Read(e.Certificate)
 	f, _ := tl.Log.AddLeafToPool(e)
@@ -266,27 +272,27 @@ func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx cont
 }
 
 func addCertificateFast(t *testing.T, tl *TestLog) {
-	e := &ctlog.LogEntry{}
+	e := &ctlog.PendingLogEntry{}
 	e.Certificate = make([]byte, mathrand.Intn(3)+1)
 	rand.Read(e.Certificate)
 	tl.Log.AddLeafToPool(e)
 }
 
 func addCertificateExpectFailure(t *testing.T, tl *TestLog) {
-	e := &ctlog.LogEntry{}
+	e := &ctlog.PendingLogEntry{}
 	e.Certificate = make([]byte, mathrand.Intn(4)+8)
 	rand.Read(e.Certificate)
 	f, _ := tl.Log.AddLeafToPool(e)
 	waitFuncWrapper(t, e, false, f)
 }
 
-func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*sunlight.LogEntry, error) {
 	return addPreCertificateWithSeed(t, tl, mathrand.Int63())
 }
 
-func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*ctlog.SequencedLogEntry, error) {
+func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*sunlight.LogEntry, error) {
 	r := mathrand.New(mathrand.NewSource(seed))
-	e := &ctlog.LogEntry{IsPrecert: true}
+	e := &ctlog.PendingLogEntry{IsPrecert: true}
 	e.Certificate = make([]byte, r.Intn(4)+8)
 	r.Read(e.Certificate)
 	e.PreCertificate = make([]byte, r.Intn(4)+1)
@@ -300,12 +306,12 @@ func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx c
 	return waitFuncWrapper(t, e, true, f)
 }
 
-const tileWidth = 1 << ctlog.TileHeight
+const tileWidth = 1 << sunlight.TileHeight
 
 type tileReader TestLog
 
 func (r *tileReader) Height() int {
-	return ctlog.TileHeight
+	return sunlight.TileHeight
 }
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {

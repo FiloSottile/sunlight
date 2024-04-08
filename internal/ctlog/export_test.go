@@ -2,7 +2,7 @@ package ctlog
 
 import "context"
 
-func (l *Log) AddLeafToPool(e *LogEntry) (waitEntryFunc, string) {
+func (l *Log) AddLeafToPool(e *PendingLogEntry) (waitEntryFunc, string) {
 	return l.addLeafToPool(e)
 }
 

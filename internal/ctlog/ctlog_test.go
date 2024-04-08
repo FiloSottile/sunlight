@@ -161,7 +161,7 @@ func TestDuplicates(t *testing.T) {
 	})
 }
 
-func testDuplicates(t *testing.T, addWithSeed func(*testing.T, *TestLog, int64) func(context.Context) (*ctlog.SequencedLogEntry, error)) {
+func testDuplicates(t *testing.T, addWithSeed func(*testing.T, *TestLog, int64) func(context.Context) (*sunlight.LogEntry, error)) {
 	tl := NewEmptyTestLog(t)
 	addWithSeed(t, tl, mathrand.Int63()) // 0
 	addWithSeed(t, tl, mathrand.Int63()) // 1
@@ -241,7 +241,7 @@ func TestReloadLog(t *testing.T) {
 	})
 }
 
-func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Context) (*ctlog.SequencedLogEntry, error)) {
+func testReloadLog(t *testing.T, add func(*testing.T, *TestLog) func(context.Context) (*sunlight.LogEntry, error)) {
 	// TODO: test reloading after uploading tiles but before uploading STH.
 	tl := NewEmptyTestLog(t)
 	n := int64(tileWidth + 2)
@@ -393,7 +393,7 @@ func BenchmarkSequencer(b *testing.B) {
 		if i%poolSize == 0 && i != 0 {
 			fatalIfErr(b, tl.Log.Sequence())
 		}
-		tl.Log.AddLeafToPool(&ctlog.LogEntry{Certificate: bytes.Repeat([]byte("A"), 2350)})
+		tl.Log.AddLeafToPool(&ctlog.PendingLogEntry{Certificate: bytes.Repeat([]byte("A"), 2350)})
 	}
 }
 

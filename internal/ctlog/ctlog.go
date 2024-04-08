@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -259,9 +258,9 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 
 		// Verify the data tile against the level 0 tile.
 		b := edgeTiles[-1].B
-		start := tileWidth * dataTile.N
+		start := sunlight.TileWidth * dataTile.N
 		for i := start; i < start+int64(dataTile.W); i++ {
-			e, rest, err := ReadTileLeaf(b)
+			e, rest, err := sunlight.ReadTileLeaf(b)
 			if err != nil {
 				return nil, fmt.Errorf("invalid data tile %v: %w", dataTile.Tile, err)
 			}
@@ -374,16 +373,13 @@ type LockedCheckpoint interface {
 	Bytes() []byte
 }
 
-const TileHeight = 8
-const tileWidth = 1 << TileHeight
-
 type tileReader struct {
 	fetch     func(key string) ([]byte, error)
 	saveTiles func(tiles []tlog.Tile, data [][]byte)
 }
 
 func (r *tileReader) Height() int {
-	return TileHeight
+	return sunlight.TileHeight
 }
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
@@ -399,27 +395,31 @@ func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 
 func (r *tileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) { r.saveTiles(tiles, data) }
 
-type LogEntry struct {
-	// Certificate is either the x509_entry or the tbs_certificate for precerts.
-	Certificate []byte
-
+// PendingLogEntry is a subset of sunlight.LogEntry that was not yet sequenced,
+// so doesn't have an index or timestamp.
+type PendingLogEntry struct {
+	Certificate        []byte
 	IsPrecert          bool
 	IssuerKeyHash      [32]byte
 	PreCertificate     []byte
 	PrecertSigningCert []byte
 }
 
-// signedEntry returns the entry_type and signed_entry fields of
-// a RFC 6962 TimestampedEntry.
-func (e *LogEntry) signedEntry() []byte {
-	// struct {
-	//     LogEntryType entry_type;
-	//     select(entry_type) {
-	//         case x509_entry: ASN.1Cert;
-	//         case precert_entry: PreCert;
-	//     } signed_entry;
-	// } SignedEntry;
+func (e *PendingLogEntry) asLogEntry(idx, timestamp int64) *sunlight.LogEntry {
+	return &sunlight.LogEntry{
+		Certificate:        e.Certificate,
+		IsPrecert:          e.IsPrecert,
+		IssuerKeyHash:      e.IssuerKeyHash,
+		PreCertificate:     e.PreCertificate,
+		PrecertSigningCert: e.PrecertSigningCert,
+		LeafIndex:          idx,
+		Timestamp:          timestamp,
+	}
+}
 
+type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
+
+func (e *PendingLogEntry) cacheHash() cacheHash {
 	b := &cryptobyte.Builder{}
 	if !e.IsPrecert {
 		b.AddUint16(0 /* entry_type = x509_entry */)
@@ -433,76 +433,12 @@ func (e *LogEntry) signedEntry() []byte {
 			b.AddBytes(e.Certificate)
 		})
 	}
-	return b.BytesOrPanic()
-}
-
-type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
-
-func (e *LogEntry) cacheHash() cacheHash {
-	h := sha256.Sum256(e.signedEntry())
+	h := sha256.Sum256(b.BytesOrPanic())
 	return cacheHash(h[:16])
 }
 
-type SequencedLogEntry struct {
-	LogEntry
-	LeafIndex int64
-	Timestamp int64
-}
-
-// MerkleTreeLeaf returns a RFC 6962 MerkleTreeLeaf.
-func (e *SequencedLogEntry) MerkleTreeLeaf() []byte {
-	b := &cryptobyte.Builder{}
-	b.AddUint8(0 /* version = v1 */)
-	b.AddUint8(0 /* leaf_type = timestamped_entry */)
-	b.AddUint64(uint64(e.Timestamp))
-	b.AddBytes(e.signedEntry())
-	addExtensions(b, e.LeafIndex)
-	return b.BytesOrPanic()
-}
-
-func addExtensions(b *cryptobyte.Builder, leafIndex int64) {
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		ext, err := sunlight.MarshalExtensions(sunlight.Extensions{LeafIndex: leafIndex})
-		if err != nil {
-			b.SetError(err)
-			return
-		}
-		b.AddBytes(ext)
-	})
-}
-
-// TileLeaf returns the custom structure that's encoded in data tiles.
-func (e *SequencedLogEntry) TileLeaf() []byte {
-	// struct {
-	//     TimestampedEntry timestamped_entry;
-	//     select(entry_type) {
-	//         case x509_entry: Empty;
-	//         case precert_entry: PreCertExtraData;
-	//     } extra_data;
-	// } TileLeaf;
-	//
-	// struct {
-	//     ASN.1Cert pre_certificate;
-	//     opaque PrecertificateSigningCertificate<0..2^24-1>;
-	// } PreCertExtraData;
-
-	b := &cryptobyte.Builder{}
-	b.AddUint64(uint64(e.Timestamp))
-	b.AddBytes(e.signedEntry())
-	addExtensions(b, e.LeafIndex)
-	if e.IsPrecert {
-		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.PreCertificate)
-		})
-		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.PrecertSigningCert)
-		})
-	}
-	return b.BytesOrPanic()
-}
-
 type pool struct {
-	pendingLeaves []*LogEntry
+	pendingLeaves []*PendingLogEntry
 	byHash        map[cacheHash]waitEntryFunc
 
 	// done is closed when the pool has been sequenced and
@@ -519,7 +455,7 @@ type pool struct {
 	timestamp int64
 }
 
-type waitEntryFunc func(ctx context.Context) (*SequencedLogEntry, error)
+type waitEntryFunc func(ctx context.Context) (*sunlight.LogEntry, error)
 
 func newPool() *pool {
 	return &pool{
@@ -534,7 +470,7 @@ var errPoolFull = fmtErrorf("rate limited")
 // deduplication cache. It returns a function that will wait until the pool is
 // sequenced and return the sequenced leaf, as well as the source of the
 // sequenced leaf (pool or cache if deduplicated, sequencer otherwise).
-func (l *Log) addLeafToPool(leaf *LogEntry) (f waitEntryFunc, source string) {
+func (l *Log) addLeafToPool(leaf *PendingLogEntry) (f waitEntryFunc, source string) {
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
 	p := l.currentPool
@@ -546,22 +482,22 @@ func (l *Log) addLeafToPool(leaf *LogEntry) (f waitEntryFunc, source string) {
 		return f, "pool"
 	}
 	if leaf, err := l.cacheGet(leaf); err != nil {
-		return func(ctx context.Context) (*SequencedLogEntry, error) {
+		return func(ctx context.Context) (*sunlight.LogEntry, error) {
 			return nil, fmtErrorf("deduplication cache get failed: %w", err)
 		}, "cache"
 	} else if leaf != nil {
-		return func(ctx context.Context) (*SequencedLogEntry, error) {
+		return func(ctx context.Context) (*sunlight.LogEntry, error) {
 			return leaf, nil
 		}, "cache"
 	}
 	n := len(p.pendingLeaves)
 	if l.c.PoolSize > 0 && n >= l.c.PoolSize {
-		return func(ctx context.Context) (*SequencedLogEntry, error) {
+		return func(ctx context.Context) (*sunlight.LogEntry, error) {
 			return nil, errPoolFull
 		}, "ratelimit"
 	}
 	p.pendingLeaves = append(p.pendingLeaves, leaf)
-	f = func(ctx context.Context) (*SequencedLogEntry, error) {
+	f = func(ctx context.Context) (*sunlight.LogEntry, error) {
 		select {
 		case <-ctx.Done():
 			return nil, fmtErrorf("context canceled while waiting for sequencing: %w", ctx.Err())
@@ -572,11 +508,8 @@ func (l *Log) addLeafToPool(leaf *LogEntry) (f waitEntryFunc, source string) {
 			if p.timestamp == 0 {
 				panic("internal error: pool is ready but result is missing")
 			}
-			return &SequencedLogEntry{
-				LogEntry:  *leaf,
-				LeafIndex: p.firstLeafIndex + int64(n),
-				Timestamp: p.timestamp,
-			}, nil
+			idx := p.firstLeafIndex + int64(n)
+			return leaf.asLogEntry(idx, p.timestamp), nil
 		}
 	}
 	p.byHash[h] = f
@@ -663,19 +596,19 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	edgeTiles := maps.Clone(l.edgeTiles)
 	var dataTile []byte
 	// Load the current partial data tile, if any.
-	if t, ok := edgeTiles[-1]; ok && t.W < tileWidth {
+	if t, ok := edgeTiles[-1]; ok && t.W < sunlight.TileWidth {
 		dataTile = bytes.Clone(t.B)
 	}
 	newHashes := make(map[int64]tlog.Hash)
 	hashReader := l.hashReader(newHashes)
 	n := l.tree.N
-	var sequencedLeaves []*SequencedLogEntry
+	var sequencedLeaves []*sunlight.LogEntry
 	for _, leaf := range p.pendingLeaves {
-		leaf := &SequencedLogEntry{LogEntry: *leaf, Timestamp: timestamp, LeafIndex: n}
+		leaf := leaf.asLogEntry(n, timestamp)
 		sequencedLeaves = append(sequencedLeaves, leaf)
-		leafData := leaf.TileLeaf()
-		dataTile = append(dataTile, leafData...)
-		l.m.SeqLeafSize.Observe(float64(len(leafData)))
+		oldTileSize := len(dataTile)
+		dataTile = sunlight.AppendTileLeaf(dataTile, leaf)
+		l.m.SeqLeafSize.Observe(float64(len(dataTile) - oldTileSize))
 
 		// Compute the new tree hashes and add them to the hashReader overlay
 		// (we will use them later to insert more leaves and finally to produce
@@ -692,8 +625,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		n++
 
 		// If the data tile is full, upload it.
-		if n%tileWidth == 0 {
-			tile := tlog.TileForIndex(TileHeight, tlog.StoredHashIndex(0, n-1))
+		if n%sunlight.TileWidth == 0 {
+			tile := tlog.TileForIndex(sunlight.TileHeight, tlog.StoredHashIndex(0, n-1))
 			tile.L = -1
 			edgeTiles[-1] = tileWithBytes{tile, dataTile}
 			l.c.Log.DebugContext(ctx, "uploading full data tile",
@@ -707,8 +640,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	}
 
 	// Upload leftover partial data tile, if any.
-	if n != l.tree.N && n%tileWidth != 0 {
-		tile := tlog.TileForIndex(TileHeight, tlog.StoredHashIndex(0, n-1))
+	if n != l.tree.N && n%sunlight.TileWidth != 0 {
+		tile := tlog.TileForIndex(sunlight.TileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}
 		l.c.Log.DebugContext(ctx, "uploading partial data tile",
@@ -719,7 +652,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	}
 
 	// Produce and upload new tree tiles.
-	tiles := tlog.NewTiles(TileHeight, l.tree.N, n)
+	tiles := tlog.NewTiles(sunlight.TileHeight, l.tree.N, n)
 	for _, tile := range tiles {
 		tile := tile // tile is captured by the g.Go function.
 		data, err := tlog.ReadTileData(tile, hashReader)
@@ -890,7 +823,7 @@ func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 				list = append(list, h)
 				continue
 			}
-			t := l.edgeTiles[tlog.TileForIndex(TileHeight, id).L]
+			t := l.edgeTiles[tlog.TileForIndex(sunlight.TileHeight, id).L]
 			h, err := tlog.HashFromTile(t.Tile, t.B, id)
 			if err != nil {
 				return nil, fmt.Errorf("index %d not in overlay and %w", id, err)
@@ -899,54 +832,4 @@ func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 		}
 		return list, nil
 	}
-}
-
-func ReadTileLeaf(tile []byte) (e *SequencedLogEntry, rest []byte, err error) {
-	e = &SequencedLogEntry{}
-	s := cryptobyte.String(tile)
-	var timestamp uint64
-	var entryType uint16
-	var extensions cryptobyte.String
-	if !s.ReadUint64(&timestamp) || !s.ReadUint16(&entryType) || timestamp > math.MaxInt64 {
-		return nil, s, fmtErrorf("invalid data tile")
-	}
-	e.Timestamp = int64(timestamp)
-	switch entryType {
-	case 0: // x509_entry
-		if !s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
-			!s.ReadUint16LengthPrefixed(&extensions) {
-			return nil, s, fmtErrorf("invalid data tile x509_entry")
-		}
-	case 1: // precert_entry
-		e.IsPrecert = true
-		if !s.CopyBytes(e.IssuerKeyHash[:]) ||
-			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
-			!s.ReadUint16LengthPrefixed(&extensions) ||
-			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) ||
-			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PrecertSigningCert)) {
-			return nil, s, fmtErrorf("invalid data tile precert_entry")
-		}
-	default:
-		return nil, s, fmtErrorf("invalid data tile: unknown type %d", entryType)
-	}
-	var extensionType uint8
-	var extensionData cryptobyte.String
-	if !extensions.ReadUint8(&extensionType) || extensionType != 0 ||
-		!extensions.ReadUint16LengthPrefixed(&extensionData) ||
-		!readUint40(&extensionData, &e.LeafIndex) || !extensionData.Empty() ||
-		!extensions.Empty() {
-		return nil, s, fmtErrorf("invalid data tile extensions")
-	}
-	return e, s, nil
-}
-
-// readUint40 decodes a big-endian, 40-bit value into out and advances over it.
-// It reports whether the read was successful.
-func readUint40(s *cryptobyte.String, out *int64) bool {
-	var v []byte
-	if !s.ReadBytes(&v, 5) {
-		return false
-	}
-	*out = int64(v[0])<<32 | int64(v[1])<<24 | int64(v[2])<<16 | int64(v[3])<<8 | int64(v[4])
-	return true
 }

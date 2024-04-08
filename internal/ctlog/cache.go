@@ -3,6 +3,7 @@ package ctlog
 import (
 	"crawshaw.io/sqlite"
 	"crawshaw.io/sqlite/sqlitex"
+	"filippo.io/sunlight"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -40,17 +41,13 @@ func (l *Log) CloseCache() error {
 	return l.cacheWrite.Close()
 }
 
-func (l *Log) cacheGet(leaf *LogEntry) (*SequencedLogEntry, error) {
+func (l *Log) cacheGet(leaf *PendingLogEntry) (*sunlight.LogEntry, error) {
 	defer prometheus.NewTimer(l.m.CacheGetDuration).ObserveDuration()
 	h := leaf.cacheHash()
-	var se *SequencedLogEntry
+	var se *sunlight.LogEntry
 	err := sqlitex.Exec(l.cacheRead, "SELECT timestamp, leaf_index FROM cache WHERE key = ?",
 		func(stmt *sqlite.Stmt) error {
-			se = &SequencedLogEntry{
-				LogEntry:  *leaf,
-				LeafIndex: stmt.GetInt64("leaf_index"),
-				Timestamp: stmt.GetInt64("timestamp"),
-			}
+			se = leaf.asLogEntry(stmt.GetInt64("leaf_index"), stmt.GetInt64("timestamp"))
 			return nil
 		}, h[:])
 	if err != nil {
@@ -59,11 +56,17 @@ func (l *Log) cacheGet(leaf *LogEntry) (*SequencedLogEntry, error) {
 	return se, nil
 }
 
-func (l *Log) cachePut(entries []*SequencedLogEntry) (err error) {
+func (l *Log) cachePut(entries []*sunlight.LogEntry) (err error) {
 	defer prometheus.NewTimer(l.m.CachePutDuration).ObserveDuration()
 	defer sqlitex.Save(l.cacheWrite)(&err)
 	for _, se := range entries {
-		h := se.cacheHash()
+		h := (&PendingLogEntry{
+			Certificate:        se.Certificate,
+			IsPrecert:          se.IsPrecert,
+			IssuerKeyHash:      se.IssuerKeyHash,
+			PreCertificate:     se.PreCertificate,
+			PrecertSigningCert: se.PrecertSigningCert,
+		}).cacheHash()
 		err := sqlitex.Exec(l.cacheWrite, "INSERT INTO cache (key, timestamp, leaf_index) VALUES (?, ?, ?)",
 			nil, h[:], se.Timestamp, se.LeafIndex)
 		if err != nil {

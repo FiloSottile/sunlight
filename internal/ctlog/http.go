@@ -59,7 +59,7 @@ func ReusedConnContext(ctx context.Context, c net.Conn) context.Context {
 }
 
 func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
-	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *LogEntry) error {
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *PendingLogEntry) error {
 		if le.IsPrecert {
 			return fmtErrorf("pre-certificate submitted to add-chain")
 		}
@@ -85,7 +85,7 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
-	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *LogEntry) error {
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *PendingLogEntry) error {
 		if !le.IsPrecert {
 			return fmtErrorf("final certificate submitted to add-pre-chain")
 		}
@@ -110,7 +110,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*LogEntry) error) (response []byte, code int, err error) {
+func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
 		"precert": "", "preissuer": "", "chain_len": "", "source": ""}
 	defer func() {
@@ -145,7 +145,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	labels["root"] = x509util.NameToString(chain[len(chain)-1].Subject)
 	labels["issuer"] = x509util.NameToString(chain[0].Issuer)
 
-	e := &LogEntry{Certificate: chain[0].Raw}
+	e := &PendingLogEntry{Certificate: chain[0].Raw}
 	issuers := chain[1:]
 	if isPrecert, err := ctfe.IsPrecertificate(chain[0]); err != nil {
 		l.c.Log.WarnContext(ctx, "invalid precertificate", "err", err, "body", body)
