@@ -19,7 +19,6 @@ import (
 	"crawshaw.io/sqlite"
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/rfc6979"
-	"filippo.io/sunlight/internal/tlogx"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -123,7 +122,7 @@ func CreateLog(ctx context.Context, config *Config) error {
 
 	timestamp := timeNowUnixMilli()
 	tree := treeWithTimestamp{tlog.Tree{}, timestamp}
-	checkpoint, err := signTreeHead(config.Name, logID, config.Key, tree)
+	checkpoint, err := signTreeHead(config.Name, config.Key, tree)
 	if err != nil {
 		return fmt.Errorf("couldn't sign empty tree head: %w", err)
 	}
@@ -684,7 +683,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	}
 	tree := treeWithTimestamp{Tree: tlog.Tree{N: n, Hash: rootHash}, Time: timestamp}
 
-	checkpoint, err := signTreeHead(l.c.Name, l.logID, l.c.Key, tree)
+	checkpoint, err := signTreeHead(l.c.Name, l.c.Key, tree)
 	if err != nil {
 		return fmtErrorf("couldn't sign checkpoint: %w", err)
 	}
@@ -742,7 +741,7 @@ var testingOnlyPauseSequencing func()
 
 // signTreeHead signs the tree and returns a checkpoint according to
 // c2sp.org/checkpoint.
-func signTreeHead(name string, logID [sha256.Size]byte, privKey *ecdsa.PrivateKey, tree treeWithTimestamp) (checkpoint []byte, err error) {
+func signTreeHead(name string, privKey *ecdsa.PrivateKey, tree treeWithTimestamp) (checkpoint []byte, err error) {
 	sthBytes, err := ct.SerializeSTHSignatureInput(ct.SignedTreeHead{
 		Version:        ct.V1,
 		TreeSize:       uint64(tree.N),
@@ -773,10 +772,11 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey *ecdsa.PrivateKe
 		return nil, fmtErrorf("couldn't encode RFC6962NoteSignature: %w", err)
 	}
 
-	signer, err := tlogx.NewInjectedSigner(name, 0x05, logID[:], sig)
+	v, err := sunlight.NewRFC6962Verifier(name, privKey.Public(), nil)
 	if err != nil {
-		return nil, fmtErrorf("couldn't construct signer: %w", err)
+		return nil, fmtErrorf("couldn't construct verifier: %w", err)
 	}
+	signer := &injectedSigner{v, sig}
 	signedNote, err := note.Sign(&note.Note{
 		Text: sunlight.FormatCheckpoint(sunlight.Checkpoint{
 			Origin: name,
@@ -788,6 +788,16 @@ func signTreeHead(name string, logID [sha256.Size]byte, privKey *ecdsa.PrivateKe
 	}
 	return signedNote, nil
 }
+
+type injectedSigner struct {
+	v   note.Verifier
+	sig []byte
+}
+
+func (s *injectedSigner) Sign(msg []byte) ([]byte, error) { return s.sig, nil }
+func (s *injectedSigner) Name() string                    { return s.v.Name() }
+func (s *injectedSigner) KeyHash() uint32                 { return s.v.KeyHash() }
+func (s *injectedSigner) Verifier() note.Verifier         { return s.v }
 
 // digitallySign produces an encoded digitally-signed signature.
 //
