@@ -342,7 +342,8 @@ type MemoryBackend struct {
 	mu sync.Mutex
 	m  map[string][]byte
 
-	uploads uint64
+	uploads          uint64
+	errorOnOverwrite bool
 }
 
 func NewMemoryBackend(t testing.TB) *MemoryBackend {
@@ -362,6 +363,11 @@ func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opt
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if opts.Immutable && b.errorOnOverwrite {
+		if _, ok := b.m[key]; ok {
+			return fmt.Errorf("key %q already exists", key)
+		}
+	}
 	b.m[key] = data
 	return nil
 }
