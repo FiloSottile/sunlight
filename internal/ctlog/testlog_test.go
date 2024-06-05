@@ -358,7 +358,7 @@ func NewMemoryBackend(t testing.TB) *MemoryBackend {
 func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opts *ctlog.UploadOptions) error {
 	atomic.AddUint64(&b.uploads, 1)
 	// TODO: check key format is expected.
-	if len(data) == 0 && key != "issuers.pem" {
+	if len(data) == 0 {
 		b.t.Errorf("uploaded key %q with empty data", key)
 	}
 	if err := ctx.Err(); err != nil {

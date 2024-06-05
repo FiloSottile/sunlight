@@ -176,7 +176,6 @@ func TestSequenceUploadPaths(t *testing.T) {
 
 	expected := []string{
 		"checkpoint",
-		"issuers.pem",
 		"tile/0/000",
 		"tile/0/001",
 		"tile/0/001.p/5",

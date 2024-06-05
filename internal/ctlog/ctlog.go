@@ -56,8 +56,10 @@ type Log struct {
 	// cacheRead is used to check the deduplication cache under poolMu.
 	cacheRead *sqlite.Conn
 
+	// issuers is a cache of issuers that have been uploaded or checked since
+	// the log started. There might be more in the backend.
 	issuersMu sync.RWMutex
-	issuers   *x509util.PEMCertPool
+	issuers   map[[32]byte]bool
 }
 
 type treeWithTimestamp struct {
@@ -120,10 +122,6 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return fmt.Errorf("couldn't close cache database: %w", err)
 	}
 
-	if err := config.Backend.Upload(ctx, "issuers.pem", []byte{}, optsText); err != nil {
-		return fmt.Errorf("couldn't upload issuers.pem: %w", err)
-	}
-
 	timestamp := timeNowUnixMilli()
 	th, err := tlog.TreeHash(0, nil)
 	if err != nil {
@@ -138,7 +136,7 @@ func CreateLog(ctx context.Context, config *Config) error {
 	if err := config.Lock.Create(ctx, logID, checkpoint); err != nil {
 		return fmt.Errorf("couldn't create checkpoint in lock database: %w", err)
 	}
-	if err := config.Backend.Upload(ctx, "checkpoint", checkpoint, optsText); err != nil {
+	if err := config.Backend.Upload(ctx, "checkpoint", checkpoint, optsCheckpoint); err != nil {
 		return fmt.Errorf("couldn't upload checkpoint: %w", err)
 	}
 
@@ -220,16 +218,6 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 			"old_size", c1.N, "size", c.N)
 	}
 
-	pemIssuers, err := config.Backend.Fetch(ctx, "issuers.pem")
-	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch issuers.pem: %w", err)
-	}
-	config.Log.DebugContext(ctx, "loaded issuers.pem", "pem", pemIssuers)
-	issuers := x509util.NewPEMCertPool()
-	if len(pemIssuers) > 0 && !issuers.AppendCertsFromPEM(pemIssuers) {
-		return nil, errors.New("invalid issuers.pem")
-	}
-
 	cacheRead, cacheWrite, err := initCache(config.Cache)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't initialize cache database: %w", err)
@@ -288,12 +276,11 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	}
 
 	config.Log.InfoContext(ctx, "loaded log", "logID", base64.StdEncoding.EncodeToString(logID[:]),
-		"size", c.N, "timestamp", timestamp, "issuers", len(issuers.RawCertificates()))
+		"size", c.N, "timestamp", timestamp)
 
 	m := initMetrics()
 	m.TreeSize.Set(float64(c.N))
 	m.TreeTime.Set(float64(timestamp))
-	m.Issuers.Set(float64(len(issuers.RawCertificates())))
 	m.ConfigRoots.Set(float64(len(config.Roots.RawCertificates())))
 	m.ConfigStart.Set(float64(config.NotAfterStart.Unix()))
 	m.ConfigEnd.Set(float64(config.NotAfterLimit.Unix()))
@@ -308,7 +295,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		cacheRead:      cacheRead,
 		currentPool:    newPool(),
 		cacheWrite:     cacheWrite,
-		issuers:        issuers,
+		issuers:        make(map[[32]byte]bool),
 	}, nil
 }
 
@@ -347,7 +334,8 @@ type UploadOptions struct {
 
 var optsHashTile = &UploadOptions{Immutable: true}
 var optsDataTile = &UploadOptions{Compress: true, Immutable: true}
-var optsText = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
+var optsIssuer = &UploadOptions{ContentType: "application/pkix-cert", Immutable: true}
+var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
 // A LockBackend is a database that supports compare-and-swap operations.
 //
@@ -715,7 +703,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	l.lockCheckpoint = newLock
 	l.edgeTiles = edgeTiles
 
-	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint, optsText); err != nil {
+	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint, optsCheckpoint); err != nil {
 		// Return an error so we don't produce SCTs that, although safely
 		// serialized, wouldn't be part of a publicly visible tree.
 		return fmtErrorf("couldn't upload checkpoint to object storage: %w", err)

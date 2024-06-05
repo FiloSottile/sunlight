@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"math/rand"
@@ -187,19 +186,10 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		return nil, http.StatusBadRequest, err
 	}
 
-	var newIssuers bool
-	l.issuersMu.RLock()
 	for _, issuer := range issuers {
-		if !l.issuers.Included(issuer) {
-			l.c.Log.InfoContext(ctx, "new issuer", "issuer", x509util.NameToString(issuer.Subject))
-			newIssuers = true
-		}
-	}
-	l.issuersMu.RUnlock()
-	if newIssuers {
-		if err := l.uploadIssuers(ctx, issuers); err != nil {
-			l.c.Log.ErrorContext(ctx, "failed to upload issuers", "err", err, "body", body)
-			return nil, http.StatusInternalServerError, fmtErrorf("failed to upload issuers: %w", err)
+		if err := l.uploadIssuer(ctx, issuer); err != nil {
+			l.c.Log.ErrorContext(ctx, "failed to upload issuer", "err", err, "body", body)
+			return nil, http.StatusInternalServerError, fmtErrorf("failed to upload issuer: %w", err)
 		}
 	}
 
@@ -246,30 +236,45 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	return rsp, http.StatusOK, nil
 }
 
-func (l *Log) uploadIssuers(ctx context.Context, issuers []*x509.Certificate) error {
+func (l *Log) uploadIssuer(ctx context.Context, issuer *x509.Certificate) error {
+	fingerprint := sha256.Sum256(issuer.Raw)
+
+	l.issuersMu.RLock()
+	found := l.issuers[fingerprint]
+	l.issuersMu.RUnlock()
+	if found {
+		return nil
+	}
+
 	l.issuersMu.Lock()
 	defer l.issuersMu.Unlock()
 
-	oldCount := len(l.issuers.RawCertificates())
-	for _, issuer := range issuers {
-		l.issuers.AddCert(issuer)
+	if l.issuers[fingerprint] {
+		return nil
 	}
 
-	pemIssuers := &bytes.Buffer{}
-	for _, c := range l.issuers.RawCertificates() {
-		if err := pem.Encode(pemIssuers, &pem.Block{
-			Type:  "CERTIFICATE",
-			Bytes: c.Raw,
-		}); err != nil {
-			return err
+	path := fmt.Sprintf("issuer/%x", fingerprint)
+	l.c.Log.InfoContext(ctx, "observed new issuer", "issuer", x509util.NameToString(issuer.Subject), "path", path)
+
+	// First we try to download and check the issuer from the backend.
+	// If it's not there, we upload it.
+
+	old, err := l.c.Backend.Fetch(ctx, path)
+	if err != nil {
+		upErr := l.c.Backend.Upload(ctx, path, issuer.Raw, optsIssuer)
+		l.c.Log.InfoContext(ctx, "uploaded issuer", "path", path, "err", upErr, "fetchErr", err, "size", len(issuer.Raw))
+		if upErr != nil {
+			return fmtErrorf("upload error: %w; fetch error: %v", upErr, err)
+		}
+	} else {
+		if !bytes.Equal(old, issuer.Raw) {
+			return fmtErrorf("invalid existing issuer: %x", old)
 		}
 	}
 
-	err := l.c.Backend.Upload(ctx, "issuers.pem", pemIssuers.Bytes(), optsText)
-	l.c.Log.InfoContext(ctx, "uploaded issuers", "size", pemIssuers.Len(),
-		"old", oldCount, "new", len(l.issuers.RawCertificates()), "err", err)
-	l.m.Issuers.Set(float64(len(l.issuers.RawCertificates())))
-	return err
+	l.issuers[fingerprint] = true
+	l.m.Issuers.Set(float64(len(l.issuers)))
+	return nil
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {
