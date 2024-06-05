@@ -61,11 +61,10 @@ func (l *Log) cachePut(entries []*sunlight.LogEntry) (err error) {
 	defer sqlitex.Save(l.cacheWrite)(&err)
 	for _, se := range entries {
 		h := (&PendingLogEntry{
-			Certificate:        se.Certificate,
-			IsPrecert:          se.IsPrecert,
-			IssuerKeyHash:      se.IssuerKeyHash,
-			PreCertificate:     se.PreCertificate,
-			PrecertSigningCert: se.PrecertSigningCert,
+			Certificate:    se.Certificate,
+			IsPrecert:      se.IsPrecert,
+			IssuerKeyHash:  se.IssuerKeyHash,
+			PreCertificate: se.PreCertificate,
 		}).cacheHash()
 		err := sqlitex.Exec(l.cacheWrite, "INSERT INTO cache (key, timestamp, leaf_index) VALUES (?, ?, ?)",
 			nil, h[:], se.Timestamp, se.LeafIndex)

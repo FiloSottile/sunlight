@@ -41,11 +41,6 @@ type LogEntry struct {
 	// It must be at most 2^24-1 bytes long.
 	PreCertificate []byte
 
-	// PrecertSigningCert is the Precertificate Signing Certificate, if any, as
-	// represented in the first entry of PrecertChainEntry.precertificate_chain.
-	// It may be nil, and must be at most 2^24-1 bytes long.
-	PrecertSigningCert []byte
-
 	// LeafIndex is the zero-based index of the leaf in the log.
 	// It must be between 0 and 2^40-1.
 	LeafIndex int64
@@ -112,8 +107,7 @@ func ReadTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
 		if !s.CopyBytes(e.IssuerKeyHash[:]) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
 			!s.ReadUint16LengthPrefixed(&extensions) ||
-			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) ||
-			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PrecertSigningCert)) {
+			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) {
 			return nil, s, fmt.Errorf("invalid data tile precert_entry")
 		}
 	default:
@@ -150,9 +144,6 @@ func AppendTileLeaf(t []byte, e *LogEntry) []byte {
 	if e.IsPrecert {
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 			b.AddBytes(e.PreCertificate)
-		})
-		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.PrecertSigningCert)
 		})
 	}
 	return b.BytesOrPanic()

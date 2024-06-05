@@ -159,10 +159,9 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		var preIssuer *x509.Certificate
 		if ct.IsPreIssuer(issuers[0]) {
 			preIssuer = issuers[0]
-			issuers = issuers[1:]
 			labels["preissuer"] = "true"
 			labels["issuer"] = x509util.NameToString(preIssuer.Issuer)
-			if len(issuers) == 0 {
+			if len(issuers) == 1 {
 				l.c.Log.WarnContext(ctx, "missing precertificate signing certificate issuer", "err", err, "body", body)
 				return nil, http.StatusBadRequest, fmtErrorf("missing precertificate signing certificate issuer")
 			}
@@ -178,9 +177,10 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		e.Certificate = defangedTBS
 		e.PreCertificate = chain[0].Raw
 		if preIssuer != nil {
-			e.PrecertSigningCert = preIssuer.Raw
+			e.IssuerKeyHash = sha256.Sum256(issuers[1].RawSubjectPublicKeyInfo)
+		} else {
+			e.IssuerKeyHash = sha256.Sum256(issuers[0].RawSubjectPublicKeyInfo)
 		}
-		e.IssuerKeyHash = sha256.Sum256(issuers[0].RawSubjectPublicKeyInfo)
 	}
 	if err := checkType(e); err != nil {
 		return nil, http.StatusBadRequest, err
