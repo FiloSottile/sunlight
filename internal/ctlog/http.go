@@ -1,7 +1,6 @@
 package ctlog
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -145,23 +144,25 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	labels["issuer"] = x509util.NameToString(chain[0].Issuer)
 
 	e := &PendingLogEntry{Certificate: chain[0].Raw}
-	issuers := chain[1:]
+	for _, issuer := range chain[1:] {
+		e.Issuers = append(e.Issuers, issuer.Raw)
+	}
 	if isPrecert, err := ctfe.IsPrecertificate(chain[0]); err != nil {
 		l.c.Log.WarnContext(ctx, "invalid precertificate", "err", err, "body", body)
 		return nil, http.StatusBadRequest, fmtErrorf("invalid precertificate: %w", err)
 	} else if isPrecert {
 		labels["precert"] = "true"
-		if len(issuers) == 0 {
+		if len(chain) < 2 {
 			l.c.Log.WarnContext(ctx, "missing precertificate issuer", "err", err, "body", body)
 			return nil, http.StatusBadRequest, fmtErrorf("missing precertificate issuer")
 		}
 
 		var preIssuer *x509.Certificate
-		if ct.IsPreIssuer(issuers[0]) {
-			preIssuer = issuers[0]
+		if ct.IsPreIssuer(chain[1]) {
+			preIssuer = chain[1]
 			labels["preissuer"] = "true"
 			labels["issuer"] = x509util.NameToString(preIssuer.Issuer)
-			if len(issuers) == 1 {
+			if len(chain) < 3 {
 				l.c.Log.WarnContext(ctx, "missing precertificate signing certificate issuer", "err", err, "body", body)
 				return nil, http.StatusBadRequest, fmtErrorf("missing precertificate signing certificate issuer")
 			}
@@ -177,23 +178,16 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		e.Certificate = defangedTBS
 		e.PreCertificate = chain[0].Raw
 		if preIssuer != nil {
-			e.IssuerKeyHash = sha256.Sum256(issuers[1].RawSubjectPublicKeyInfo)
+			e.IssuerKeyHash = sha256.Sum256(chain[2].RawSubjectPublicKeyInfo)
 		} else {
-			e.IssuerKeyHash = sha256.Sum256(issuers[0].RawSubjectPublicKeyInfo)
+			e.IssuerKeyHash = sha256.Sum256(chain[1].RawSubjectPublicKeyInfo)
 		}
 	}
 	if err := checkType(e); err != nil {
 		return nil, http.StatusBadRequest, err
 	}
 
-	for _, issuer := range issuers {
-		if err := l.uploadIssuer(ctx, issuer); err != nil {
-			l.c.Log.ErrorContext(ctx, "failed to upload issuer", "err", err, "body", body)
-			return nil, http.StatusInternalServerError, fmtErrorf("failed to upload issuer: %w", err)
-		}
-	}
-
-	waitLeaf, source := l.addLeafToPool(e)
+	waitLeaf, source := l.addLeafToPool(ctx, e)
 	labels["source"] = source
 	waitTimer := prometheus.NewTimer(l.m.AddChainWait)
 	seq, err := waitLeaf(ctx)
@@ -234,47 +228,6 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	}
 
 	return rsp, http.StatusOK, nil
-}
-
-func (l *Log) uploadIssuer(ctx context.Context, issuer *x509.Certificate) error {
-	fingerprint := sha256.Sum256(issuer.Raw)
-
-	l.issuersMu.RLock()
-	found := l.issuers[fingerprint]
-	l.issuersMu.RUnlock()
-	if found {
-		return nil
-	}
-
-	l.issuersMu.Lock()
-	defer l.issuersMu.Unlock()
-
-	if l.issuers[fingerprint] {
-		return nil
-	}
-
-	path := fmt.Sprintf("issuer/%x", fingerprint)
-	l.c.Log.InfoContext(ctx, "observed new issuer", "issuer", x509util.NameToString(issuer.Subject), "path", path)
-
-	// First we try to download and check the issuer from the backend.
-	// If it's not there, we upload it.
-
-	old, err := l.c.Backend.Fetch(ctx, path)
-	if err != nil {
-		upErr := l.c.Backend.Upload(ctx, path, issuer.Raw, optsIssuer)
-		l.c.Log.InfoContext(ctx, "uploaded issuer", "path", path, "err", upErr, "fetchErr", err, "size", len(issuer.Raw))
-		if upErr != nil {
-			return fmtErrorf("upload error: %w; fetch error: %v", upErr, err)
-		}
-	} else {
-		if !bytes.Equal(old, issuer.Raw) {
-			return fmtErrorf("invalid existing issuer: %x", old)
-		}
-	}
-
-	l.issuers[fingerprint] = true
-	l.m.Issuers.Set(float64(len(l.issuers)))
-	return nil
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {

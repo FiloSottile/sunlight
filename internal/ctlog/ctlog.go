@@ -396,34 +396,40 @@ type PendingLogEntry struct {
 	Certificate    []byte
 	IsPrecert      bool
 	IssuerKeyHash  [32]byte
+	Issuers        [][]byte
 	PreCertificate []byte
 }
 
 func (e *PendingLogEntry) asLogEntry(idx, timestamp int64) *sunlight.LogEntry {
+	fingerprints := make([][32]byte, 0, len(e.Issuers))
+	for _, i := range e.Issuers {
+		fingerprints = append(fingerprints, sha256.Sum256(i))
+	}
 	return &sunlight.LogEntry{
-		Certificate:    e.Certificate,
-		IsPrecert:      e.IsPrecert,
-		IssuerKeyHash:  e.IssuerKeyHash,
-		PreCertificate: e.PreCertificate,
-		LeafIndex:      idx,
-		Timestamp:      timestamp,
+		Certificate:       e.Certificate,
+		IsPrecert:         e.IsPrecert,
+		IssuerKeyHash:     e.IssuerKeyHash,
+		ChainFingerprints: fingerprints,
+		PreCertificate:    e.PreCertificate,
+		LeafIndex:         idx,
+		Timestamp:         timestamp,
 	}
 }
 
 type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
 
-func (e *PendingLogEntry) cacheHash() cacheHash {
+func computeCacheHash(Certificate []byte, IsPrecert bool, IssuerKeyHash [32]byte) cacheHash {
 	b := &cryptobyte.Builder{}
-	if !e.IsPrecert {
+	if !IsPrecert {
 		b.AddUint16(0 /* entry_type = x509_entry */)
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.Certificate)
+			b.AddBytes(Certificate)
 		})
 	} else {
 		b.AddUint16(1 /* entry_type = precert_entry */)
-		b.AddBytes(e.IssuerKeyHash[:])
+		b.AddBytes(IssuerKeyHash[:])
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.Certificate)
+			b.AddBytes(Certificate)
 		})
 	}
 	h := sha256.Sum256(b.BytesOrPanic())
@@ -463,11 +469,24 @@ var errPoolFull = fmtErrorf("rate limited")
 // deduplication cache. It returns a function that will wait until the pool is
 // sequenced and return the sequenced leaf, as well as the source of the
 // sequenced leaf (pool or cache if deduplicated, sequencer otherwise).
-func (l *Log) addLeafToPool(leaf *PendingLogEntry) (f waitEntryFunc, source string) {
+func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry) (f waitEntryFunc, source string) {
+	// We could marginally more efficiently do uploadIssuer after checking the
+	// caches, but it's simpler for the the block below to be under a single
+	// poolMu lock, and uploadIssuer goes to the network so we don't want to
+	// cause poolMu contention.
+	for _, issuer := range leaf.Issuers {
+		if err := l.uploadIssuer(ctx, issuer); err != nil {
+			l.c.Log.ErrorContext(ctx, "failed to upload issuer", "err", err)
+			return func(ctx context.Context) (*sunlight.LogEntry, error) {
+				return nil, fmtErrorf("failed to upload issuer: %w", err)
+			}, "issuer"
+		}
+	}
+
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
 	p := l.currentPool
-	h := leaf.cacheHash()
+	h := computeCacheHash(leaf.Certificate, leaf.IsPrecert, leaf.IssuerKeyHash)
 	if f, ok := p.byHash[h]; ok {
 		return f, "pool"
 	}
@@ -507,6 +526,47 @@ func (l *Log) addLeafToPool(leaf *PendingLogEntry) (f waitEntryFunc, source stri
 	}
 	p.byHash[h] = f
 	return f, "sequencer"
+}
+
+func (l *Log) uploadIssuer(ctx context.Context, issuer []byte) error {
+	fingerprint := sha256.Sum256(issuer)
+
+	l.issuersMu.RLock()
+	found := l.issuers[fingerprint]
+	l.issuersMu.RUnlock()
+	if found {
+		return nil
+	}
+
+	l.issuersMu.Lock()
+	defer l.issuersMu.Unlock()
+
+	if l.issuers[fingerprint] {
+		return nil
+	}
+
+	path := fmt.Sprintf("issuer/%x", fingerprint)
+	l.c.Log.InfoContext(ctx, "observed new issuer", "path", path)
+
+	// First we try to download and check the issuer from the backend.
+	// If it's not there, we upload it.
+
+	old, err := l.c.Backend.Fetch(ctx, path)
+	if err != nil {
+		upErr := l.c.Backend.Upload(ctx, path, issuer, optsIssuer)
+		l.c.Log.InfoContext(ctx, "uploaded issuer", "path", path, "err", upErr, "fetchErr", err, "size", len(issuer))
+		if upErr != nil {
+			return fmtErrorf("upload error: %w; fetch error: %v", upErr, err)
+		}
+	} else {
+		if !bytes.Equal(old, issuer) {
+			return fmtErrorf("invalid existing issuer: %x", old)
+		}
+	}
+
+	l.issuers[fingerprint] = true
+	l.m.Issuers.Set(float64(len(l.issuers)))
+	return nil
 }
 
 func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error) {

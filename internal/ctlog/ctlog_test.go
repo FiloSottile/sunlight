@@ -158,11 +158,11 @@ func TestSequenceUploadPaths(t *testing.T) {
 	tl := NewEmptyTestLog(t)
 
 	for i := int64(0); i < tileWidth+5; i++ {
-		addCertificate(t, tl)
+		addCertificateWithSeed(t, tl, i)
 	}
 	fatalIfErr(t, tl.Log.Sequence())
 	for i := int64(0); i < tileWidth+10; i++ {
-		addCertificate(t, tl)
+		addCertificateWithSeed(t, tl, 1000+i)
 	}
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog()
@@ -176,6 +176,11 @@ func TestSequenceUploadPaths(t *testing.T) {
 
 	expected := []string{
 		"checkpoint",
+		"issuer/1b48a2acbba79932d3852ccde41197f678256f3c2a280e9edf9aad272d6e9c92",
+		"issuer/559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+		"issuer/6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d",
+		"issuer/81365bbc90b5b3991c762eebada7c6d84d1e39a0a1d648cb4fe5a9890b089da8",
+		"issuer/df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
 		"tile/0/000",
 		"tile/0/001",
 		"tile/0/001.p/5",
