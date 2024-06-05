@@ -12,6 +12,8 @@ import (
 	"errors"
 	"flag"
 	mathrand "math/rand"
+	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,6 +151,45 @@ func TestSequenceUploadCount(t *testing.T) {
 	fatalIfErr(t, tl.Log.Sequence())
 	if n := uploads(); n != 6 {
 		t.Errorf("got %d uploads, expected 6", n)
+	}
+}
+
+func TestSequenceUploadPaths(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+
+	for i := int64(0); i < tileWidth+5; i++ {
+		addCertificate(t, tl)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	for i := int64(0); i < tileWidth+10; i++ {
+		addCertificate(t, tl)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog()
+
+	m := tl.Config.Backend.(*MemoryBackend).m
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	expected := []string{
+		"checkpoint",
+		"issuers.pem",
+		"tile/0/000",
+		"tile/0/001",
+		"tile/0/001.p/5",
+		"tile/0/002.p/15",
+		"tile/1/000.p/1",
+		"tile/1/000.p/2",
+		"tile/data/000",
+		"tile/data/001",
+		"tile/data/001.p/5",
+		"tile/data/002.p/15",
+	}
+	if !reflect.DeepEqual(keys, expected) {
+		t.Errorf("got %#v, expected %#v", keys, expected)
 	}
 }
 

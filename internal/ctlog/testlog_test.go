@@ -161,7 +161,7 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 		if n == lastTile.N {
 			tile = lastTile
 		}
-		b, err := tl.Config.Backend.Fetch(context.Background(), tile.Path())
+		b, err := tl.Config.Backend.Fetch(context.Background(), sunlight.TilePath(tile))
 		fatalIfErr(t, err)
 		for i := 0; i < tile.W; i++ {
 			e, rest, err := sunlight.ReadTileLeaf(b)
@@ -320,7 +320,7 @@ func (r *tileReader) Height() int {
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 	for _, t := range tiles {
-		b, err := r.Config.Backend.Fetch(context.Background(), t.Path())
+		b, err := r.Config.Backend.Fetch(context.Background(), sunlight.TilePath(t))
 		if err != nil {
 			return nil, err
 		}
