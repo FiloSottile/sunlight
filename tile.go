@@ -37,6 +37,11 @@ type LogEntry struct {
 	// IssuerKeyHash is the PreCert.issuer_key_hash.
 	IssuerKeyHash [32]byte
 
+	// ChainFingerprints are the SHA-256 hashes of the certificates in the
+	// X509ChainEntry.certificate_chain or
+	// PrecertChainEntry.precertificate_chain.
+	ChainFingerprints [][32]byte
+
 	// PreCertificate is the PrecertChainEntry.pre_certificate.
 	// It must be at most 2^24-1 bytes long.
 	PreCertificate []byte
@@ -73,16 +78,14 @@ func (e *LogEntry) MerkleTreeLeaf() []byte {
 
 // struct {
 //     TimestampedEntry timestamped_entry;
-//     select(entry_type) {
+//     Fingerprint certificate_chain<0..2^16-1>;
+//     select (entry_type) {
 //         case x509_entry: Empty;
-//         case precert_entry: PreCertExtraData;
-//     } extra_data;
+//         case precert_entry: ASN.1Cert pre_certificate;
+//     };
 // } TileLeaf;
 //
-// struct {
-//     ASN.1Cert pre_certificate;
-//     opaque PrecertificateSigningCertificate<0..2^24-1>;
-// } PreCertExtraData;
+// opaque Fingerprint[32];
 
 // ReadTileLeaf reads a LogEntry from a data tile, and returns the remaining
 // data in the tile.
@@ -91,7 +94,7 @@ func ReadTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
 	s := cryptobyte.String(tile)
 	var timestamp uint64
 	var entryType uint16
-	var extensions cryptobyte.String
+	var extensions, fingerprints cryptobyte.String
 	if !s.ReadUint64(&timestamp) || !s.ReadUint16(&entryType) || timestamp > math.MaxInt64 {
 		return nil, s, fmt.Errorf("invalid data tile")
 	}
@@ -99,7 +102,8 @@ func ReadTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
 	switch entryType {
 	case 0: // x509_entry
 		if !s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
-			!s.ReadUint16LengthPrefixed(&extensions) {
+			!s.ReadUint16LengthPrefixed(&extensions) ||
+			!s.ReadUint16LengthPrefixed(&fingerprints) {
 			return nil, s, fmt.Errorf("invalid data tile x509_entry")
 		}
 	case 1: // precert_entry
@@ -107,6 +111,7 @@ func ReadTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
 		if !s.CopyBytes(e.IssuerKeyHash[:]) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
 			!s.ReadUint16LengthPrefixed(&extensions) ||
+			!s.ReadUint16LengthPrefixed(&fingerprints) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) {
 			return nil, s, fmt.Errorf("invalid data tile precert_entry")
 		}
@@ -120,6 +125,13 @@ func ReadTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
 		!readUint40(&extensionData, &e.LeafIndex) || !extensionData.Empty() ||
 		!extensions.Empty() {
 		return nil, s, fmt.Errorf("invalid data tile extensions")
+	}
+	for !fingerprints.Empty() {
+		var f [32]byte
+		if !fingerprints.CopyBytes(f[:]) {
+			return nil, s, fmt.Errorf("invalid data tile fingerprints")
+		}
+		e.ChainFingerprints = append(e.ChainFingerprints, f)
 	}
 	return e, s, nil
 }
@@ -141,6 +153,11 @@ func AppendTileLeaf(t []byte, e *LogEntry) []byte {
 		})
 	}
 	addExtensions(b, e.LeafIndex)
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		for _, f := range e.ChainFingerprints {
+			b.AddBytes(f[:])
+		}
+	})
 	if e.IsPrecert {
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 			b.AddBytes(e.PreCertificate)

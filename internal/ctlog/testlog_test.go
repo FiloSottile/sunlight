@@ -181,6 +181,37 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 			if exp := leafHashes[idx]; got != exp {
 				t.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", idx, got, exp)
 			}
+
+			if len(e.Certificate) == 0 {
+				t.Errorf("empty certificate at index %d", idx)
+			}
+			if e.IsPrecert {
+				if len(e.PreCertificate) == 0 {
+					t.Errorf("empty precertificate at index %d", idx)
+				}
+				if e.IssuerKeyHash == [32]byte{} {
+					t.Errorf("empty issuer key hash at index %d", idx)
+				}
+			} else {
+				if e.PreCertificate != nil {
+					t.Errorf("unexpected precertificate at index %d", idx)
+				}
+				if e.IssuerKeyHash != [32]byte{} {
+					t.Errorf("unexpected issuer key hash at index %d", idx)
+				}
+			}
+			for _, fp := range e.ChainFingerprints {
+				b, err := tl.Config.Backend.Fetch(context.Background(), fmt.Sprintf("issuer/%x", fp))
+				if err != nil {
+					t.Errorf("issuer %x not found", fp)
+				}
+				if len(b) == 0 {
+					t.Errorf("issuer %x is empty", fp)
+				}
+				if sha256.Sum256(b) != fp {
+					t.Errorf("issuer %x does not hash to %x", fp, fp)
+				}
+			}
 		}
 		if len(b) != 0 {
 			t.Errorf("invalid data tile %v: trailing data", tile)
@@ -243,12 +274,7 @@ func waitFuncWrapper(t testing.TB, le *ctlog.PendingLogEntry, expectSuccess bool
 			}
 		} else if err != nil {
 			t.Error(err)
-		} else if !reflect.DeepEqual(le, &ctlog.PendingLogEntry{
-			Certificate:    se.Certificate,
-			IsPrecert:      se.IsPrecert,
-			IssuerKeyHash:  se.IssuerKeyHash,
-			PreCertificate: se.PreCertificate,
-		}) {
+		} else if !reflect.DeepEqual(se, le.AsLogEntry(se.LeafIndex, se.Timestamp)) {
 			t.Error("LogEntry is different")
 		}
 		return se, err
@@ -265,11 +291,19 @@ func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*sunli
 	return addCertificateWithSeed(t, tl, mathrand.Int63()) // 2⁻³² chance of collision after 2¹⁶ entries
 }
 
+var chains = [][][]byte{
+	{[]byte("A"), []byte("rootX")},
+	{[]byte("B"), []byte("C"), []byte("rootX")},
+	{[]byte("A"), []byte("rootY")},
+	{},
+}
+
 func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*sunlight.LogEntry, error) {
 	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.PendingLogEntry{}
 	e.Certificate = make([]byte, r.Intn(4)+8)
 	r.Read(e.Certificate)
+	e.Issuers = chains[r.Intn(len(chains))]
 	f, _ := tl.Log.AddLeafToPool(e)
 	return waitFuncWrapper(t, e, true, f)
 }
@@ -301,6 +335,7 @@ func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx c
 	e.PreCertificate = make([]byte, r.Intn(4)+1)
 	r.Read(e.PreCertificate)
 	r.Read(e.IssuerKeyHash[:])
+	e.Issuers = chains[r.Intn(len(chains))]
 	f, _ := tl.Log.AddLeafToPool(e)
 	return waitFuncWrapper(t, e, true, f)
 }
