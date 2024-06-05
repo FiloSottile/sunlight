@@ -393,22 +393,20 @@ func (r *tileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) { r.saveTiles(t
 // PendingLogEntry is a subset of sunlight.LogEntry that was not yet sequenced,
 // so doesn't have an index or timestamp.
 type PendingLogEntry struct {
-	Certificate        []byte
-	IsPrecert          bool
-	IssuerKeyHash      [32]byte
-	PreCertificate     []byte
-	PrecertSigningCert []byte
+	Certificate    []byte
+	IsPrecert      bool
+	IssuerKeyHash  [32]byte
+	PreCertificate []byte
 }
 
 func (e *PendingLogEntry) asLogEntry(idx, timestamp int64) *sunlight.LogEntry {
 	return &sunlight.LogEntry{
-		Certificate:        e.Certificate,
-		IsPrecert:          e.IsPrecert,
-		IssuerKeyHash:      e.IssuerKeyHash,
-		PreCertificate:     e.PreCertificate,
-		PrecertSigningCert: e.PrecertSigningCert,
-		LeafIndex:          idx,
-		Timestamp:          timestamp,
+		Certificate:    e.Certificate,
+		IsPrecert:      e.IsPrecert,
+		IssuerKeyHash:  e.IssuerKeyHash,
+		PreCertificate: e.PreCertificate,
+		LeafIndex:      idx,
+		Timestamp:      timestamp,
 	}
 }
 

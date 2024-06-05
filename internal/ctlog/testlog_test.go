@@ -244,11 +244,10 @@ func waitFuncWrapper(t testing.TB, le *ctlog.PendingLogEntry, expectSuccess bool
 		} else if err != nil {
 			t.Error(err)
 		} else if !reflect.DeepEqual(le, &ctlog.PendingLogEntry{
-			Certificate:        se.Certificate,
-			IsPrecert:          se.IsPrecert,
-			IssuerKeyHash:      se.IssuerKeyHash,
-			PreCertificate:     se.PreCertificate,
-			PrecertSigningCert: se.PrecertSigningCert,
+			Certificate:    se.Certificate,
+			IsPrecert:      se.IsPrecert,
+			IssuerKeyHash:  se.IssuerKeyHash,
+			PreCertificate: se.PreCertificate,
 		}) {
 			t.Error("LogEntry is different")
 		}
@@ -302,10 +301,6 @@ func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx c
 	e.PreCertificate = make([]byte, r.Intn(4)+1)
 	r.Read(e.PreCertificate)
 	r.Read(e.IssuerKeyHash[:])
-	if r.Intn(2) == 0 {
-		e.PrecertSigningCert = make([]byte, r.Intn(4)+1)
-		r.Read(e.PrecertSigningCert)
-	}
 	f, _ := tl.Log.AddLeafToPool(e)
 	return waitFuncWrapper(t, e, true, f)
 }
