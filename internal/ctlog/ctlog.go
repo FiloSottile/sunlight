@@ -121,7 +121,11 @@ func CreateLog(ctx context.Context, config *Config) error {
 	}
 
 	timestamp := timeNowUnixMilli()
-	tree := treeWithTimestamp{tlog.Tree{}, timestamp}
+	th, err := tlog.TreeHash(0, nil)
+	if err != nil {
+		return fmt.Errorf("couldn't hash empty tree: %w", err)
+	}
+	tree := treeWithTimestamp{tlog.Tree{N: 0, Hash: th}, timestamp}
 	checkpoint, err := signTreeHead(config.Name, config.Key, tree)
 	if err != nil {
 		return fmt.Errorf("couldn't sign empty tree head: %w", err)

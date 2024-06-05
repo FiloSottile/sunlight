@@ -1,6 +1,6 @@
 module filippo.io/sunlight
 
-go 1.22.0
+go 1.22.4
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
@@ -14,7 +14,7 @@ require (
 	github.com/google/certificate-transparency-go v1.1.7
 	github.com/prometheus/client_golang v1.18.0
 	golang.org/x/crypto v0.19.0
-	golang.org/x/mod v0.16.1-0.20240315155916-aa51b25a4485
+	golang.org/x/mod v0.19.0
 	golang.org/x/net v0.21.0
 	golang.org/x/sync v0.6.0
 	gopkg.in/yaml.v3 v3.0.1
