@@ -62,14 +62,17 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 	config.Roots.AddCert(root)
 	err = ctlog.CreateLog(context.Background(), config)
 	fatalIfErr(t, err)
+	(&TestLog{t: t, Config: config, l: logLevel}).CheckLog()
 	log, err := ctlog.LoadLog(context.Background(), config)
 	fatalIfErr(t, err)
 	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
-	return &TestLog{t: t,
+	tl := &TestLog{t: t,
 		Log:    log,
 		Config: config,
 		l:      logLevel,
 	}
+	tl.CheckLog()
+	return tl
 }
 
 func testLogHandler(t testing.TB) (slog.Handler, *slog.LevelVar) {
@@ -134,8 +137,9 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 	}
 
 	if c.N == 0 {
-		if c.Hash != (tlog.Hash{}) {
-			t.Error("empty log should have zero hash")
+		expected := sha256.Sum256([]byte{})
+		if c.Hash != expected {
+			t.Error("empty log should have empty string hash")
 		}
 		return
 	}
