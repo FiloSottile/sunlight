@@ -3,12 +3,26 @@ package sunlight
 import (
 	"fmt"
 	"math"
+	"strings"
 
 	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/mod/sumdb/tlog"
 )
 
 const TileHeight = 8
 const TileWidth = 1 << TileHeight
+
+// TilePath returns a tile coordinate path describing t, according to
+// c2sp.org/sunlight. It differs from [tlog.Tile.Path] in that it doesn't
+// include an explicit tile height.
+//
+// If t.Height is not TileHeight, TilePath panics.
+func TilePath(t tlog.Tile) string {
+	if t.H != TileHeight {
+		panic(fmt.Sprintf("unexpected tile height %d", t.H))
+	}
+	return "tile/" + strings.TrimPrefix(t.Path(), "tile/8/")
+}
 
 type LogEntry struct {
 	// Certificate is either the TimestampedEntry.signed_entry, or the

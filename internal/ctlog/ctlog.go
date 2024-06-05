@@ -70,8 +70,12 @@ type tileWithBytes struct {
 	B []byte
 }
 
+func (t tileWithBytes) Path() string {
+	return sunlight.TilePath(t.Tile)
+}
+
 func (t tileWithBytes) String() string {
-	return fmt.Sprintf("%s#%d", t.Path(), len(t.B))
+	return fmt.Sprintf("%s#%d", sunlight.TilePath(t.Tile), len(t.B))
 }
 
 type Config struct {
@@ -387,7 +391,7 @@ func (r *tileReader) Height() int {
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 	for _, t := range tiles {
-		b, err := r.fetch(t.Path())
+		b, err := r.fetch(sunlight.TilePath(t))
 		if err != nil {
 			return nil, err
 		}
@@ -637,7 +641,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 			tileCount++
 			data := dataTile // data is captured by the g.Go function.
-			g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, optsDataTile) })
+			g.Go(func() error { return l.c.Backend.Upload(gctx, sunlight.TilePath(tile), data, optsDataTile) })
 			dataTile = nil
 		}
 	}
@@ -651,7 +655,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			"tree_size", n, "tile", tile, "size", len(dataTile))
 		l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 		tileCount++
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), dataTile, optsDataTile) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, sunlight.TilePath(tile), dataTile, optsDataTile) })
 	}
 
 	// Produce and upload new tree tiles.
@@ -670,7 +674,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		l.c.Log.DebugContext(ctx, "uploading tree tile", "old_tree_size", oldSize,
 			"tree_size", n, "tile", tile, "size", len(data))
 		tileCount++
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, optsHashTile) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, sunlight.TilePath(tile), data, optsHashTile) })
 	}
 
 	if err := g.Wait(); err != nil {
