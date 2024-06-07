@@ -1,13 +1,21 @@
 package ctlog
 
-import "context"
+import (
+	"context"
+
+	"filippo.io/sunlight"
+)
 
 func (l *Log) AddLeafToPool(e *PendingLogEntry) (waitEntryFunc, string) {
-	return l.addLeafToPool(e)
+	return l.addLeafToPool(context.Background(), e)
 }
 
 func (l *Log) Sequence() error {
 	return l.sequence(context.Background())
+}
+
+func (e *PendingLogEntry) AsLogEntry(idx, timestamp int64) *sunlight.LogEntry {
+	return e.asLogEntry(idx, timestamp)
 }
 
 func SetTimeNowUnixMilli(f func() int64) {

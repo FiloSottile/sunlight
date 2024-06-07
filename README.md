@@ -42,7 +42,7 @@ operating a Sunlight instance:
     SQLite are supported.
 
   * A per-log object store bucket, where the public tiles, checkpoints, and
-    issuers bundles are uploaded. Monitors can fetch the tree contents directly
+    issuers are uploaded. Monitors can fetch the tree contents directly
     from these buckets.
 
     You should account for between 5GB and 10GB per million certificates, or

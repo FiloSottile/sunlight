@@ -56,8 +56,10 @@ type Log struct {
 	// cacheRead is used to check the deduplication cache under poolMu.
 	cacheRead *sqlite.Conn
 
+	// issuers is a cache of issuers that have been uploaded or checked since
+	// the log started. There might be more in the backend.
 	issuersMu sync.RWMutex
-	issuers   *x509util.PEMCertPool
+	issuers   map[[32]byte]bool
 }
 
 type treeWithTimestamp struct {
@@ -70,8 +72,12 @@ type tileWithBytes struct {
 	B []byte
 }
 
+func (t tileWithBytes) Path() string {
+	return sunlight.TilePath(t.Tile)
+}
+
 func (t tileWithBytes) String() string {
-	return fmt.Sprintf("%s#%d", t.Path(), len(t.B))
+	return fmt.Sprintf("%s#%d", sunlight.TilePath(t.Tile), len(t.B))
 }
 
 type Config struct {
@@ -116,10 +122,6 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return fmt.Errorf("couldn't close cache database: %w", err)
 	}
 
-	if err := config.Backend.Upload(ctx, "issuers.pem", []byte{}, optsText); err != nil {
-		return fmt.Errorf("couldn't upload issuers.pem: %w", err)
-	}
-
 	timestamp := timeNowUnixMilli()
 	tree := treeWithTimestamp{tlog.Tree{}, timestamp}
 	checkpoint, err := signTreeHead(config.Name, config.Key, tree)
@@ -130,7 +132,7 @@ func CreateLog(ctx context.Context, config *Config) error {
 	if err := config.Lock.Create(ctx, logID, checkpoint); err != nil {
 		return fmt.Errorf("couldn't create checkpoint in lock database: %w", err)
 	}
-	if err := config.Backend.Upload(ctx, "checkpoint", checkpoint, optsText); err != nil {
+	if err := config.Backend.Upload(ctx, "checkpoint", checkpoint, optsCheckpoint); err != nil {
 		return fmt.Errorf("couldn't upload checkpoint: %w", err)
 	}
 
@@ -212,16 +214,6 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 			"old_size", c1.N, "size", c.N)
 	}
 
-	pemIssuers, err := config.Backend.Fetch(ctx, "issuers.pem")
-	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch issuers.pem: %w", err)
-	}
-	config.Log.DebugContext(ctx, "loaded issuers.pem", "pem", pemIssuers)
-	issuers := x509util.NewPEMCertPool()
-	if len(pemIssuers) > 0 && !issuers.AppendCertsFromPEM(pemIssuers) {
-		return nil, errors.New("invalid issuers.pem")
-	}
-
 	cacheRead, cacheWrite, err := initCache(config.Cache)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't initialize cache database: %w", err)
@@ -280,12 +272,11 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	}
 
 	config.Log.InfoContext(ctx, "loaded log", "logID", base64.StdEncoding.EncodeToString(logID[:]),
-		"size", c.N, "timestamp", timestamp, "issuers", len(issuers.RawCertificates()))
+		"size", c.N, "timestamp", timestamp)
 
 	m := initMetrics()
 	m.TreeSize.Set(float64(c.N))
 	m.TreeTime.Set(float64(timestamp))
-	m.Issuers.Set(float64(len(issuers.RawCertificates())))
 	m.ConfigRoots.Set(float64(len(config.Roots.RawCertificates())))
 	m.ConfigStart.Set(float64(config.NotAfterStart.Unix()))
 	m.ConfigEnd.Set(float64(config.NotAfterLimit.Unix()))
@@ -300,7 +291,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		cacheRead:      cacheRead,
 		currentPool:    newPool(),
 		cacheWrite:     cacheWrite,
-		issuers:        issuers,
+		issuers:        make(map[[32]byte]bool),
 	}, nil
 }
 
@@ -339,7 +330,8 @@ type UploadOptions struct {
 
 var optsHashTile = &UploadOptions{Immutable: true}
 var optsDataTile = &UploadOptions{Compress: true, Immutable: true}
-var optsText = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
+var optsIssuer = &UploadOptions{ContentType: "application/pkix-cert", Immutable: true}
+var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
 // A LockBackend is a database that supports compare-and-swap operations.
 //
@@ -383,7 +375,7 @@ func (r *tileReader) Height() int {
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 	for _, t := range tiles {
-		b, err := r.fetch(t.Path())
+		b, err := r.fetch(sunlight.TilePath(t))
 		if err != nil {
 			return nil, err
 		}
@@ -397,39 +389,43 @@ func (r *tileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) { r.saveTiles(t
 // PendingLogEntry is a subset of sunlight.LogEntry that was not yet sequenced,
 // so doesn't have an index or timestamp.
 type PendingLogEntry struct {
-	Certificate        []byte
-	IsPrecert          bool
-	IssuerKeyHash      [32]byte
-	PreCertificate     []byte
-	PrecertSigningCert []byte
+	Certificate    []byte
+	IsPrecert      bool
+	IssuerKeyHash  [32]byte
+	Issuers        [][]byte
+	PreCertificate []byte
 }
 
 func (e *PendingLogEntry) asLogEntry(idx, timestamp int64) *sunlight.LogEntry {
+	fingerprints := make([][32]byte, 0, len(e.Issuers))
+	for _, i := range e.Issuers {
+		fingerprints = append(fingerprints, sha256.Sum256(i))
+	}
 	return &sunlight.LogEntry{
-		Certificate:        e.Certificate,
-		IsPrecert:          e.IsPrecert,
-		IssuerKeyHash:      e.IssuerKeyHash,
-		PreCertificate:     e.PreCertificate,
-		PrecertSigningCert: e.PrecertSigningCert,
-		LeafIndex:          idx,
-		Timestamp:          timestamp,
+		Certificate:       e.Certificate,
+		IsPrecert:         e.IsPrecert,
+		IssuerKeyHash:     e.IssuerKeyHash,
+		ChainFingerprints: fingerprints,
+		PreCertificate:    e.PreCertificate,
+		LeafIndex:         idx,
+		Timestamp:         timestamp,
 	}
 }
 
 type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
 
-func (e *PendingLogEntry) cacheHash() cacheHash {
+func computeCacheHash(Certificate []byte, IsPrecert bool, IssuerKeyHash [32]byte) cacheHash {
 	b := &cryptobyte.Builder{}
-	if !e.IsPrecert {
+	if !IsPrecert {
 		b.AddUint16(0 /* entry_type = x509_entry */)
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.Certificate)
+			b.AddBytes(Certificate)
 		})
 	} else {
 		b.AddUint16(1 /* entry_type = precert_entry */)
-		b.AddBytes(e.IssuerKeyHash[:])
+		b.AddBytes(IssuerKeyHash[:])
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
-			b.AddBytes(e.Certificate)
+			b.AddBytes(Certificate)
 		})
 	}
 	h := sha256.Sum256(b.BytesOrPanic())
@@ -469,11 +465,24 @@ var errPoolFull = fmtErrorf("rate limited")
 // deduplication cache. It returns a function that will wait until the pool is
 // sequenced and return the sequenced leaf, as well as the source of the
 // sequenced leaf (pool or cache if deduplicated, sequencer otherwise).
-func (l *Log) addLeafToPool(leaf *PendingLogEntry) (f waitEntryFunc, source string) {
+func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry) (f waitEntryFunc, source string) {
+	// We could marginally more efficiently do uploadIssuer after checking the
+	// caches, but it's simpler for the the block below to be under a single
+	// poolMu lock, and uploadIssuer goes to the network so we don't want to
+	// cause poolMu contention.
+	for _, issuer := range leaf.Issuers {
+		if err := l.uploadIssuer(ctx, issuer); err != nil {
+			l.c.Log.ErrorContext(ctx, "failed to upload issuer", "err", err)
+			return func(ctx context.Context) (*sunlight.LogEntry, error) {
+				return nil, fmtErrorf("failed to upload issuer: %w", err)
+			}, "issuer"
+		}
+	}
+
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
 	p := l.currentPool
-	h := leaf.cacheHash()
+	h := computeCacheHash(leaf.Certificate, leaf.IsPrecert, leaf.IssuerKeyHash)
 	if f, ok := p.byHash[h]; ok {
 		return f, "pool"
 	}
@@ -513,6 +522,47 @@ func (l *Log) addLeafToPool(leaf *PendingLogEntry) (f waitEntryFunc, source stri
 	}
 	p.byHash[h] = f
 	return f, "sequencer"
+}
+
+func (l *Log) uploadIssuer(ctx context.Context, issuer []byte) error {
+	fingerprint := sha256.Sum256(issuer)
+
+	l.issuersMu.RLock()
+	found := l.issuers[fingerprint]
+	l.issuersMu.RUnlock()
+	if found {
+		return nil
+	}
+
+	l.issuersMu.Lock()
+	defer l.issuersMu.Unlock()
+
+	if l.issuers[fingerprint] {
+		return nil
+	}
+
+	path := fmt.Sprintf("issuer/%x", fingerprint)
+	l.c.Log.InfoContext(ctx, "observed new issuer", "path", path)
+
+	// First we try to download and check the issuer from the backend.
+	// If it's not there, we upload it.
+
+	old, err := l.c.Backend.Fetch(ctx, path)
+	if err != nil {
+		upErr := l.c.Backend.Upload(ctx, path, issuer, optsIssuer)
+		l.c.Log.InfoContext(ctx, "uploaded issuer", "path", path, "err", upErr, "fetchErr", err, "size", len(issuer))
+		if upErr != nil {
+			return fmtErrorf("upload error: %w; fetch error: %v", upErr, err)
+		}
+	} else {
+		if !bytes.Equal(old, issuer) {
+			return fmtErrorf("invalid existing issuer: %x", old)
+		}
+	}
+
+	l.issuers[fingerprint] = true
+	l.m.Issuers.Set(float64(len(l.issuers)))
+	return nil
 }
 
 func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error) {
@@ -633,7 +683,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 			tileCount++
 			data := dataTile // data is captured by the g.Go function.
-			g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, optsDataTile) })
+			g.Go(func() error { return l.c.Backend.Upload(gctx, sunlight.TilePath(tile), data, optsDataTile) })
 			dataTile = nil
 		}
 	}
@@ -647,7 +697,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			"tree_size", n, "tile", tile, "size", len(dataTile))
 		l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
 		tileCount++
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), dataTile, optsDataTile) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, sunlight.TilePath(tile), dataTile, optsDataTile) })
 	}
 
 	// Produce and upload new tree tiles.
@@ -666,7 +716,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		l.c.Log.DebugContext(ctx, "uploading tree tile", "old_tree_size", oldSize,
 			"tree_size", n, "tile", tile, "size", len(data))
 		tileCount++
-		g.Go(func() error { return l.c.Backend.Upload(gctx, tile.Path(), data, optsHashTile) })
+		g.Go(func() error { return l.c.Backend.Upload(gctx, sunlight.TilePath(tile), data, optsHashTile) })
 	}
 
 	if err := g.Wait(); err != nil {
@@ -707,7 +757,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	l.lockCheckpoint = newLock
 	l.edgeTiles = edgeTiles
 
-	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint, optsText); err != nil {
+	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint, optsCheckpoint); err != nil {
 		// Return an error so we don't produce SCTs that, although safely
 		// serialized, wouldn't be part of a publicly visible tree.
 		return fmtErrorf("couldn't upload checkpoint to object storage: %w", err)

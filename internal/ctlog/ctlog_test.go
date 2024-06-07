@@ -12,6 +12,8 @@ import (
 	"errors"
 	"flag"
 	mathrand "math/rand"
+	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,6 +151,49 @@ func TestSequenceUploadCount(t *testing.T) {
 	fatalIfErr(t, tl.Log.Sequence())
 	if n := uploads(); n != 6 {
 		t.Errorf("got %d uploads, expected 6", n)
+	}
+}
+
+func TestSequenceUploadPaths(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+
+	for i := int64(0); i < tileWidth+5; i++ {
+		addCertificateWithSeed(t, tl, i)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	for i := int64(0); i < tileWidth+10; i++ {
+		addCertificateWithSeed(t, tl, 1000+i)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog()
+
+	m := tl.Config.Backend.(*MemoryBackend).m
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	expected := []string{
+		"checkpoint",
+		"issuer/1b48a2acbba79932d3852ccde41197f678256f3c2a280e9edf9aad272d6e9c92",
+		"issuer/559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+		"issuer/6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d",
+		"issuer/81365bbc90b5b3991c762eebada7c6d84d1e39a0a1d648cb4fe5a9890b089da8",
+		"issuer/df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
+		"tile/0/000",
+		"tile/0/001",
+		"tile/0/001.p/5",
+		"tile/0/002.p/15",
+		"tile/1/000.p/1",
+		"tile/1/000.p/2",
+		"tile/data/000",
+		"tile/data/001",
+		"tile/data/001.p/5",
+		"tile/data/002.p/15",
+	}
+	if !reflect.DeepEqual(keys, expected) {
+		t.Errorf("got %#v, expected %#v", keys, expected)
 	}
 }
 

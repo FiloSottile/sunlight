@@ -20,6 +20,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+replace golang.org/x/mod => /Users/filippo/src/golang.org/x/mod
+
 require (
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.5.4 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.16.16 // indirect

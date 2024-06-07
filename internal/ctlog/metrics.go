@@ -150,8 +150,8 @@ func initMetrics() metrics {
 
 		Issuers: prometheus.NewGauge(
 			prometheus.GaugeOpts{
-				Name: "issuers_certs_total",
-				Help: "Number of certificates in the issuers bundle.",
+				Name: "issuers_cache_total",
+				Help: "Number of issuers observed since restarting.",
 			},
 		),
 

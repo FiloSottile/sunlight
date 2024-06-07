@@ -134,8 +134,9 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 	}
 
 	if c.N == 0 {
-		if c.Hash != (tlog.Hash{}) {
-			t.Error("empty log should have zero hash")
+		expected := sha256.Sum256([]byte{})
+		if c.Hash != expected {
+			t.Error("empty log should have empty string hash")
 		}
 		return
 	}
@@ -157,7 +158,7 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 		if n == lastTile.N {
 			tile = lastTile
 		}
-		b, err := tl.Config.Backend.Fetch(context.Background(), tile.Path())
+		b, err := tl.Config.Backend.Fetch(context.Background(), sunlight.TilePath(tile))
 		fatalIfErr(t, err)
 		for i := 0; i < tile.W; i++ {
 			e, rest, err := sunlight.ReadTileLeaf(b)
@@ -176,6 +177,37 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 			got := tlog.RecordHash(e.MerkleTreeLeaf())
 			if exp := leafHashes[idx]; got != exp {
 				t.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", idx, got, exp)
+			}
+
+			if len(e.Certificate) == 0 {
+				t.Errorf("empty certificate at index %d", idx)
+			}
+			if e.IsPrecert {
+				if len(e.PreCertificate) == 0 {
+					t.Errorf("empty precertificate at index %d", idx)
+				}
+				if e.IssuerKeyHash == [32]byte{} {
+					t.Errorf("empty issuer key hash at index %d", idx)
+				}
+			} else {
+				if e.PreCertificate != nil {
+					t.Errorf("unexpected precertificate at index %d", idx)
+				}
+				if e.IssuerKeyHash != [32]byte{} {
+					t.Errorf("unexpected issuer key hash at index %d", idx)
+				}
+			}
+			for _, fp := range e.ChainFingerprints {
+				b, err := tl.Config.Backend.Fetch(context.Background(), fmt.Sprintf("issuer/%x", fp))
+				if err != nil {
+					t.Errorf("issuer %x not found", fp)
+				}
+				if len(b) == 0 {
+					t.Errorf("issuer %x is empty", fp)
+				}
+				if sha256.Sum256(b) != fp {
+					t.Errorf("issuer %x does not hash to %x", fp, fp)
+				}
 			}
 		}
 		if len(b) != 0 {
@@ -239,13 +271,7 @@ func waitFuncWrapper(t testing.TB, le *ctlog.PendingLogEntry, expectSuccess bool
 			}
 		} else if err != nil {
 			t.Error(err)
-		} else if !reflect.DeepEqual(le, &ctlog.PendingLogEntry{
-			Certificate:        se.Certificate,
-			IsPrecert:          se.IsPrecert,
-			IssuerKeyHash:      se.IssuerKeyHash,
-			PreCertificate:     se.PreCertificate,
-			PrecertSigningCert: se.PrecertSigningCert,
-		}) {
+		} else if !reflect.DeepEqual(se, le.AsLogEntry(se.LeafIndex, se.Timestamp)) {
 			t.Error("LogEntry is different")
 		}
 		return se, err
@@ -262,11 +288,19 @@ func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*sunli
 	return addCertificateWithSeed(t, tl, mathrand.Int63()) // 2⁻³² chance of collision after 2¹⁶ entries
 }
 
+var chains = [][][]byte{
+	{[]byte("A"), []byte("rootX")},
+	{[]byte("B"), []byte("C"), []byte("rootX")},
+	{[]byte("A"), []byte("rootY")},
+	{},
+}
+
 func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*sunlight.LogEntry, error) {
 	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.PendingLogEntry{}
 	e.Certificate = make([]byte, r.Intn(4)+8)
 	r.Read(e.Certificate)
+	e.Issuers = chains[r.Intn(len(chains))]
 	f, _ := tl.Log.AddLeafToPool(e)
 	return waitFuncWrapper(t, e, true, f)
 }
@@ -298,10 +332,7 @@ func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx c
 	e.PreCertificate = make([]byte, r.Intn(4)+1)
 	r.Read(e.PreCertificate)
 	r.Read(e.IssuerKeyHash[:])
-	if r.Intn(2) == 0 {
-		e.PrecertSigningCert = make([]byte, r.Intn(4)+1)
-		r.Read(e.PrecertSigningCert)
-	}
+	e.Issuers = chains[r.Intn(len(chains))]
 	f, _ := tl.Log.AddLeafToPool(e)
 	return waitFuncWrapper(t, e, true, f)
 }
@@ -316,7 +347,7 @@ func (r *tileReader) Height() int {
 
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 	for _, t := range tiles {
-		b, err := r.Config.Backend.Fetch(context.Background(), t.Path())
+		b, err := r.Config.Backend.Fetch(context.Background(), sunlight.TilePath(t))
 		if err != nil {
 			return nil, err
 		}
@@ -354,7 +385,7 @@ func NewMemoryBackend(t testing.TB) *MemoryBackend {
 func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opts *ctlog.UploadOptions) error {
 	atomic.AddUint64(&b.uploads, 1)
 	// TODO: check key format is expected.
-	if len(data) == 0 && key != "issuers.pem" {
+	if len(data) == 0 {
 		b.t.Errorf("uploaded key %q with empty data", key)
 	}
 	if err := ctx.Err(); err != nil {
