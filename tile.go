@@ -78,11 +78,11 @@ func (e *LogEntry) MerkleTreeLeaf() []byte {
 
 // struct {
 //     TimestampedEntry timestamped_entry;
-//     Fingerprint certificate_chain<0..2^16-1>;
 //     select (entry_type) {
 //         case x509_entry: Empty;
 //         case precert_entry: ASN.1Cert pre_certificate;
 //     };
+//     Fingerprint certificate_chain<0..2^16-1>;
 // } TileLeaf;
 //
 // opaque Fingerprint[32];
@@ -111,8 +111,8 @@ func ReadTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
 		if !s.CopyBytes(e.IssuerKeyHash[:]) ||
 			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.Certificate)) ||
 			!s.ReadUint16LengthPrefixed(&extensions) ||
-			!s.ReadUint16LengthPrefixed(&fingerprints) ||
-			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) {
+			!s.ReadUint24LengthPrefixed((*cryptobyte.String)(&e.PreCertificate)) ||
+			!s.ReadUint16LengthPrefixed(&fingerprints) {
 			return nil, s, fmt.Errorf("invalid data tile precert_entry")
 		}
 	default:
@@ -153,16 +153,16 @@ func AppendTileLeaf(t []byte, e *LogEntry) []byte {
 		})
 	}
 	addExtensions(b, e.LeafIndex)
-	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		for _, f := range e.ChainFingerprints {
-			b.AddBytes(f[:])
-		}
-	})
 	if e.IsPrecert {
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 			b.AddBytes(e.PreCertificate)
 		})
 	}
+	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+		for _, f := range e.ChainFingerprints {
+			b.AddBytes(f[:])
+		}
+	})
 	return b.BytesOrPanic()
 }
 
