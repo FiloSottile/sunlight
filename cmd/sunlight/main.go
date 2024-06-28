@@ -84,7 +84,7 @@ type Config struct {
 	// The database must already exist to protect against accidental
 	// misconfiguration. Create the table with:
 	//
-	//     $ sqlite3 checkpoints.db "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, checkpoint TEXT)"
+	//     $ sqlite3 checkpoints.db "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body TEXT)"
 	//
 	Checkpoints string
 

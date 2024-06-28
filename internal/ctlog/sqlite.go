@@ -34,7 +34,7 @@ func NewSQLiteBackend(ctx context.Context, path string, l *slog.Logger) (*SQLite
 
 	conn, err := sqlite.OpenConn(path, sqlite.OpenFlagsDefault & ^sqlite.SQLITE_OPEN_CREATE)
 	if err != nil {
-		return nil, fmt.Errorf(`failed to open SQLite lock database (hint: to avoid misconfiguration, the lock database must be created manually with "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, checkpoint TEXT)"): %w`, err)
+		return nil, fmt.Errorf(`failed to open SQLite lock database (hint: to avoid misconfiguration, the lock database must be created manually with "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body TEXT)"): %w`, err)
 	}
 	if err := sqlitex.ExecTransient(conn, "PRAGMA synchronous = FULL", nil); err != nil {
 		conn.Close()
@@ -49,6 +49,7 @@ func NewSQLiteBackend(ctx context.Context, path string, l *slog.Logger) (*SQLite
 		conn:     conn,
 		duration: duration,
 		log:      l,
+		mu:       &sync.Mutex{},
 	}, nil
 }
 
@@ -78,7 +79,7 @@ func (b *SQLiteBackend) Fetch(ctx context.Context, logID [sha256.Size]byte) (Loc
 	if body == nil {
 		return nil, errors.New("checkpoint not found")
 	}
-	return &dynamoDBCheckpoint{logID: logID, body: body}, nil
+	return &sqliteCheckpoint{logID: logID, body: body}, nil
 }
 
 func (b *SQLiteBackend) Replace(ctx context.Context, old LockedCheckpoint, new []byte) (LockedCheckpoint, error) {
