@@ -181,6 +181,14 @@ type LogConfig struct {
 	// going to be treated like a directory in many tools using S3.
 	S3KeyPrefix string
 
+	// LocalBackend is the path to the directory where backend data is going to
+	// be saved.
+	//
+	// Not meant to be used in production, only for testing and development purposes.
+	//
+	// Cannot be used at the same time as the S3 bucket.
+	LocalBackend string
+
 	// NotAfterStart is the start of the validity range for certificates
 	// accepted by this log instance, as and RFC 3339 date.
 	NotAfterStart string
@@ -306,10 +314,24 @@ func main() {
 			slog.String("log", lc.ShortName),
 		}))
 
-		b, err := ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, lc.S3Endpoint, lc.S3KeyPrefix, logger)
-		if err != nil {
-			logger.Error("failed to create backend", "err", err)
-			os.Exit(1)
+		var b ctlog.Backend
+		if lc.LocalBackend != "" {
+			if lc.S3Bucket != "" || lc.S3Region != "" || lc.S3Endpoint != "" || lc.S3KeyPrefix != "" {
+				logger.Error("local backend cannot be used with S3")
+				os.Exit(1)
+			}
+
+			b, err = ctlog.NewLocalBackend(lc.LocalBackend)
+			if err != nil {
+				logger.Error("failed to create backend", "err", err)
+				os.Exit(1)
+			}
+		} else {
+			b, err = ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, lc.S3Endpoint, lc.S3KeyPrefix, logger)
+			if err != nil {
+				logger.Error("failed to create backend", "err", err)
+				os.Exit(1)
+			}
 		}
 
 		r := x509util.NewPEMCertPool()
