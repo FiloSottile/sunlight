@@ -5,14 +5,17 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
-	"math/rand"
+	mathrand "math/rand/v2"
 	"sync"
 	"time"
 
@@ -81,10 +84,11 @@ func (t tileWithBytes) String() string {
 }
 
 type Config struct {
-	Name     string
-	Key      *ecdsa.PrivateKey
-	PoolSize int
-	Cache    string
+	Name       string
+	Key        *ecdsa.PrivateKey
+	WitnessKey ed25519.PrivateKey
+	PoolSize   int
+	Cache      string
 
 	Backend Backend
 	Lock    LockBackend
@@ -286,17 +290,38 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 }
 
 func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error) {
-	v, err := sunlight.NewRFC6962Verifier(config.Name, config.Key.Public())
+	v1, err := sunlight.NewRFC6962Verifier(config.Name, config.Key.Public())
 	if err != nil {
 		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct verifier: %w", err)
 	}
-	n, err := note.Open(b, note.VerifierList(v))
+	vk, err := note.NewEd25519VerifierKey(config.Name, config.WitnessKey.Public().(ed25519.PublicKey))
+	if err != nil {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct verifier key: %w", err)
+	}
+	v2, err := note.NewVerifier(vk)
+	if err != nil {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct Ed25519 verifier: %w", err)
+	}
+	n, err := note.Open(b, note.VerifierList(v1, v2))
 	if err != nil {
 		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
 	}
-	timestamp, err := sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
-	if err != nil {
-		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't extract timestamp: %w", err)
+	var timestamp int64
+	var v1Found, v2Found bool
+	for _, sig := range n.Sigs {
+		switch sig.Hash {
+		case v1.KeyHash():
+			v1Found = true
+			timestamp, err = sunlight.RFC6962SignatureTimestamp(sig)
+			if err != nil {
+				return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't extract timestamp: %w", err)
+			}
+		case v2.KeyHash():
+			v2Found = true
+		}
+	}
+	if !v1Found || !v2Found {
+		return sunlight.Checkpoint{}, 0, errors.New("missing verifier signature")
 	}
 	c, err := sunlight.ParseCheckpoint(n.Text)
 	if err != nil {
@@ -596,7 +621,7 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 	}()
 
 	// Randomly stagger the sequencers to avoid conflicting for resources.
-	time.Sleep(time.Duration(rand.Int63n(int64(period))))
+	time.Sleep(time.Duration(mathrand.Int64N(int64(period))))
 
 	t := time.NewTicker(period)
 	defer t.Stop()
@@ -845,13 +870,24 @@ func signTreeHead(c *Config, tree treeWithTimestamp) (checkpoint []byte, err err
 	if err != nil {
 		return nil, fmtErrorf("couldn't construct verifier: %w", err)
 	}
-	signer := &injectedSigner{v, sig}
+	rs := &injectedSigner{v, sig}
+
+	ws, err := newEd25519Signer(c.Name, c.WitnessKey)
+	if err != nil {
+		return nil, fmtErrorf("couldn't construct Ed25519 signer: %w", err)
+	}
+
+	signers := []note.Signer{rs, ws}
+	// Randomize the order to enforce forward-compatible client behavior.
+	mathrand.Shuffle(len(signers), func(i, j int) { signers[i], signers[j] = signers[j], signers[i] })
+
 	signedNote, err := note.Sign(&note.Note{
 		Text: sunlight.FormatCheckpoint(sunlight.Checkpoint{
 			Origin: c.Name,
 			Tree:   tlog.Tree{N: tree.N, Hash: tree.Hash},
 		}),
-	}, signer)
+		UnverifiedSigs: greaseSignatures(c.Name),
+	}, signers...)
 	if err != nil {
 		return nil, fmtErrorf("couldn't sign note: %w", err)
 	}
@@ -892,6 +928,45 @@ func digitallySign(k *ecdsa.PrivateKey, msg []byte) ([]byte, error) {
 	})
 	return b.Bytes()
 }
+
+// greaseSignatures produces unverifiable but otherwise correct signatures.
+// Clients MUST ignore unknown signatures, and including some "grease" ones
+// ensures they do.
+func greaseSignatures(name string) []note.Signature {
+	g1 := make([]byte, 5+mathrand.IntN(100))
+	rand.Read(g1)
+	g2 := make([]byte, 5+mathrand.IntN(100))
+	rand.Read(g2)
+	signatures := []note.Signature{
+		{Name: "grease.invalid", Hash: binary.BigEndian.Uint32(g1), Base64: base64.StdEncoding.EncodeToString(g1)},
+		{Name: name, Hash: binary.BigEndian.Uint32(g2), Base64: base64.StdEncoding.EncodeToString(g2)},
+	}
+	mathrand.Shuffle(len(signatures), func(i, j int) { signatures[i], signatures[j] = signatures[j], signatures[i] })
+	return signatures
+}
+
+// newEd25519Signer can be removed once note.NewEd25519SignerKey is added.
+func newEd25519Signer(name string, key ed25519.PrivateKey) (note.Signer, error) {
+	vk, err := note.NewEd25519VerifierKey(name, key.Public().(ed25519.PublicKey))
+	if err != nil {
+		return nil, err
+	}
+	v, err := note.NewVerifier(vk)
+	if err != nil {
+		return nil, err
+	}
+	return &ed25519Signer{v, key}, nil
+}
+
+type ed25519Signer struct {
+	v note.Verifier
+	k ed25519.PrivateKey
+}
+
+func (s *ed25519Signer) Sign(msg []byte) ([]byte, error) { return ed25519.Sign(s.k, msg), nil }
+func (s *ed25519Signer) Name() string                    { return s.v.Name() }
+func (s *ed25519Signer) KeyHash() uint32                 { return s.v.KeyHash() }
+func (s *ed25519Signer) Verifier() note.Verifier         { return s.v }
 
 // hashReader returns hashes from l.edgeTiles and from overlay.
 func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {

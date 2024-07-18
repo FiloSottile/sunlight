@@ -5,6 +5,7 @@ go 1.22.4
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
 	filippo.io/bigmod v0.0.3
+	filippo.io/keygen v0.0.0-20240718133620-7f162efbbd87
 	filippo.io/nistec v0.0.3
 	github.com/aws/aws-sdk-go-v2 v1.24.1
 	github.com/aws/aws-sdk-go-v2/config v1.26.6
@@ -46,7 +47,7 @@ require (
 	github.com/prometheus/client_model v0.5.0 // indirect
 	github.com/prometheus/common v0.46.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
-	golang.org/x/sys v0.17.0 // indirect
+	golang.org/x/sys v0.22.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240205150955-31a09d347014 // indirect
 	google.golang.org/grpc v1.61.0 // indirect
