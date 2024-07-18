@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -45,10 +46,16 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 	k, err := x509.MarshalPKCS8PrivateKey(key)
 	fatalIfErr(t, err)
 	t.Logf("ECDSA key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
+	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+	fatalIfErr(t, err)
+	k, err = x509.MarshalPKCS8PrivateKey(ed25519Key)
+	fatalIfErr(t, err)
+	t.Logf("Ed25519 key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
 	logHandler, logLevel := testLogHandler(t)
 	config := &ctlog.Config{
 		Name:          "example.com/TestLog",
 		Key:           key,
+		WitnessKey:    ed25519Key,
 		Cache:         filepath.Join(t.TempDir(), "cache.db"),
 		Backend:       NewMemoryBackend(t),
 		Lock:          NewMemoryLockBackend(t),

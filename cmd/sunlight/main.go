@@ -16,12 +16,14 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/pem"
 	"flag"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"filippo.io/keygen"
 	"filippo.io/sunlight/internal/ctlog"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -38,6 +41,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/crypto/hkdf"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sync/errgroup"
@@ -137,21 +141,22 @@ type LogConfig struct {
 	// Roots is the path to the accepted roots as a PEM file.
 	Roots string
 
-	// Key is the path to the private key as a PKCS#8 PEM file.
+	// Seed is the path to a file containing a secret seed from which the log's
+	// private keys are derived. The whole file is used as HKDF input.
 	//
-	// To generate a new key, run:
+	// To generate a new seed, run:
 	//
-	//   $ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -outform PEM -out key.pem
+	//   $ head -c 32 /dev/urandom > seed.bin
 	//
-	Key string
+	Seed string
 
 	// PublicKey is the SubjectPublicKeyInfo for this log, base64 encoded.
 	//
 	// This is the same format as used in Google and Apple's log list JSON files.
 	//
-	// To generate from a private key, run:
+	// To generate this from a seed, run:
 	//
-	//   $ openssl pkey -in key.pem -pubout -outform DER | base64 -w0
+	//   $ sunlight-keygen log.example/logA seed.bin
 	//
 	// If provided, the loaded private Key is required to match it. Optional.
 	PublicKey string
@@ -308,21 +313,25 @@ func main() {
 			fatalError(logger, "failed to load roots", "err", err)
 		}
 
-		keyPEM, err := os.ReadFile(lc.Key)
+		seed, err := os.ReadFile(lc.Seed)
 		if err != nil {
-			fatalError(logger, "failed to load key", "err", err)
+			fatalError(logger, "failed to load seed", "err", err)
 		}
-		block, _ := pem.Decode(keyPEM)
-		if block == nil || block.Type != "PRIVATE KEY" {
-			fatalError(logger, "failed to parse key PEM")
+
+		ecdsaSecret := make([]byte, 32)
+		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight"), []byte("ECDSA P-256 log key")), ecdsaSecret); err != nil {
+			fatalError(logger, "failed to derive ECDSA secret", "err", err)
 		}
-		k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		k, err := keygen.ECDSA(elliptic.P256(), ecdsaSecret)
 		if err != nil {
-			fatalError(logger, "failed to parse key", "err", err)
+			fatalError(logger, "failed to generate ECDSA key", "err", err)
 		}
-		if _, ok := k.(*ecdsa.PrivateKey); !ok {
-			fatalError(logger, "key is not an ECDSA private key")
+
+		ed25519Secret := make([]byte, ed25519.SeedSize)
+		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight"), []byte("Ed25519 log key")), ed25519Secret); err != nil {
+			fatalError(logger, "failed to derive Ed25519 key", "err", err)
 		}
+		wk := ed25519.NewKeyFromSeed(ed25519Secret)
 
 		if lc.PublicKey != "" {
 			cfgPubKey, err := base64.StdEncoding.DecodeString(lc.PublicKey)
@@ -335,8 +344,8 @@ func main() {
 				fatalError(logger, "failed to parse public key", "err", err)
 			}
 
-			if !k.(*ecdsa.PrivateKey).PublicKey.Equal(parsedPubKey) {
-				spki, err := x509.MarshalPKIXPublicKey(&k.(*ecdsa.PrivateKey).PublicKey)
+			if !k.PublicKey.Equal(parsedPubKey) {
+				spki, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
 				if err != nil {
 					fatalError(logger, "failed to marshal public key from private key for display", "err", err)
 				}
@@ -357,7 +366,8 @@ func main() {
 
 		cc := &ctlog.Config{
 			Name:          lc.Name,
-			Key:           k.(*ecdsa.PrivateKey),
+			Key:           k,
+			WitnessKey:    wk,
 			Cache:         lc.Cache,
 			PoolSize:      lc.PoolSize,
 			Backend:       b,

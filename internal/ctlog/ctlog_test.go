@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -395,6 +396,14 @@ func TestReloadWrongKey(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	fatalIfErr(t, err)
 	c.Key = key
+	if _, err := ctlog.LoadLog(context.Background(), c); err == nil {
+		t.Error("expected loading to fail")
+	}
+
+	c = tl.Config
+	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+	fatalIfErr(t, err)
+	c.WitnessKey = ed25519Key
 	if _, err := ctlog.LoadLog(context.Background(), c); err == nil {
 		t.Error("expected loading to fail")
 	}
