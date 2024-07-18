@@ -286,15 +286,17 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 }
 
 func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error) {
-	var timestamp int64
-	v, err := sunlight.NewRFC6962Verifier(config.Name, config.Key.Public(),
-		func(t uint64) { timestamp = int64(t) })
+	v, err := sunlight.NewRFC6962Verifier(config.Name, config.Key.Public())
 	if err != nil {
 		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct verifier: %w", err)
 	}
 	n, err := note.Open(b, note.VerifierList(v))
 	if err != nil {
 		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
+	}
+	timestamp, err := sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
+	if err != nil {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't extract timestamp: %w", err)
 	}
 	c, err := sunlight.ParseCheckpoint(n.Text)
 	if err != nil {
@@ -839,7 +841,7 @@ func signTreeHead(c *Config, tree treeWithTimestamp) (checkpoint []byte, err err
 		return nil, fmtErrorf("couldn't encode RFC6962NoteSignature: %w", err)
 	}
 
-	v, err := sunlight.NewRFC6962Verifier(c.Name, c.Key.Public(), nil)
+	v, err := sunlight.NewRFC6962Verifier(c.Name, c.Key.Public())
 	if err != nil {
 		return nil, fmtErrorf("couldn't construct verifier: %w", err)
 	}

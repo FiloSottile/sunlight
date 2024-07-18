@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -89,10 +90,7 @@ func FormatCheckpoint(c Checkpoint) string {
 
 // NewRFC6962Verifier constructs a new [note.Verifier] that verifies a RFC 6962
 // TreeHeadSignature formatted according to c2sp.org/sunlight.
-//
-// tf, if not nil, is called with the timestamp extracted from any valid
-// verified signature.
-func NewRFC6962Verifier(name string, key crypto.PublicKey, tf func(uint64)) (note.Verifier, error) {
+func NewRFC6962Verifier(name string, key crypto.PublicKey) (note.Verifier, error) {
 	if !isValidName(name) {
 		return nil, fmt.Errorf("invalid name %q", name)
 	}
@@ -126,12 +124,6 @@ func NewRFC6962Verifier(name string, key crypto.PublicKey, tf func(uint64)) (not
 			!s.Empty() {
 			return false
 		}
-
-		defer func() {
-			if ok && tf != nil {
-				tf(timestamp)
-			}
-		}()
 
 		sth := ct.SignedTreeHead{
 			Version:        ct.V1,
@@ -187,4 +179,18 @@ func keyHash(name string, key []byte) uint32 {
 	h.Write(key)
 	sum := h.Sum(nil)
 	return binary.BigEndian.Uint32(sum)
+}
+
+func RFC6962SignatureTimestamp(sig note.Signature) (int64, error) {
+	sigBytes, err := base64.StdEncoding.DecodeString(sig.Base64)
+	if err != nil {
+		return 0, err
+	}
+	var timestamp uint64
+	s := cryptobyte.String(sigBytes)
+	if !s.Skip(4 /* key hash */) || !s.ReadUint64(&timestamp) ||
+		timestamp > math.MaxInt64 {
+		return 0, errors.New("malformed RFC 6962 TreeHeadSignature")
+	}
+	return int64(timestamp), nil
 }
