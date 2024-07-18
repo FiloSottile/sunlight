@@ -226,13 +226,11 @@ func main() {
 
 	yml, err := os.ReadFile(*configFlag)
 	if err != nil {
-		logger.Error("failed to read config file", "err", err)
-		os.Exit(1)
+		fatalError(logger, "failed to read config file", "err", err)
 	}
 	c := &Config{}
 	if err := yaml.Unmarshal(yml, c); err != nil {
-		logger.Error("failed to parse config file", "err", err)
-		os.Exit(1)
+		fatalError(logger, "failed to parse config file", "err", err)
 	}
 
 	mux := http.NewServeMux()
@@ -258,14 +256,12 @@ func main() {
 	case c.Checkpoints != "" && c.DynamoDB.Table != "" ||
 		c.Checkpoints != "" && c.ETagS3.Bucket != "" ||
 		c.DynamoDB.Table != "" && c.ETagS3.Bucket != "":
-		logger.Error("only one of Checkpoints, DynamoDB, or ETagS3 can be set at the same time")
-		os.Exit(1)
+		fatalError(logger, "only one of Checkpoints, DynamoDB, or ETagS3 can be set at the same time")
 
 	case c.Checkpoints != "":
 		b, err := ctlog.NewSQLiteBackend(ctx, c.Checkpoints, logger)
 		if err != nil {
-			logger.Error("failed to create SQLite checkpoint backend", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to create SQLite checkpoint backend", "err", err)
 		}
 		sunlightMetrics.MustRegister(b.Metrics()...)
 		db = b
@@ -274,8 +270,7 @@ func main() {
 		b, err := ctlog.NewDynamoDBBackend(ctx,
 			c.DynamoDB.Region, c.DynamoDB.Table, c.DynamoDB.Endpoint, logger)
 		if err != nil {
-			logger.Error("failed to create DynamoDB backend", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to create DynamoDB backend", "err", err)
 		}
 		sunlightMetrics.MustRegister(b.Metrics()...)
 		db = b
@@ -284,23 +279,20 @@ func main() {
 		b, err := ctlog.NewETagBackend(ctx,
 			c.ETagS3.Region, c.ETagS3.Bucket, c.ETagS3.Endpoint, logger)
 		if err != nil {
-			logger.Error("failed to create ETag S3 backend", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to create ETag S3 backend", "err", err)
 		}
 		sunlightMetrics.MustRegister(b.Metrics()...)
 		db = b
 
 	default:
-		logger.Error("neither Checkpoints nor DynamoDB are set, one must be used")
-		os.Exit(1)
+		fatalError(logger, "neither Checkpoints nor DynamoDB are set, one must be used")
 	}
 
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 
 	for _, lc := range c.Logs {
 		if lc.Name == "" || lc.ShortName == "" {
-			logger.Error("missing name or short name for log")
-			os.Exit(1)
+			fatalError(logger, "missing name or short name for log")
 		}
 		logger := slog.New(logHandler.WithAttrs([]slog.Attr{
 			slog.String("log", lc.ShortName),
@@ -308,71 +300,59 @@ func main() {
 
 		b, err := ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, lc.S3Endpoint, lc.S3KeyPrefix, logger)
 		if err != nil {
-			logger.Error("failed to create backend", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to create backend", "err", err)
 		}
 
 		r := x509util.NewPEMCertPool()
 		if err := r.AppendCertsFromPEMFile(lc.Roots); err != nil {
-			logger.Error("failed to load roots", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to load roots", "err", err)
 		}
 
 		keyPEM, err := os.ReadFile(lc.Key)
 		if err != nil {
-			logger.Error("failed to load key", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to load key", "err", err)
 		}
 		block, _ := pem.Decode(keyPEM)
 		if block == nil || block.Type != "PRIVATE KEY" {
-			logger.Error("failed to parse key PEM")
-			os.Exit(1)
+			fatalError(logger, "failed to parse key PEM")
 		}
 		k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 		if err != nil {
-			logger.Error("failed to parse key", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to parse key", "err", err)
 		}
 		if _, ok := k.(*ecdsa.PrivateKey); !ok {
-			logger.Error("key is not an ECDSA private key")
-			os.Exit(1)
+			fatalError(logger, "key is not an ECDSA private key")
 		}
 
 		if lc.PublicKey != "" {
 			cfgPubKey, err := base64.StdEncoding.DecodeString(lc.PublicKey)
 			if err != nil {
-				logger.Error("failed to parse public key base64", "err", err)
-				os.Exit(1)
+				fatalError(logger, "failed to parse public key base64", "err", err)
 			}
 
 			parsedPubKey, err := x509.ParsePKIXPublicKey(cfgPubKey)
 			if err != nil {
-				logger.Error("failed to parse public key", "err", err)
-				os.Exit(1)
+				fatalError(logger, "failed to parse public key", "err", err)
 			}
 
 			if !k.(*ecdsa.PrivateKey).PublicKey.Equal(parsedPubKey) {
 				spki, err := x509.MarshalPKIXPublicKey(&k.(*ecdsa.PrivateKey).PublicKey)
 				if err != nil {
-					logger.Error("failed to marshal public key from private key for display", "err", err)
-					os.Exit(1)
+					fatalError(logger, "failed to marshal public key from private key for display", "err", err)
 				}
 
 				publicFromPrivate := base64.StdEncoding.EncodeToString(spki)
-				logger.Error("configured private and public keys do not match", "configured", lc.PublicKey, "publicFromPrivate", publicFromPrivate)
-				os.Exit(1)
+				fatalError(logger, "configured private and public keys do not match", "configured", lc.PublicKey, "publicFromPrivate", publicFromPrivate)
 			}
 		}
 
 		notAfterStart, err := time.Parse(time.RFC3339, lc.NotAfterStart)
 		if err != nil {
-			logger.Error("failed to parse NotAfterStart", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to parse NotAfterStart", "err", err)
 		}
 		notAfterLimit, err := time.Parse(time.RFC3339, lc.NotAfterLimit)
 		if err != nil {
-			logger.Error("failed to parse NotAfterLimit", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to parse NotAfterLimit", "err", err)
 		}
 
 		cc := &ctlog.Config{
@@ -393,14 +373,13 @@ func main() {
 			if err := ctlog.CreateLog(ctx, cc); err == ctlog.ErrLogExists {
 				logger.Info("log exists")
 			} else if err != nil {
-				logger.Error("failed to create log", "err", err)
+				fatalError(logger, "failed to create log", "err", err)
 			}
 		}
 
 		l, err := ctlog.LoadLog(ctx, cc)
 		if err != nil {
-			logger.Error("failed to load log", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to load log", "err", err)
 		}
 		defer l.CloseCache()
 
@@ -443,8 +422,7 @@ func main() {
 	if *testCertFlag {
 		cert, err := tls.LoadX509KeyPair("sunlight.pem", "sunlight-key.pem")
 		if err != nil {
-			logger.Error("failed to load test cert", "err", err)
-			os.Exit(1)
+			fatalError(logger, "failed to load test cert", "err", err)
 		}
 		s.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
@@ -485,5 +463,10 @@ func main() {
 		logger.Error("Shutdown error", "err", err)
 	}
 
+	os.Exit(1)
+}
+
+func fatalError(logger *slog.Logger, msg string, args ...any) {
+	logger.Error(msg, args...)
 	os.Exit(1)
 }
