@@ -98,11 +98,10 @@ type Config struct {
 var ErrLogExists = errors.New("checkpoint already exist, refusing to initialize log")
 
 func CreateLog(ctx context.Context, config *Config) error {
-	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
+	logID, err := logIDFromKey(config.Key)
 	if err != nil {
-		return fmt.Errorf("couldn't marshal public key: %w", err)
+		return fmt.Errorf("couldn't compute log ID: %w", err)
 	}
-	logID := sha256.Sum256(pkix)
 
 	if _, err := config.Lock.Fetch(ctx, logID); err == nil {
 		return ErrLogExists
@@ -123,12 +122,11 @@ func CreateLog(ctx context.Context, config *Config) error {
 	}
 
 	timestamp := timeNowUnixMilli()
-	th, err := tlog.TreeHash(0, nil)
+	tree, err := hashTreeHead(0, nil, timestamp)
 	if err != nil {
-		return fmt.Errorf("couldn't hash empty tree: %w", err)
+		return fmt.Errorf("couldn't compute empty tree head: %w", err)
 	}
-	tree := treeWithTimestamp{tlog.Tree{N: 0, Hash: th}, timestamp}
-	checkpoint, err := signTreeHead(config.Name, config.Key, tree)
+	checkpoint, err := signTreeHead(config, tree)
 	if err != nil {
 		return fmt.Errorf("couldn't sign empty tree head: %w", err)
 	}
@@ -145,70 +143,57 @@ func CreateLog(ctx context.Context, config *Config) error {
 	return nil
 }
 
-func LoadLog(ctx context.Context, config *Config) (*Log, error) {
-	pkix, err := x509.MarshalPKIXPublicKey(config.Key.Public())
+func logIDFromKey(key *ecdsa.PrivateKey) ([sha256.Size]byte, error) {
+	pkix, err := x509.MarshalPKIXPublicKey(key.Public())
 	if err != nil {
-		return nil, fmt.Errorf("couldn't marshal public key: %w", err)
+		return [sha256.Size]byte{}, fmt.Errorf("couldn't marshal public key: %w", err)
 	}
-	logID := sha256.Sum256(pkix)
+	return sha256.Sum256(pkix), nil
+}
 
+func hashTreeHead(n int64, r tlog.HashReader, t int64) (treeWithTimestamp, error) {
+	rootHash, err := tlog.TreeHash(n, r)
+	if err != nil {
+		return treeWithTimestamp{}, fmtErrorf("couldn't compute tree hash: %w", err)
+	}
+	return treeWithTimestamp{Tree: tlog.Tree{N: n, Hash: rootHash}, Time: t}, nil
+}
+
+func LoadLog(ctx context.Context, config *Config) (*Log, error) {
+	logID, err := logIDFromKey(config.Key)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't compute log ID: %w", err)
+	}
+
+	// Load the checkpoint from the lock database. If we crashed during
+	// serialization, the one in the lock database is going to be the latest.
 	lock, err := config.Lock.Fetch(ctx, logID)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't fetch checkpoint from lock database: %w", err)
 	}
 	config.Log.DebugContext(ctx, "loaded checkpoint", "checkpoint", lock.Bytes())
-	var timestamp int64
-	v, err := sunlight.NewRFC6962Verifier(config.Name, config.Key.Public(),
-		func(t uint64) { timestamp = int64(t) })
+	c, timestamp, err := openCheckpoint(config, lock.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
-	}
-	n, err := note.Open(lock.Bytes(), note.VerifierList(v))
-	if err != nil {
-		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
-	}
-	c, err := sunlight.ParseCheckpoint(n.Text)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't parse checkpoint: %w", err)
+		return nil, fmt.Errorf("couldn't open checkpoint: %w", err)
 	}
 
-	if now := timeNowUnixMilli(); now < timestamp {
-		return nil, fmt.Errorf("current time %d is before checkpoint time %d", now, timestamp)
-	}
-	if c.Origin != config.Name {
-		return nil, fmt.Errorf("checkpoint name for log ID is %q, not %q", c.Origin, config.Name)
-	}
-	if c.Extension != "" {
-		return nil, fmt.Errorf("unexpected checkpoint extension %q", c.Extension)
-	}
-
+	// Load the checkpoint from the object storage backend, verify it, and
+	// compare it to the lock checkpoint.
 	sth, err := config.Backend.Fetch(ctx, "checkpoint")
 	if err != nil {
-		return nil, fmt.Errorf("couldn't fetch checkpoint: %w", err)
+		return nil, fmt.Errorf("couldn't fetch checkpoint from object storage: %w", err)
 	}
 	config.Log.DebugContext(ctx, "loaded checkpoint from object storage", "checkpoint", sth)
-	v, err = sunlight.NewRFC6962Verifier(config.Name, config.Key.Public(), nil)
+	c1, _, err := openCheckpoint(config, sth)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
+		return nil, fmt.Errorf("couldn't open checkpoint from object storage: %w", err)
 	}
-	n1, err := note.Open(sth, note.VerifierList(v))
-	if err != nil {
-		return nil, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
-	}
-	c1, err := sunlight.ParseCheckpoint(n1.Text)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't parse checkpoint: %w", err)
-	}
-	if c1.Origin != config.Name {
-		return nil, fmt.Errorf("checkpoint name from object storage is %q, not %q", c1.Origin, config.Name)
-	}
-	if c1.N == c.N && c1.Hash != c.Hash {
+	switch {
+	case c1.N == c.N && c1.Hash != c.Hash:
 		return nil, fmt.Errorf("checkpoint hash mismatch: %x != %x", c1.Hash, c.Hash)
-	}
-	if c1.N > c.N {
+	case c1.N > c.N:
 		return nil, fmt.Errorf("checkpoint in object storage is newer than lock checkpoint: %d > %d", c1.N, c.N)
-	}
-	if c1.N < c.N {
+	case c1.N < c.N:
 		// It's possible that we crashed between committing a new checkpoint to
 		// the lock backend and uploading it to the object storage backend.
 		// Or maybe the object storage backend GETs are cached.
@@ -223,6 +208,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		return nil, fmt.Errorf("couldn't initialize cache database: %w", err)
 	}
 
+	// Fetch the tiles on the right edge, and verify them against the checkpoint.
 	edgeTiles := make(map[int]tileWithBytes)
 	if c.N > 0 {
 		// Fetch the right-most edge tiles by reading the last leaf.
@@ -297,6 +283,35 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		cacheWrite:     cacheWrite,
 		issuers:        make(map[[32]byte]bool),
 	}, nil
+}
+
+func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error) {
+	var timestamp int64
+	v, err := sunlight.NewRFC6962Verifier(config.Name, config.Key.Public(),
+		func(t uint64) { timestamp = int64(t) })
+	if err != nil {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct verifier: %w", err)
+	}
+	n, err := note.Open(b, note.VerifierList(v))
+	if err != nil {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't verify checkpoint signature: %w", err)
+	}
+	c, err := sunlight.ParseCheckpoint(n.Text)
+	if err != nil {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't parse checkpoint: %w", err)
+	}
+
+	if now := timeNowUnixMilli(); now < timestamp {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("current time %d is before checkpoint time %d", now, timestamp)
+	}
+	if c.Origin != config.Name {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("checkpoint name is %q, not %q", c.Origin, config.Name)
+	}
+	if c.Extension != "" {
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("unexpected checkpoint extension %q", c.Extension)
+	}
+
+	return c, timestamp, nil
 }
 
 var timeNowUnixMilli = func() int64 { return time.Now().UnixMilli() }
@@ -731,13 +746,12 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		testingOnlyPauseSequencing()
 	}
 
-	rootHash, err := tlog.TreeHash(n, hashReader)
+	tree, err := hashTreeHead(n, hashReader, timestamp)
 	if err != nil {
-		return fmtErrorf("couldn't compute tree hash: %w", err)
+		return fmtErrorf("couldn't compute tree head: %w", err)
 	}
-	tree := treeWithTimestamp{Tree: tlog.Tree{N: n, Hash: rootHash}, Time: timestamp}
 
-	checkpoint, err := signTreeHead(l.c.Name, l.c.Key, tree)
+	checkpoint, err := signTreeHead(l.c, tree)
 	if err != nil {
 		return fmtErrorf("couldn't sign checkpoint: %w", err)
 	}
@@ -793,9 +807,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 var testingOnlyPauseSequencing func()
 
-// signTreeHead signs the tree and returns a checkpoint according to
-// c2sp.org/checkpoint.
-func signTreeHead(name string, privKey *ecdsa.PrivateKey, tree treeWithTimestamp) (checkpoint []byte, err error) {
+// signTreeHead signs the tree and returns a c2sp.org/checkpoint.
+func signTreeHead(c *Config, tree treeWithTimestamp) (checkpoint []byte, err error) {
 	sthBytes, err := ct.SerializeSTHSignatureInput(ct.SignedTreeHead{
 		Version:        ct.V1,
 		TreeSize:       uint64(tree.N),
@@ -809,7 +822,7 @@ func signTreeHead(name string, privKey *ecdsa.PrivateKey, tree treeWithTimestamp
 	// We compute the signature here and inject it in a fixed note.Signer to
 	// avoid a risky serialize-deserialize loop, and to control the timestamp.
 
-	treeHeadSignature, err := digitallySign(privKey, sthBytes)
+	treeHeadSignature, err := digitallySign(c.Key, sthBytes)
 	if err != nil {
 		return nil, fmtErrorf("couldn't produce signature: %w", err)
 	}
@@ -826,14 +839,14 @@ func signTreeHead(name string, privKey *ecdsa.PrivateKey, tree treeWithTimestamp
 		return nil, fmtErrorf("couldn't encode RFC6962NoteSignature: %w", err)
 	}
 
-	v, err := sunlight.NewRFC6962Verifier(name, privKey.Public(), nil)
+	v, err := sunlight.NewRFC6962Verifier(c.Name, c.Key.Public(), nil)
 	if err != nil {
 		return nil, fmtErrorf("couldn't construct verifier: %w", err)
 	}
 	signer := &injectedSigner{v, sig}
 	signedNote, err := note.Sign(&note.Note{
 		Text: sunlight.FormatCheckpoint(sunlight.Checkpoint{
-			Origin: name,
+			Origin: c.Name,
 			Tree:   tlog.Tree{N: tree.N, Hash: tree.Hash},
 		}),
 	}, signer)
