@@ -121,10 +121,14 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 
 	sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
 	fatalIfErr(t, err)
-	v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public(),
-		func(t uint64) { sthTimestamp = int64(t) })
+	v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
 	fatalIfErr(t, err)
 	n, err := note.Open(sth, note.VerifierList(v))
+	fatalIfErr(t, err)
+	if len(n.Sigs) != 1 {
+		t.Fatalf("expected 1 signature, got %d", len(n.Sigs))
+	}
+	sthTimestamp, err = sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
 	fatalIfErr(t, err)
 	c, err := sunlight.ParseCheckpoint(n.Text)
 	fatalIfErr(t, err)
