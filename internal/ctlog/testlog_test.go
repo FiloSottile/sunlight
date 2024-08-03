@@ -69,7 +69,7 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 	config.Roots.AddCert(root)
 	err = ctlog.CreateLog(context.Background(), config)
 	fatalIfErr(t, err)
-	(&TestLog{t: t, Config: config, l: logLevel}).CheckLog()
+	(&TestLog{t: t, Config: config, l: logLevel}).CheckLog(0)
 	log, err := ctlog.LoadLog(context.Background(), config)
 	fatalIfErr(t, err)
 	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
@@ -78,7 +78,7 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 		Config: config,
 		l:      logLevel,
 	}
-	tl.CheckLog()
+	tl.CheckLog(0)
 	return tl
 }
 
@@ -122,15 +122,16 @@ func ReloadLog(t testing.TB, tl *TestLog) *TestLog {
 	}
 }
 
-func (tl *TestLog) CheckLog() (sthTimestamp int64) {
+func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 	t := tl.t
-	// TODO: accept an expected log size.
 
-	sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
+	logID, err := logIDFromKey(tl.Config.Key)
+	fatalIfErr(t, err)
+	sth, err := tl.Config.Lock.Fetch(context.Background(), logID)
 	fatalIfErr(t, err)
 	v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
 	fatalIfErr(t, err)
-	n, err := note.Open(sth, note.VerifierList(v))
+	n, err := note.Open(sth.Bytes(), note.VerifierList(v))
 	fatalIfErr(t, err)
 	if len(n.Sigs) != 1 {
 		t.Fatalf("expected 1 signature, got %d", len(n.Sigs))
@@ -147,6 +148,41 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 		t.Errorf("unexpected extension %q", c.Extension)
 	}
 
+	{
+		sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
+		fatalIfErr(t, err)
+		v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
+		fatalIfErr(t, err)
+		n, err := note.Open(sth, note.VerifierList(v))
+		fatalIfErr(t, err)
+		if len(n.Sigs) != 1 {
+			t.Fatalf("expected 1 signature, got %d", len(n.Sigs))
+		}
+		sthTimestamp1, err := sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
+		fatalIfErr(t, err)
+		c1, err := sunlight.ParseCheckpoint(n.Text)
+		fatalIfErr(t, err)
+
+		if c1.Origin != c.Origin || c1.Extension != c.Extension {
+			t.Errorf("checkpoint and lock checkpoint differ")
+		}
+		if c1.N == c.N && c1.Hash != c.Hash {
+			t.Error("checkpoint and lock checkpoint have different hash")
+		}
+		if sthTimestamp1 > sthTimestamp {
+			t.Error("checkpoint is more recent than lock checkpoint")
+		}
+		if c1.N > c.N {
+			t.Error("checkpoint has more entries than lock checkpoint")
+		}
+		if c1.N < c.N {
+			// TODO: check consistency.
+		}
+	}
+
+	if size >= 0 && c.N != size {
+		t.Errorf("expected size %d, got %d", size, c.N)
+	}
 	if c.N == 0 {
 		expected := sha256.Sum256([]byte{})
 		if c.Hash != expected {
@@ -230,6 +266,14 @@ func (tl *TestLog) CheckLog() (sthTimestamp int64) {
 	}
 
 	return
+}
+
+func logIDFromKey(key *ecdsa.PrivateKey) ([sha256.Size]byte, error) {
+	pkix, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("couldn't marshal public key: %w", err)
+	}
+	return sha256.Sum256(pkix), nil
 }
 
 func (tl *TestLog) LogClient() *client.LogClient {
@@ -319,13 +363,6 @@ func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx cont
 	return waitFuncWrapper(t, e, true, f)
 }
 
-func addCertificateFast(t *testing.T, tl *TestLog) {
-	e := &ctlog.PendingLogEntry{}
-	e.Certificate = make([]byte, mathrand.Intn(3)+1)
-	rand.Read(e.Certificate)
-	tl.Log.AddLeafToPool(e)
-}
-
 func addCertificateExpectFailure(t *testing.T, tl *TestLog) {
 	e := &ctlog.PendingLogEntry{}
 	e.Certificate = make([]byte, mathrand.Intn(4)+8)
@@ -388,6 +425,8 @@ type MemoryBackend struct {
 	m  map[string][]byte
 
 	uploads uint64
+
+	UploadCallback func(key string, data []byte) (apply bool, err error)
 }
 
 func NewMemoryBackend(t testing.TB) *MemoryBackend {
@@ -405,10 +444,18 @@ func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opt
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	var finalErr error
+	if b.UploadCallback != nil {
+		apply, err := b.UploadCallback(key, data)
+		finalErr = err
+		if !apply {
+			return finalErr
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.m[key] = data
-	return nil
+	return finalErr
 }
 
 func (b *MemoryBackend) Fetch(ctx context.Context, key string) ([]byte, error) {
@@ -431,7 +478,7 @@ type MemoryLockBackend struct {
 	mu sync.Mutex
 	m  map[[sha256.Size]byte][]byte
 
-	ReplaceCallback func(old ctlog.LockedCheckpoint, new []byte) error
+	ReplaceCallback func(old ctlog.LockedCheckpoint, new []byte) (apply bool, err error)
 }
 
 type memoryLockCheckpoint struct {
@@ -479,9 +526,12 @@ func (b *MemoryLockBackend) Replace(ctx context.Context, old ctlog.LockedCheckpo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var finalErr error
 	if b.ReplaceCallback != nil {
-		if err := b.ReplaceCallback(old, new); err != nil {
-			return nil, err
+		apply, err := b.ReplaceCallback(old, new)
+		finalErr = err
+		if !apply {
+			return nil, finalErr
 		}
 	}
 	b.mu.Lock()
@@ -497,7 +547,7 @@ func (b *MemoryLockBackend) Replace(ctx context.Context, old ctlog.LockedCheckpo
 		return nil, fmt.Errorf("log %x has changed", oldc.logID)
 	}
 	b.m[oldc.logID] = new
-	return &memoryLockCheckpoint{logID: oldc.logID, data: new}, nil
+	return &memoryLockCheckpoint{logID: oldc.logID, data: new}, finalErr
 }
 
 func fatalIfErr(t testing.TB, err error) {
