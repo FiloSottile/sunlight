@@ -936,7 +936,9 @@ func greaseSignatures(name string) []note.Signature {
 	g1 := make([]byte, 5+mathrand.IntN(100))
 	rand.Read(g1)
 	g2 := make([]byte, 5+mathrand.IntN(100))
-	rand.Read(g2)
+	h := sha256.Sum256(append([]byte("grease\n"), byte(mathrand.IntN(100))))
+	copy(g2[:4], h[:])
+	rand.Read(g2[4:])
 	signatures := []note.Signature{
 		{Name: "grease.invalid", Hash: binary.BigEndian.Uint32(g1), Base64: base64.StdEncoding.EncodeToString(g1)},
 		{Name: name, Hash: binary.BigEndian.Uint32(g2), Base64: base64.StdEncoding.EncodeToString(g2)},
