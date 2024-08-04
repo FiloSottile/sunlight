@@ -27,10 +27,11 @@ import (
 	"github.com/google/certificate-transparency-go/tls"
 )
 
+var globalTime = time.Now().UnixMilli()
+
 func init() {
-	t := time.Now().UnixMilli()
 	ctlog.SetTimeNowUnixMilli(func() int64 {
-		return atomic.AddInt64(&t, 1)
+		return atomic.AddInt64(&globalTime, 1)
 	})
 }
 
@@ -134,32 +135,38 @@ func TestSequenceUploadCount(t *testing.T) {
 	}
 	uploads()
 
-	// Empty rounds should cause only one upload (the checkpoint).
+	// Empty rounds should cause only two uploads (an empty staging bundle and
+	// the checkpoint).
 	fatalIfErr(t, tl.Log.Sequence())
-	if n := uploads(); n != 1 {
-		t.Errorf("got %d uploads, expected 1", n)
+	if n := uploads(); n != 2 {
+		t.Errorf("got %d uploads, expected 2", n)
 	}
 
-	// One entry in steady state (not at tile boundary) should cause three
-	// uploads (the checkpoint, a level -1 tile, and a level 0 tile).
+	// One entry in steady state (not at tile boundary) should cause four
+	// uploads (the staging bundle, the checkpoint, a level -1 tile, and a level
+	// 0 tile).
 	addCertificate(t, tl)
 	fatalIfErr(t, tl.Log.Sequence())
-	if n := uploads(); n != 3 {
-		t.Errorf("got %d uploads, expected 3", n)
+	if n := uploads(); n != 4 {
+		t.Errorf("got %d uploads, expected 4", n)
 	}
 
-	// A tile width worth of entries should cause six uploads (the checkpoint,
-	// two level -1 tiles, two level 0 tiles, and one level 1 tile).
+	// A tile width worth of entries should cause six uploads (the staging
+	// bundle, the checkpoint, two level -1 tiles, two level 0 tiles, and one
+	// level 1 tile).
 	for i := 0; i < tileWidth; i++ {
 		addCertificate(t, tl)
 	}
 	fatalIfErr(t, tl.Log.Sequence())
-	if n := uploads(); n != 6 {
-		t.Errorf("got %d uploads, expected 6", n)
+	if n := uploads(); n != 7 {
+		t.Errorf("got %d uploads, expected 7", n)
 	}
 }
 
 func TestSequenceUploadPaths(t *testing.T) {
+	defer func(old int64) { globalTime = old }(globalTime)
+	globalTime = 0
+
 	tl := NewEmptyTestLog(t)
 
 	for i := int64(0); i < tileWidth+5; i++ {
@@ -186,6 +193,8 @@ func TestSequenceUploadPaths(t *testing.T) {
 		"issuer/6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d",
 		"issuer/81365bbc90b5b3991c762eebada7c6d84d1e39a0a1d648cb4fe5a9890b089da8",
 		"issuer/df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
+		"staging/261-0a4f1a4119ca89dc90a612834c0da004f5d1b04a5aad89b88df26a904e4a4f0f",
+		"staging/527-0c3e2c4127196a1a5abb8c6d94d3607a92b510e01004607b910eb0c7ba27f710",
 		"tile/0/000",
 		"tile/0/001",
 		"tile/0/001.p/5",
@@ -219,6 +228,8 @@ func testDuplicates(t *testing.T, addWithSeed func(*testing.T, *TestLog, int64) 
 	addWithSeed(t, tl, mathrand.Int63()) // 2
 	addWithSeed(t, tl, mathrand.Int63()) // 3
 
+	// Two pairs of duplicates from the byHash pool.
+
 	wait01 := addWithSeed(t, tl, 0) // 4
 	wait02 := addWithSeed(t, tl, 0)
 	wait11 := addWithSeed(t, tl, 1) // 5
@@ -251,6 +262,8 @@ func testDuplicates(t *testing.T, addWithSeed func(*testing.T, *TestLog, int64) 
 		t.Errorf("got timestamp %d, expected %d", e12.Timestamp, e11.Timestamp)
 	}
 
+	// A duplicate from the cache.
+
 	wait03 := addWithSeed(t, tl, 0)
 	fatalIfErr(t, tl.Log.Sequence())
 	e03, err := wait03(context.Background())
@@ -262,6 +275,8 @@ func testDuplicates(t *testing.T, addWithSeed func(*testing.T, *TestLog, int64) 
 	if e03.Timestamp != e01.Timestamp {
 		t.Errorf("got timestamp %d, expected %d", e03.Timestamp, e01.Timestamp)
 	}
+
+	// A pair of duplicates from the inSequencing pool.
 
 	wait21 := addWithSeed(t, tl, 2) // 6
 	ctlog.PauseSequencer()
@@ -521,6 +536,40 @@ func TestSequenceErrors(t *testing.T) {
 			expectFatal:    false,
 		},
 		{
+			name: "StagingUpload",
+			breakSeq: func(tl *TestLog) {
+				fail := func(key string, data []byte) (apply bool, err error) {
+					if strings.HasPrefix(key, "staging/") {
+						return false, errors.New("staging upload error")
+					}
+					return true, nil
+				}
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+			},
+			unbreakSeq: func(tl *TestLog) {
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+			},
+			expectProgress: false,
+			expectFatal:    false,
+		},
+		{
+			name: "StagingUpload",
+			breakSeq: func(tl *TestLog) {
+				fail := func(key string, data []byte) (apply bool, err error) {
+					if strings.HasPrefix(key, "staging/") {
+						return false, errors.New("staging upload error")
+					}
+					return true, nil
+				}
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+			},
+			unbreakSeq: func(tl *TestLog) {
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+			},
+			expectProgress: false,
+			expectFatal:    false,
+		},
+		{
 			name: "DataTileUpload",
 			breakSeq: func(tl *TestLog) {
 				fail := func(key string, data []byte) (apply bool, err error) {
@@ -534,8 +583,8 @@ func TestSequenceErrors(t *testing.T) {
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
 			},
-			expectProgress: false,
-			expectFatal:    false,
+			expectProgress: true,
+			expectFatal:    true,
 		},
 		{
 			name: "DataTileUploadPersisted",
@@ -551,8 +600,8 @@ func TestSequenceErrors(t *testing.T) {
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
 			},
-			expectProgress: false,
-			expectFatal:    false,
+			expectProgress: true,
+			expectFatal:    true,
 		},
 		{
 			name: "Level0TileUpload",
@@ -568,8 +617,8 @@ func TestSequenceErrors(t *testing.T) {
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
 			},
-			expectProgress: false,
-			expectFatal:    false,
+			expectProgress: true,
+			expectFatal:    true,
 		},
 		{
 			name: "Level0TileUploadPersisted",
@@ -585,8 +634,8 @@ func TestSequenceErrors(t *testing.T) {
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
 			},
-			expectProgress: false,
-			expectFatal:    false,
+			expectProgress: true,
+			expectFatal:    true,
 		},
 	}
 
@@ -617,7 +666,13 @@ func TestSequenceErrors(t *testing.T) {
 				}
 				tl.CheckLog(expectedSize)
 				if err != nil {
+					if broken {
+						tt.unbreakSeq(tl)
+					}
 					tl = ReloadLog(t, tl)
+					if broken {
+						tt.breakSeq(tl)
+					}
 				}
 			}
 

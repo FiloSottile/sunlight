@@ -125,13 +125,11 @@ func ReloadLog(t testing.TB, tl *TestLog) *TestLog {
 func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 	t := tl.t
 
-	logID, err := logIDFromKey(tl.Config.Key)
-	fatalIfErr(t, err)
-	sth, err := tl.Config.Lock.Fetch(context.Background(), logID)
+	sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
 	fatalIfErr(t, err)
 	v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
 	fatalIfErr(t, err)
-	n, err := note.Open(sth.Bytes(), note.VerifierList(v))
+	n, err := note.Open(sth, note.VerifierList(v))
 	fatalIfErr(t, err)
 	if len(n.Sigs) != 1 {
 		t.Fatalf("expected 1 signature, got %d", len(n.Sigs))
@@ -149,11 +147,13 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 	}
 
 	{
-		sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
+		logID, err := logIDFromKey(tl.Config.Key)
+		fatalIfErr(t, err)
+		sth, err := tl.Config.Lock.Fetch(context.Background(), logID)
 		fatalIfErr(t, err)
 		v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
 		fatalIfErr(t, err)
-		n, err := note.Open(sth, note.VerifierList(v))
+		n, err := note.Open(sth.Bytes(), note.VerifierList(v))
 		fatalIfErr(t, err)
 		if len(n.Sigs) != 1 {
 			t.Fatalf("expected 1 signature, got %d", len(n.Sigs))
@@ -169,20 +169,21 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 		if c1.N == c.N && c1.Hash != c.Hash {
 			t.Error("checkpoint and lock checkpoint have different hash")
 		}
-		if sthTimestamp1 > sthTimestamp {
-			t.Error("checkpoint is more recent than lock checkpoint")
-		}
-		if c1.N > c.N {
-			t.Error("checkpoint has more entries than lock checkpoint")
+		if sthTimestamp1 < sthTimestamp {
+			t.Error("lock checkpoint is older than checkpoint")
 		}
 		if c1.N < c.N {
-			// TODO: check consistency.
+			t.Error("lock checkpoint is smaller than checkpoint")
+		}
+		if c1.N > c.N {
+			// TODO: load pending entries and check consistency.
+		}
+
+		if size >= 0 && c1.N != size {
+			t.Errorf("expected size %d, got %d", size, c.N)
 		}
 	}
 
-	if size >= 0 && c.N != size {
-		t.Errorf("expected size %d, got %d", size, c.N)
-	}
 	if c.N == 0 {
 		expected := sha256.Sum256([]byte{})
 		if c.Hash != expected {
