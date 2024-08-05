@@ -1,0 +1,22 @@
+listen: ":7600"
+
+dynamodb:
+  region: "localhost"
+  table: "sunlight-integration"
+  endpoint: "http://dynamo:8000/"
+
+logs:
+  - name: sunlight/ci-log-1
+    shortname: ci-log-1
+    inception: 2024-08-06 # TODO - need to template today's date in here
+    roots: /etc/sunlight/roots.pem
+    seed: /etc/sunlight/ci-log-1-seed.bin
+    notafterstart: 2000-01-01T00:00:00Z
+    notafterlimit: 2100-01-01T00:00:00Z
+    s3bucket: sunlight-integration
+    s3endpoint: http://minio:9000
+    s3region: localhost
+    s3keyprefix: "log1/"
+    poolsize: 750
+    cache: /cache/ci-log-1.db
+    publickey: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAElTZfG/A38FkaRbLUG+llfR+eK6YxxUk2OMqtptnIeIeRdVI+RoTuUcCquhUskv8U5r4KSuCRFsCiYSN/V+WvDQ=="

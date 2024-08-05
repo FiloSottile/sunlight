@@ -1,0 +1,85 @@
+services:
+  minio:
+    image: "quay.io/minio/minio:RELEASE.2024-08-03T04-33-23Z"
+    command: ["server", "--address", ":9000", "--console-address", ":9001", "/data"]
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      - MINIO_DOMAIN=minio
+    networks:
+      net:
+        aliases:
+          - sunlight-integration.minio
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 5s
+  dynamo:
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /data"
+    image: "public.ecr.aws/aws-dynamodb-local/aws-dynamodb-local:2.5.2"
+    working_dir: /home/dynamodblocal
+    ports:
+      - "127.0.0.1:8000:8000"
+    user: root
+    volumes:
+      - dynamo_data:/data
+    networks:
+      net:
+    healthcheck:
+      test: ["CMD", "curl", "-I", "http://localhost:8000"]
+      interval: 5s
+  aws-setup:
+    image: "public.ecr.aws/aws-cli/aws-cli:2.17.23"
+    entrypoint: /bin/sh
+    command: /bin/aws-setup.sh
+    volumes:
+      - type: bind
+        source: ./aws-setup.sh
+        target: /bin/aws-setup.sh
+    depends_on:
+      minio:
+        condition: service_healthy
+      dynamo:
+        condition: service_healthy
+    networks:
+      net:
+  sunlight:
+    build:
+      dockerfile: integration/Dockerfile
+      context: ../
+      args:
+        GO_VERSION: 1.22.5
+    environment:
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+    networks:
+      net:
+    ports:
+      - "127.0.0.1:7600:7600"
+    working_dir: /
+    command: ["/bin/sunlight", "-testcert", "-c", "/etc/sunlight/integration-test-config.yaml"]
+    depends_on:
+      aws-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-I", "https://sunlight:7600", "--cacert", "/etc/sunlight/roots.pem"]
+      interval: 5s
+    volumes:
+      - cache:/cache
+      - type: bind
+        source: ./etc/sunlight
+        target: /etc/sunlight
+      - type: bind
+        source: ./sunlight.pem
+        target: /sunlight.pem
+      - type: bind
+        source: ./sunlight-key.pem
+        target: /sunlight-key.pem
+volumes:
+  minio_data:
+  dynamo_data:
+  cache:
+networks:
+  net:
