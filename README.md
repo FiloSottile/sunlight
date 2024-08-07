@@ -76,12 +76,3 @@ stderr in human-readable format, and to stdout in JSON format.
 A private HTTP debug server is also started on a random port on localhost. It
 serves the net/http/pprof endpoints, as well as `/debug/logson` and
 `/debug/logsoff` which enable and disable debug logging, respectively.
-
-## The Rome prototype logs
-
-The `rome/` folder contains the configuration for the Rome prototype logs,
-deployed on Fly.io and Tigris from the main branch by GitHub Actions.
-
-To deploy manually, run
-
-    fly -c rome/fly.toml deploy

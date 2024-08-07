@@ -1,0 +1,13 @@
+[Unit]
+Description=Sunlight Certificate Transparency Log
+After=network.target
+
+[Service]
+EnvironmentFile=/etc/sunlight/credentials.env
+ExecStart=/usr/local/bin/sunlight -c /etc/sunlight/sunlight.yaml
+StandardOutput=append:/var/log/sunlight.jsonl
+StandardError=journal
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
