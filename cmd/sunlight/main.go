@@ -21,7 +21,9 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	_ "embed"
 	"encoding/base64"
+	"encoding/pem"
 	"flag"
 	"io"
 	"log/slog"
@@ -31,6 +33,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"text/template"
 	"time"
 
 	"filippo.io/keygen"
@@ -195,6 +198,26 @@ type LogConfig struct {
 	NotAfterLimit string
 }
 
+type homepageLog struct {
+	// Fields from LogConfig, we don't embed the whole struct to avoid
+	// accidentally exposing sensitive fields.
+	Name          string
+	NotAfterStart string
+	NotAfterLimit string
+	HTTPPrefix    string
+	PoolSize      int
+
+	// ID is the base64 encoded SHA-256 of the public key.
+	ID string
+
+	// PublicKey is the PEM encoded SubjectPublicKeyInfo.
+	PublicKey string
+}
+
+//go:embed home.html
+var homeHTML string
+var homeTmpl = template.Must(template.New("home").Parse(homeHTML))
+
 func main() {
 	fs := flag.NewFlagSet("sunlight", flag.ExitOnError)
 	configFlag := fs.String("c", "sunlight.yaml", "path to the config file")
@@ -295,6 +318,7 @@ func main() {
 
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 
+	var logList []homepageLog
 	for _, lc := range c.Logs {
 		if lc.Name == "" || lc.ShortName == "" {
 			fatalError(logger, "missing name or short name for log")
@@ -401,7 +425,30 @@ func main() {
 
 		prometheus.WrapRegistererWith(prometheus.Labels{"log": lc.ShortName}, sunlightMetrics).
 			MustRegister(l.Metrics()...)
+
+		pkix, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
+		if err != nil {
+			fatalError(logger, "failed to marshal public key for display", "err", err)
+		}
+		pemKey := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pkix})
+		logID := sha256.Sum256(pkix)
+		logList = append(logList, homepageLog{
+			Name:          lc.Name,
+			ID:            base64.StdEncoding.EncodeToString(logID[:]),
+			NotAfterStart: lc.NotAfterStart,
+			NotAfterLimit: lc.NotAfterLimit,
+			HTTPPrefix:    lc.HTTPPrefix,
+			PoolSize:      lc.PoolSize,
+			PublicKey:     string(pemKey),
+		})
 	}
+
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if err := homeTmpl.Execute(w, logList); err != nil {
+			logger.Error("failed to execute homepage template", "err", err)
+		}
+	})
 
 	s := &http.Server{
 		Addr:         c.Listen,
