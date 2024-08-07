@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Sunlight</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bitter&family=Raleway&family=Source+Code+Pro&display=swap" rel="stylesheet">
+
+    <style>
+        .container {
+            width: auto;
+            max-width: 700px;
+            padding: 0 15px;
+            margin: 80px auto;
+        }
+
+        body {
+            font-family: "Raleway", sans-serif;
+            line-height: 1.4;
+        }
+
+        h1, h2, h3 {
+            font-family: "Bitter", serif;
+        }
+
+        code {
+            font-family: "Source Code Pro", monospace;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .response {
+            white-space: wrap;
+            word-break: break-all;
+        }
+    </style>
+</head>
+
+<body>
+  <div class="container">
+    <p align="center">
+      <img alt="The Sunlight logo, a bench under a tree in stylized black ink, cast against a large yellow sun, with the text Sunlight underneath" width="250" height="278" src="https://sunlight.dev/images/sunlight_logo_main.png">
+    </p>
+
+    <p>
+      This is a <a href="https://sunlight.dev">Sunlight</a> Certificate Transparency log instance.
+    
+    <p>
+      The following logs are active.
+    
+    {{ range . }}
+
+    <h2>{{ .Name }}</h2>
+
+    <p>
+      Log ID: <code>{{ .ID }}</code><br>
+      NotAfter start: <strong>{{ .NotAfterStart }}</strong><br>
+      NotAfter limit: <strong>{{ .NotAfterLimit }}</strong><br>
+      Roots: <a href="{{ .HTTPPrefix }}/ct/v1/get-roots">get-roots</a><br>
+      Ratelimit: {{ .PoolSize }} req/s
+    
+    <pre>{{ .PublicKey }}</pre>
+    
+    <h3>Submit a certificate chain (PEM or JSON)</h3>
+      
+    <input type="file" class="chain" data-prefix="{{ .HTTPPrefix }}">
+    <code><pre class="response"></pre></code>
+
+    {{ end }}
+
+    <script>
+        for (const fileInput of document.querySelectorAll('.chain')) {
+            fileInput.addEventListener('change', async (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const responseDiv = event.target.nextElementSibling.querySelector('.response');
+                    responseDiv.textContent = "...";
+
+                    var contents = e.target.result;
+                    
+                    if (!contents.startsWith('{')) {
+                        const chain = [];
+                        for (const line of contents.split('\n')) {
+                            const trimmedLine = line.trim();
+                            if (trimmedLine === '')
+                                continue;
+                            else if (trimmedLine === '-----BEGIN CERTIFICATE-----')
+                                chain.push("");
+                            else if (trimmedLine === '-----END CERTIFICATE-----')
+                                continue;
+                            else
+                                chain[chain.length - 1] += trimmedLine;
+                        }
+                        contents = JSON.stringify({ "chain": chain });
+                    }
+
+                    const url = event.target.dataset.prefix + '/ct/v1/add-chain';
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: contents
+                    });
+
+                    const responseText = await response.text();
+                    if (responseText === '' && !response.ok)
+                        responseText = `HTTP ${response.status} ${response.statusText}`;
+                    responseDiv.textContent = responseText;
+                };
+                reader.readAsText(file);
+            });
+        }
+    </script>
