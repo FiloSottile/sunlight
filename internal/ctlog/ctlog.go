@@ -208,8 +208,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		// Apply the staged tiles before continuing.
 		config.Log.WarnContext(ctx, "checkpoint in object storage is older than lock checkpoint",
 			"old_size", c1.N, "size", c.N)
-		stagingPath := fmt.Sprintf("staging/%d-%s", c.N, hex.EncodeToString(c.Hash[:]))
-		stagedUploads, err := config.Backend.Fetch(ctx, stagingPath)
+		stagedUploads, err := config.Backend.Fetch(ctx, stagingPath(c.Tree))
 		if err != nil {
 			return nil, fmt.Errorf("couldn't fetch staged uploads: %w", err)
 		}
@@ -372,6 +371,8 @@ type Backend interface {
 	Metrics() []prometheus.Collector
 }
 
+// UploadOptions are used as part of the Backend.Upload method, and are
+// marshaled to JSON and stored in the staging bundles.
 type UploadOptions struct {
 	// ContentType is the MIME type of the data. If empty, defaults to
 	// "application/octet-stream".
@@ -791,7 +792,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	if err != nil {
 		return fmtErrorf("couldn't marshal staged uploads: %w", err)
 	}
-	stagingPath := fmt.Sprintf("staging/%d-%s", tree.N, hex.EncodeToString(tree.Hash[:]))
+	stagingPath := stagingPath(tree.Tree)
 	l.c.Log.DebugContext(ctx, "uploading staged tiles", "old_tree_size", oldSize,
 		"tree_size", n, "path", stagingPath, "size", len(stagedUploads))
 	if err := l.c.Backend.Upload(ctx, stagingPath, stagedUploads, optsStaging); err != nil {
@@ -811,11 +812,10 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		return fmt.Errorf("%w: couldn't upload checkpoint to database: %w", errFatal, err)
 	}
 
-	// At this point the pool is fully serialized: the new tree was uploaded to
-	// object storage and the checkpoint was committed to the database. If the
-	// checkpoint upload to object storage were to fail, we'd still be in a
-	// consistent state and able to make progress. If we were to crash after
-	// this, recovery would be clean from database and object storage.
+	// At this point the pool is fully serialized: new entries were persisted to
+	// object storage (in staging) and the checkpoint was committed to the
+	// database. If we were to crash after this, recovery would be clean from
+	// database and object storage.
 	p.timestamp = timestamp
 	p.firstLeafIndex = l.tree.N
 	l.tree = tree
@@ -826,7 +826,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	// exercise the same code path as LoadLog.
 	if err := applyStagedUploads(ctx, l.c, stagedUploads); err != nil {
 		// This is also fatal, since we can't continue leaving behind missing
-		// tiles. LoadLog will retry uploading them from the staging bundle.
+		// tiles. The next run of sequence will not upload them again, while
+		// LoadLog will retry uploading them from the staging bundle.
 		return fmtErrorf("%w: couldn't upload a tile: %w", errFatal, err)
 	}
 
@@ -917,26 +918,23 @@ func applyStagedUploads(ctx context.Context, config *Config, stagedUploads []byt
 		if err != nil {
 			return fmtErrorf("error reading tar data: %w", err)
 		}
-
 		g.Go(func() error {
-			// Since errors are fatal, and uploads are idempotent, retry to
-			// avoid having to reload the whole process.
-			attempt := 1
-			for {
-				err := config.Backend.Upload(gctx, key, data, opts)
-				if err == nil || attempt == 5 {
-					return err
-				}
-				config.Log.WarnContext(gctx, "tile upload failed",
-					"key", key, "err", err, "attempt", attempt)
-				if !testing.Testing() {
-					time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
-				}
-				attempt++
-			}
+			return config.Backend.Upload(gctx, key, data, opts)
 		})
 	}
 	return g.Wait()
+}
+
+func stagingPath(tree tlog.Tree) string {
+	// Encode size in three digit chunks like [sunlight.TilePath].
+	n := tree.N
+	nStr := fmt.Sprintf("%03d", n%1000)
+	for n >= 1000 {
+		n /= 1000
+		nStr = fmt.Sprintf("x%03d/%s", n%1000, nStr)
+	}
+
+	return fmt.Sprintf("staging/%s/%s", nStr, hex.EncodeToString(tree.Hash[:]))
 }
 
 // signTreeHead signs the tree and returns a c2sp.org/checkpoint.
