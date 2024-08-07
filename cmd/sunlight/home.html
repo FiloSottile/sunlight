@@ -50,7 +50,7 @@
       This is a <a href="https://sunlight.dev">Sunlight</a> Certificate Transparency log instance.
     
     <p>
-      The following logs are active.
+      <a href="metrics">Metrics</a> are available. The following logs are active.
     
     {{ range . }}
 
@@ -63,7 +63,7 @@
       Roots: <a href="{{ .HTTPPrefix }}/ct/v1/get-roots">get-roots</a><br>
       Ratelimit: {{ .PoolSize }} req/s
     
-    <pre>{{ .PublicKey }}</pre>
+    <code><pre>{{ .PublicKey }}</pre></code>
     
     <h3>Submit a certificate chain (PEM or JSON)</h3>
       
