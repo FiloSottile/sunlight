@@ -193,8 +193,8 @@ func TestSequenceUploadPaths(t *testing.T) {
 		"issuer/6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d",
 		"issuer/81365bbc90b5b3991c762eebada7c6d84d1e39a0a1d648cb4fe5a9890b089da8",
 		"issuer/df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
-		"staging/261-0a4f1a4119ca89dc90a612834c0da004f5d1b04a5aad89b88df26a904e4a4f0f",
-		"staging/527-0c3e2c4127196a1a5abb8c6d94d3607a92b510e01004607b910eb0c7ba27f710",
+		"staging/261/0a4f1a4119ca89dc90a612834c0da004f5d1b04a5aad89b88df26a904e4a4f0f",
+		"staging/527/0c3e2c4127196a1a5abb8c6d94d3607a92b510e01004607b910eb0c7ba27f710",
 		"tile/0/000",
 		"tile/0/001",
 		"tile/0/001.p/5",
@@ -553,11 +553,11 @@ func TestSequenceErrors(t *testing.T) {
 			expectFatal:    false,
 		},
 		{
-			name: "StagingUpload",
+			name: "StagingUploadPersisted",
 			breakSeq: func(tl *TestLog) {
 				fail := func(key string, data []byte) (apply bool, err error) {
 					if strings.HasPrefix(key, "staging/") {
-						return false, errors.New("staging upload error")
+						return true, errors.New("staging upload error")
 					}
 					return true, nil
 				}
