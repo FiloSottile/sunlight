@@ -291,6 +291,17 @@ func testDuplicates(t *testing.T, addWithSeed func(*testing.T, *TestLog, int64) 
 	if e22.Timestamp != e21.Timestamp {
 		t.Errorf("got timestamp %d, expected %d", e22.Timestamp, e21.Timestamp)
 	}
+
+	// A failed sequencing immediately allows resubmission (i.e., the failed
+	// entry in the inSequencing pool is not picked up).
+
+	tl.Config.Backend.(*MemoryBackend).UploadCallback = failStagingButPersist
+	addCertificateExpectFailureWithSeed(t, tl, 3)
+	fatalIfErr(t, tl.Log.Sequence())
+
+	tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+	addCertificateWithSeed(t, tl, 3)
+	fatalIfErr(t, tl.Log.Sequence())
 }
 
 func TestReloadLog(t *testing.T) {

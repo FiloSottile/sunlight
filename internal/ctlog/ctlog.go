@@ -665,7 +665,16 @@ func (l *Log) sequence(ctx context.Context) error {
 	l.inSequencing = p.byHash
 	l.poolMu.Unlock()
 
-	return l.sequencePool(ctx, p)
+	err := l.sequencePool(ctx, p)
+
+	// Once sequencePool returns, the entries are either in the deduplication
+	// cache or finalized with an error. In the latter case, we don't want
+	// a resubmit to deduplicate against the failed sequencing.
+	l.poolMu.Lock()
+	l.inSequencing = nil
+	l.poolMu.Unlock()
+
+	return err
 }
 
 func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
