@@ -388,7 +388,7 @@ type UploadOptions struct {
 
 var optsHashTile = &UploadOptions{Immutable: true}
 var optsDataTile = &UploadOptions{Compress: true, Immutable: true}
-var optsStaging = &UploadOptions{Compress: true, Immutable: true}
+var optsStaging = &UploadOptions{Compress: true}
 var optsIssuer = &UploadOptions{ContentType: "application/pkix-cert", Immutable: true}
 var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
@@ -826,7 +826,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	// exercise the same code path as LoadLog.
 	if err := applyStagedUploads(ctx, l.c, stagedUploads); err != nil {
 		// This is also fatal, since we can't continue leaving behind missing
-		// tiles. The next run of sequence will not upload them again, while
+		// tiles. The next run of sequence would not upload them again, while
 		// LoadLog will retry uploading them from the staging bundle.
 		return fmtErrorf("%w: couldn't upload a tile: %w", errFatal, err)
 	}

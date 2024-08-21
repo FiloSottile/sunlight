@@ -10,13 +10,11 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"errors"
 	"flag"
 	mathrand "math/rand"
 	"reflect"
 	"slices"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,11 +27,9 @@ import (
 
 var globalTime = time.Now().UnixMilli()
 
-func init() {
-	ctlog.SetTimeNowUnixMilli(func() int64 {
-		return atomic.AddInt64(&globalTime, 1)
-	})
-}
+func monotonicTime() int64 { return atomic.AddInt64(&globalTime, 1) }
+
+func init() { ctlog.SetTimeNowUnixMilli(monotonicTime) }
 
 var longFlag = flag.Bool("long", false, "run especially slow tests")
 
@@ -428,24 +424,78 @@ func TestReloadWrongKey(t *testing.T) {
 	}
 }
 
+func TestStagingCollision(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	addCertificate(t, tl)
+	fatalIfErr(t, tl.Log.Sequence())
+
+	time := monotonicTime()
+	ctlog.SetTimeNowUnixMilli(func() int64 { return time })
+	t.Cleanup(func() { ctlog.SetTimeNowUnixMilli(monotonicTime) })
+
+	addCertificateExpectFailureWithSeed(t, tl, 'A')
+	addCertificateExpectFailureWithSeed(t, tl, 'B')
+
+	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = failLockAndNotPersist
+	sequenceExpectFailure(t, tl)
+	tl.CheckLog(1)
+
+	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = nil
+	tl = ReloadLog(t, tl)
+	tl.CheckLog(1)
+
+	// First, cause the exact same staging bundle to be uploaded.
+
+	addCertificateWithSeed(t, tl, 'A')
+	addCertificateWithSeed(t, tl, 'B')
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(3)
+
+	// Again, but now due to a staging bundle upload error.
+
+	time++
+
+	addCertificateExpectFailureWithSeed(t, tl, 'C')
+	addCertificateExpectFailureWithSeed(t, tl, 'D')
+
+	tl.Config.Backend.(*MemoryBackend).UploadCallback = failStagingButPersist
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(3)
+
+	tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+
+	addCertificateWithSeed(t, tl, 'C')
+	addCertificateWithSeed(t, tl, 'D')
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(5)
+
+	// We wanted to also test reaching the same point through two different
+	// sequencing paths, as suggested in
+	// https://github.com/FiloSottile/sunlight/pull/18#discussion_r1704174301
+	// but that doesn't seem possible since time is required to move forward at
+	// each sequencing.
+}
+
+func sequenceExpectFailure(t *testing.T, tl *TestLog) {
+	t.Helper()
+	if err := tl.Log.Sequence(); err == nil {
+		t.Error("expected error, got nil")
+	}
+}
+
 func TestFatalError(t *testing.T) {
 	tl := NewEmptyTestLog(t)
 	addCertificate(t, tl)
 	addCertificate(t, tl)
 	fatalIfErr(t, tl.Log.Sequence())
 
-	lockErr := errors.New("lock replace error")
-	fail := func(old ctlog.LockedCheckpoint, new []byte) (bool, error) {
-		return false, lockErr
-	}
-
-	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = fail
+	tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = failLockAndNotPersist
 	addCertificateExpectFailure(t, tl)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	if err := tl.Log.RunSequencer(ctx, 1*time.Millisecond); !errors.Is(err, lockErr) {
-		t.Errorf("expected fatal error, got %v", err)
+	if err := tl.Log.RunSequencer(ctx, 1*time.Millisecond); err == nil {
+		t.Errorf("expected fatal error, got nil")
 	}
 	tl.CheckLog(2)
 
@@ -474,10 +524,7 @@ func TestSequenceErrors(t *testing.T) {
 			// retried, and the same tiles are generated and uploaded again.
 			name: "LockUpload",
 			breakSeq: func(tl *TestLog) {
-				fail := func(old ctlog.LockedCheckpoint, new []byte) (bool, error) {
-					return false, errors.New("lock replace error")
-				}
-				tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = fail
+				tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = failLockAndNotPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = nil
@@ -490,10 +537,7 @@ func TestSequenceErrors(t *testing.T) {
 			// persisted anyway, such as a response timeout.
 			name: "LockUploadPersisted",
 			breakSeq: func(tl *TestLog) {
-				fail := func(old ctlog.LockedCheckpoint, new []byte) (bool, error) {
-					return true, errors.New("lock response timeout")
-				}
-				tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = fail
+				tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = failLockButPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Lock.(*MemoryLockBackend).ReplaceCallback = nil
@@ -504,13 +548,7 @@ func TestSequenceErrors(t *testing.T) {
 		{
 			name: "CheckpointUpload",
 			breakSeq: func(tl *TestLog) {
-				fail := func(key string, data []byte) (apply bool, err error) {
-					if key == "checkpoint" {
-						return false, errors.New("checkpoint upload error")
-					}
-					return true, nil
-				}
-				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failCheckpointAndNotPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
@@ -521,13 +559,7 @@ func TestSequenceErrors(t *testing.T) {
 		{
 			name: "CheckpointUploadPersisted",
 			breakSeq: func(tl *TestLog) {
-				fail := func(key string, data []byte) (apply bool, err error) {
-					if key == "checkpoint" {
-						return true, errors.New("checkpoint upload error")
-					}
-					return true, nil
-				}
-				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failCheckpointButPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
@@ -538,13 +570,7 @@ func TestSequenceErrors(t *testing.T) {
 		{
 			name: "StagingUpload",
 			breakSeq: func(tl *TestLog) {
-				fail := func(key string, data []byte) (apply bool, err error) {
-					if strings.HasPrefix(key, "staging/") {
-						return false, errors.New("staging upload error")
-					}
-					return true, nil
-				}
-				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failStagingAndNotPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
@@ -555,13 +581,7 @@ func TestSequenceErrors(t *testing.T) {
 		{
 			name: "StagingUploadPersisted",
 			breakSeq: func(tl *TestLog) {
-				fail := func(key string, data []byte) (apply bool, err error) {
-					if strings.HasPrefix(key, "staging/") {
-						return true, errors.New("staging upload error")
-					}
-					return true, nil
-				}
-				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failStagingButPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
@@ -572,13 +592,7 @@ func TestSequenceErrors(t *testing.T) {
 		{
 			name: "DataTileUpload",
 			breakSeq: func(tl *TestLog) {
-				fail := func(key string, data []byte) (apply bool, err error) {
-					if strings.HasPrefix(key, "tile/data/") {
-						return false, errors.New("tile upload error")
-					}
-					return true, nil
-				}
-				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failDataTileAndNotPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
@@ -589,13 +603,7 @@ func TestSequenceErrors(t *testing.T) {
 		{
 			name: "DataTileUploadPersisted",
 			breakSeq: func(tl *TestLog) {
-				fail := func(key string, data []byte) (apply bool, err error) {
-					if strings.HasPrefix(key, "tile/data/") {
-						return true, errors.New("tile upload error")
-					}
-					return true, nil
-				}
-				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failDataTileButPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
@@ -606,13 +614,7 @@ func TestSequenceErrors(t *testing.T) {
 		{
 			name: "Level0TileUpload",
 			breakSeq: func(tl *TestLog) {
-				fail := func(key string, data []byte) (apply bool, err error) {
-					if strings.HasPrefix(key, "tile/0/") {
-						return false, errors.New("tile upload error")
-					}
-					return true, nil
-				}
-				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failTile0AndNotPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
@@ -623,13 +625,7 @@ func TestSequenceErrors(t *testing.T) {
 		{
 			name: "Level0TileUploadPersisted",
 			breakSeq: func(tl *TestLog) {
-				fail := func(key string, data []byte) (apply bool, err error) {
-					if strings.HasPrefix(key, "tile/0/") {
-						return true, errors.New("tile upload error")
-					}
-					return true, nil
-				}
-				tl.Config.Backend.(*MemoryBackend).UploadCallback = fail
+				tl.Config.Backend.(*MemoryBackend).UploadCallback = failTile0ButPersist
 			},
 			unbreakSeq: func(tl *TestLog) {
 				tl.Config.Backend.(*MemoryBackend).UploadCallback = nil

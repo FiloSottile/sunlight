@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -113,6 +115,7 @@ func (tl *TestLog) Quiet() {
 }
 
 func ReloadLog(t testing.TB, tl *TestLog) *TestLog {
+	t.Helper()
 	log, err := ctlog.LoadLog(context.Background(), tl.Config)
 	fatalIfErr(t, err)
 	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
@@ -124,6 +127,7 @@ func ReloadLog(t testing.TB, tl *TestLog) *TestLog {
 
 func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 	t := tl.t
+	t.Helper()
 
 	sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
 	fatalIfErr(t, err)
@@ -320,8 +324,10 @@ func (tl *TestLog) StartSequencer() {
 func waitFuncWrapper(t testing.TB, le *ctlog.PendingLogEntry, expectSuccess bool,
 	f func(ctx context.Context) (*sunlight.LogEntry, error),
 ) func(ctx context.Context) (*sunlight.LogEntry, error) {
+	t.Helper()
 	var called bool
 	fw := func(ctx context.Context) (*sunlight.LogEntry, error) {
+		t.Helper()
 		called = true
 		se, err := f(ctx)
 		if !expectSuccess {
@@ -336,6 +342,7 @@ func waitFuncWrapper(t testing.TB, le *ctlog.PendingLogEntry, expectSuccess bool
 		return se, err
 	}
 	t.Cleanup(func() {
+		t.Helper()
 		if !called {
 			fw(context.Background())
 		}
@@ -344,6 +351,7 @@ func waitFuncWrapper(t testing.TB, le *ctlog.PendingLogEntry, expectSuccess bool
 }
 
 func addCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*sunlight.LogEntry, error) {
+	t.Helper()
 	return addCertificateWithSeed(t, tl, mathrand.Int63()) // 2⁻³² chance of collision after 2¹⁶ entries
 }
 
@@ -355,6 +363,7 @@ var chains = [][][]byte{
 }
 
 func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*sunlight.LogEntry, error) {
+	t.Helper()
 	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.PendingLogEntry{}
 	e.Certificate = make([]byte, r.Intn(4)+8)
@@ -365,18 +374,28 @@ func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx cont
 }
 
 func addCertificateExpectFailure(t *testing.T, tl *TestLog) {
+	t.Helper()
+	addCertificateExpectFailureWithSeed(t, tl, mathrand.Int63())
+}
+
+func addCertificateExpectFailureWithSeed(t *testing.T, tl *TestLog, seed int64) {
+	t.Helper()
+	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.PendingLogEntry{}
-	e.Certificate = make([]byte, mathrand.Intn(4)+8)
-	rand.Read(e.Certificate)
+	e.Certificate = make([]byte, r.Intn(4)+8)
+	r.Read(e.Certificate)
+	e.Issuers = chains[r.Intn(len(chains))]
 	f, _ := tl.Log.AddLeafToPool(e)
 	waitFuncWrapper(t, e, false, f)
 }
 
 func addPreCertificate(t *testing.T, tl *TestLog) func(ctx context.Context) (*sunlight.LogEntry, error) {
+	t.Helper()
 	return addPreCertificateWithSeed(t, tl, mathrand.Int63())
 }
 
 func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*sunlight.LogEntry, error) {
+	t.Helper()
 	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.PendingLogEntry{IsPrecert: true}
 	e.Certificate = make([]byte, r.Intn(4)+8)
@@ -421,9 +440,10 @@ func (v *verifier) KeyHash() uint32             { return v.hash }
 func (v *verifier) Verify(msg, sig []byte) bool { return v.verify(msg, sig) }
 
 type MemoryBackend struct {
-	t  testing.TB
-	mu sync.Mutex
-	m  map[string][]byte
+	t   testing.TB
+	mu  sync.Mutex
+	m   map[string][]byte
+	imm map[string]bool
 
 	uploads uint64
 
@@ -432,7 +452,7 @@ type MemoryBackend struct {
 
 func NewMemoryBackend(t testing.TB) *MemoryBackend {
 	return &MemoryBackend{
-		t: t, m: make(map[string][]byte),
+		t: t, m: make(map[string][]byte), imm: make(map[string]bool),
 	}
 }
 
@@ -455,8 +475,68 @@ func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opt
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.imm[key] && !bytes.Equal(b.m[key], data) {
+		b.t.Errorf("immutable key %q was modified", key)
+	}
 	b.m[key] = data
+	b.imm[key] = opts.Immutable
 	return finalErr
+}
+
+func failCheckpointAndNotPersist(key string, data []byte) (apply bool, err error) {
+	if key == "checkpoint" {
+		return false, errors.New("checkpoint upload error")
+	}
+	return true, nil
+}
+
+func failCheckpointButPersist(key string, data []byte) (apply bool, err error) {
+	if key == "checkpoint" {
+		return true, errors.New("checkpoint upload error")
+	}
+	return true, nil
+}
+
+func failStagingAndNotPersist(key string, data []byte) (apply bool, err error) {
+	if strings.HasPrefix(key, "staging/") {
+		return false, errors.New("staging upload error")
+	}
+	return true, nil
+}
+
+func failStagingButPersist(key string, data []byte) (apply bool, err error) {
+	if strings.HasPrefix(key, "staging/") {
+		return true, errors.New("staging upload error")
+	}
+	return true, nil
+}
+
+func failDataTileAndNotPersist(key string, data []byte) (apply bool, err error) {
+	if strings.HasPrefix(key, "tile/data/") {
+		return false, errors.New("data tile upload error")
+	}
+	return true, nil
+}
+
+func failDataTileButPersist(key string, data []byte) (apply bool, err error) {
+	if strings.HasPrefix(key, "tile/data/") {
+		return true, errors.New("data tile upload error")
+	}
+	return true, nil
+}
+
+func failTile0AndNotPersist(key string, data []byte) (apply bool, err error) {
+	if strings.HasPrefix(key, "tile/0/") {
+		return false, errors.New("tile 0 upload error")
+	}
+	return true, nil
+}
+
+func failTile0ButPersist(key string, data []byte) (apply bool, err error) {
+	if strings.HasPrefix(key, "tile/0/") {
+		return true, errors.New("tile 0 upload error")
+	}
+	return true, nil
 }
 
 func (b *MemoryBackend) Fetch(ctx context.Context, key string) ([]byte, error) {
@@ -549,6 +629,14 @@ func (b *MemoryLockBackend) Replace(ctx context.Context, old ctlog.LockedCheckpo
 	}
 	b.m[oldc.logID] = new
 	return &memoryLockCheckpoint{logID: oldc.logID, data: new}, finalErr
+}
+
+func failLockAndNotPersist(old ctlog.LockedCheckpoint, new []byte) (apply bool, err error) {
+	return false, errors.New("lock replace error")
+}
+
+func failLockButPersist(old ctlog.LockedCheckpoint, new []byte) (apply bool, err error) {
+	return true, errors.New("lock replace error")
 }
 
 func fatalIfErr(t testing.TB, err error) {
