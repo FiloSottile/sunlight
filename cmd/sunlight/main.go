@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	_ "embed"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"flag"
 	"io"
@@ -142,6 +143,10 @@ type LogConfig struct {
 	// without "/ct/v1" suffix.
 	HTTPPrefix string
 
+	// SubmissionPrefix is the full URL of the c2sp.org/static-ct-api submission
+	// prefix of the log, without trailing slash.
+	SubmissionPrefix string
+
 	// MonitoringPrefix is the full URL of the c2sp.org/static-ct-api monitoring
 	// prefix of the log, without trailing slash.
 	MonitoringPrefix string
@@ -203,21 +208,29 @@ type LogConfig struct {
 	NotAfterLimit string
 }
 
-type homepageLog struct {
+// logInfo is used on the homepage and for /log.v3.json. The JSON schema is from
+// https://www.gstatic.com/ct/log_list/v3/log_list_schema.json.
+type logInfo struct {
 	// Fields from LogConfig, we don't embed the whole struct to avoid
 	// accidentally exposing sensitive fields.
-	Name             string
-	NotAfterStart    string
-	NotAfterLimit    string
-	HTTPPrefix       string
-	MonitoringPrefix string
-	PoolSize         int
+	Name             string `json:"description"`
+	SubmissionPrefix string `json:"submission_url"`
+	MonitoringPrefix string `json:"monitoring_url"`
+	PoolSize         int    `json:"-"`
+	Interval         struct {
+		NotAfterStart string `json:"start_inclusive"`
+		NotAfterLimit string `json:"end_exclusive"`
+	} `json:"temporal_interval"`
 
 	// ID is the base64 encoded SHA-256 of the public key.
-	ID string
+	ID string `json:"log_id"`
 
-	// PublicKey is the PEM encoded SubjectPublicKeyInfo.
-	PublicKey string
+	// PublicKeyPEM and PublicKeyDER are the SubjectPublicKeyInfo.
+	PublicKeyPEM string `json:"-"`
+	PublicKeyDER []byte `json:"key"`
+
+	// MMD is always 86400 seconds but note that Sunlight logs have zero MMD.
+	MMD int `json:"mmd"`
 }
 
 //go:embed home.html
@@ -324,7 +337,7 @@ func main() {
 
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 
-	var logList []homepageLog
+	var logList []logInfo
 	for _, lc := range c.Logs {
 		if lc.Name == "" || lc.ShortName == "" {
 			fatalError(logger, "missing name or short name for log")
@@ -441,15 +454,31 @@ func main() {
 		}
 		pemKey := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pkix})
 		logID := sha256.Sum256(pkix)
-		logList = append(logList, homepageLog{
+		log := logInfo{
 			Name:             lc.Name,
 			ID:               base64.StdEncoding.EncodeToString(logID[:]),
-			NotAfterStart:    lc.NotAfterStart,
-			NotAfterLimit:    lc.NotAfterLimit,
-			HTTPPrefix:       lc.HTTPPrefix,
-			MonitoringPrefix: lc.MonitoringPrefix,
+			SubmissionPrefix: lc.SubmissionPrefix + "/",
+			MonitoringPrefix: lc.MonitoringPrefix + "/",
 			PoolSize:         lc.PoolSize,
-			PublicKey:        string(pemKey),
+			PublicKeyPEM:     string(pemKey),
+			PublicKeyDER:     pkix,
+			MMD:              86400,
+		}
+		log.Interval.NotAfterStart = lc.NotAfterStart
+		log.Interval.NotAfterLimit = lc.NotAfterLimit
+		logList = append(logList, log)
+
+		j, err := json.MarshalIndent(log, "", "    ")
+		if err != nil {
+			fatalError(logger, "failed to marshal log info", "err", err)
+		}
+		err = b.Upload(ctx, "log.v3.json", j, &ctlog.UploadOptions{ContentType: "application/json"})
+		if err != nil {
+			fatalError(logger, "failed to upload log info", "err", err)
+		}
+		mux.HandleFunc(lc.HTTPPrefix+"/ct/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(j)
 		})
 	}
 

@@ -57,19 +57,20 @@
     <h2>{{ .Name }}</h2>
 
     <p>
-      <code>{{ .MonitoringPrefix }}</code><br>
       Log ID: <code>{{ .ID }}</code><br>
-      NotAfter start: <strong>{{ .NotAfterStart }}</strong><br>
-      NotAfter limit: <strong>{{ .NotAfterLimit }}</strong><br>
-      Checkpoint: <a href="{{ .MonitoringPrefix }}/checkpoint">checkpoint</a><br>
-      Roots: <a href="{{ .HTTPPrefix }}/ct/v1/get-roots">get-roots</a><br>
+      Monitoring prefix: <code>{{ .MonitoringPrefix }}</code><br>
+      Submission prefix: <code>{{ .SubmissionPrefix }}</code><br>
+      Interval: {{ .Interval.NotAfterStart }} – {{ .Interval.NotAfterLimit }}<br>
+      Links: <a href="{{ .MonitoringPrefix }}checkpoint">checkpoint</a>
+        <a href="{{ .SubmissionPrefix }}ct/v1/get-roots">get-roots</a>
+        <a href="{{ .SubmissionPrefix }}ct/log.v3.json">json</a><br>
       Ratelimit: {{ .PoolSize }} req/s
     
-    <code><pre>{{ .PublicKey }}</pre></code>
+    <code><pre>{{ .PublicKeyPEM }}</pre></code>
     
     <h3>Submit a certificate chain (PEM or JSON)</h3>
       
-    <input type="file" class="chain" data-prefix="{{ .HTTPPrefix }}">
+    <input type="file" class="chain" data-prefix="{{ .SubmissionPrefix }}">
     <code><pre class="response"></pre></code>
 
     {{ end }}
@@ -103,7 +104,7 @@
                         contents = JSON.stringify({ "chain": chain });
                     }
 
-                    const url = event.target.dataset.prefix + '/ct/v1/add-chain';
+                    const url = event.target.dataset.prefix + 'ct/v1/add-chain';
                     const response = await fetch(url, {
                         method: 'POST',
                         headers: {

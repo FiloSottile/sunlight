@@ -12,6 +12,7 @@ logs:
     shortname: rome2024h2
     inception: 2024-08-07
     httpprefix: /2024h2
+    submissionprefix: https://rome.ct.filippo.io/2024h2
     monitoringprefix: https://rome2024h2.fly.storage.tigris.dev
     roots: /etc/sunlight/roots.pem
     seed: /etc/sunlight/rome2024h2.key
@@ -28,6 +29,7 @@ logs:
     shortname: rome2025h1
     inception: 2024-08-07
     httpprefix: /2025h1
+    submissionprefix: https://rome.ct.filippo.io/2025h1
     monitoringprefix: https://rome2025h1.fly.storage.tigris.dev
     roots: /etc/sunlight/roots.pem
     seed: /etc/sunlight/rome2025h1.key
@@ -44,6 +46,7 @@ logs:
     shortname: rome2025h2
     inception: 2024-08-07
     httpprefix: /2025h2
+    submissionprefix: https://rome.ct.filippo.io/2025h2
     monitoringprefix: https://rome2025h2.fly.storage.tigris.dev
     roots: /etc/sunlight/roots.pem
     seed: /etc/sunlight/rome2025h2.key
