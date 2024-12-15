@@ -57,9 +57,11 @@
     <h2>{{ .Name }}</h2>
 
     <p>
+      <code>{{ .MonitoringPrefix }}</code><br>
       Log ID: <code>{{ .ID }}</code><br>
       NotAfter start: <strong>{{ .NotAfterStart }}</strong><br>
       NotAfter limit: <strong>{{ .NotAfterLimit }}</strong><br>
+      Checkpoint: <a href="{{ .MonitoringPrefix }}/checkpoint">checkpoint</a><br>
       Roots: <a href="{{ .HTTPPrefix }}/ct/v1/get-roots">get-roots</a><br>
       Ratelimit: {{ .PoolSize }} req/s
     

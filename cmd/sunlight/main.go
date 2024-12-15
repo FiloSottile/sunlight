@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -141,6 +142,10 @@ type LogConfig struct {
 	// without "/ct/v1" suffix.
 	HTTPPrefix string
 
+	// MonitoringPrefix is the full URL of the c2sp.org/static-ct-api monitoring
+	// prefix of the log, without trailing slash.
+	MonitoringPrefix string
+
 	// Roots is the path to the accepted roots as a PEM file.
 	Roots string
 
@@ -201,11 +206,12 @@ type LogConfig struct {
 type homepageLog struct {
 	// Fields from LogConfig, we don't embed the whole struct to avoid
 	// accidentally exposing sensitive fields.
-	Name          string
-	NotAfterStart string
-	NotAfterLimit string
-	HTTPPrefix    string
-	PoolSize      int
+	Name             string
+	NotAfterStart    string
+	NotAfterLimit    string
+	HTTPPrefix       string
+	MonitoringPrefix string
+	PoolSize         int
 
 	// ID is the base64 encoded SHA-256 of the public key.
 	ID string
@@ -379,6 +385,14 @@ func main() {
 			}
 		}
 
+		// Compare the checkpoint from the Backend with the one accessible over
+		// the MonitoringPrefix, to catch misconfigurations. We ignore failures
+		// to fetch from the backend, as the log might not exist yet.
+		if exp, err := b.Fetch(ctx, "checkpoint"); err == nil &&
+			!bytes.Equal(fetchCheckpoint(ctx, logger, lc.MonitoringPrefix), exp) {
+			fatalError(logger, "checkpoints from Backend and MonitoringPrefix don't match")
+		}
+
 		notAfterStart, err := time.Parse(time.RFC3339, lc.NotAfterStart)
 		if err != nil {
 			fatalError(logger, "failed to parse NotAfterStart", "err", err)
@@ -433,13 +447,14 @@ func main() {
 		pemKey := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pkix})
 		logID := sha256.Sum256(pkix)
 		logList = append(logList, homepageLog{
-			Name:          lc.Name,
-			ID:            base64.StdEncoding.EncodeToString(logID[:]),
-			NotAfterStart: lc.NotAfterStart,
-			NotAfterLimit: lc.NotAfterLimit,
-			HTTPPrefix:    lc.HTTPPrefix,
-			PoolSize:      lc.PoolSize,
-			PublicKey:     string(pemKey),
+			Name:             lc.Name,
+			ID:               base64.StdEncoding.EncodeToString(logID[:]),
+			NotAfterStart:    lc.NotAfterStart,
+			NotAfterLimit:    lc.NotAfterLimit,
+			HTTPPrefix:       lc.HTTPPrefix,
+			MonitoringPrefix: lc.MonitoringPrefix,
+			PoolSize:         lc.PoolSize,
+			PublicKey:        string(pemKey),
 		})
 	}
 
@@ -521,6 +536,28 @@ func main() {
 	}
 
 	os.Exit(1)
+}
+
+func fetchCheckpoint(ctx context.Context, logger *slog.Logger, prefix string) []byte {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", prefix+"/checkpoint", nil)
+	if err != nil {
+		fatalError(logger, "failed to create request", "err", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fatalError(logger, "failed to fetch checkpoint from MonitoringPrefix", "err", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fatalError(logger, "failed to fetch checkpoint from MonitoringPrefix", "status", resp.Status)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fatalError(logger, "failed to read checkpoint body", "err", err)
+	}
+	return b
 }
 
 func fatalError(logger *slog.Logger, msg string, args ...any) {
