@@ -392,6 +392,8 @@ var optsStaging = &UploadOptions{Compress: true}
 var optsIssuer = &UploadOptions{ContentType: "application/pkix-cert", Immutable: true}
 var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
+var ErrLogNotFound = errors.New("log not found")
+
 // A LockBackend is a database that supports compare-and-swap operations.
 //
 // It is shared across multiple Log instances, and is used only to store the
@@ -401,6 +403,8 @@ var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 type LockBackend interface {
 	// Fetch obtains the current checkpoint for a given log, as well as the data
 	// necessary to perform a compare-and-swap operation.
+	//
+	// It must return ErrLogNotFound if the log doesn't exist.
 	Fetch(ctx context.Context, logID [sha256.Size]byte) (LockedCheckpoint, error)
 
 	// Replace uploads a new checkpoint, atomically checking that the old

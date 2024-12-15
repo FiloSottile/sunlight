@@ -3,7 +3,6 @@ package ctlog
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -91,7 +90,7 @@ func (b *DynamoDBBackend) Fetch(ctx context.Context, logID [sha256.Size]byte) (L
 		return nil, err
 	}
 	if resp.Item == nil {
-		return nil, errors.New("checkpoint not found")
+		return nil, ErrLogNotFound
 	}
 	return &dynamoDBCheckpoint{logID: logID,
 		body: resp.Item["checkpoint"].(*types.AttributeValueMemberB).Value}, nil

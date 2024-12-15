@@ -26,6 +26,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"io"
 	"log/slog"
@@ -434,7 +435,10 @@ func main() {
 		}
 
 		l, err := ctlog.LoadLog(ctx, cc)
-		if err != nil {
+		if errors.Is(err, ctlog.ErrLogNotFound) {
+			fatalError(logger, "log not found, but today is not the Inception date",
+				"today", time.Now().Format(time.DateOnly), "inception", lc.Inception)
+		} else if err != nil {
 			fatalError(logger, "failed to load log", "err", err)
 		}
 		defer l.CloseCache()
