@@ -15,6 +15,7 @@ logs:
     monitoringprefix: https://rome2024h2.fly.storage.tigris.dev
     roots: /etc/sunlight/roots.pem
     seed: /etc/sunlight/rome2024h2.key
+    publickey: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8LC3W9CexoHBs5M2ckscoufU6kJNEETzqpkCCwCH2OkILhmSlFh/EL6cg8gTS57ILa+KEfVVd9c0y4WWpLRRpg==
     cache: /var/db/sunlight/rome2024h2.db
     poolsize: 750
     s3region: auto
@@ -30,6 +31,7 @@ logs:
     monitoringprefix: https://rome2025h1.fly.storage.tigris.dev
     roots: /etc/sunlight/roots.pem
     seed: /etc/sunlight/rome2025h1.key
+    publickey: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE73Q+k6l4jEssAXpg5xfyxQMYzt/4rwPxY1PnOnPQgDYAmwXQSqSFg0dYg6cPLo5FwgJBwsxkIhDX9m5/e8pRXw==
     cache: /var/db/sunlight/rome2025h1.db
     poolsize: 750
     s3region: auto
@@ -45,6 +47,7 @@ logs:
     monitoringprefix: https://rome2025h2.fly.storage.tigris.dev
     roots: /etc/sunlight/roots.pem
     seed: /etc/sunlight/rome2025h2.key
+    publickey: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEMMdtuOCFEjeegwdxRzHKem927Lm61wnKVgiyHDvAnZdl2qGzdivV0ZK993x6O8eYFwK0ZAGjFpHXLKj9kUzU2Q==
     cache: /var/db/sunlight/rome2025h2.db
     poolsize: 750
     s3region: auto

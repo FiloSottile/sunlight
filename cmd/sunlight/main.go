@@ -166,7 +166,7 @@ type LogConfig struct {
 	//
 	//   $ sunlight-keygen log.example/logA seed.bin
 	//
-	// If provided, the loaded private Key is required to match it. Optional.
+	// The loaded private Key is required to match it.
 	PublicKey string
 
 	// Cache is the path to the SQLite deduplication cache file.
@@ -363,26 +363,21 @@ func main() {
 		}
 		wk := ed25519.NewKeyFromSeed(ed25519Secret)
 
-		if lc.PublicKey != "" {
-			cfgPubKey, err := base64.StdEncoding.DecodeString(lc.PublicKey)
+		cfgPubKey, err := base64.StdEncoding.DecodeString(lc.PublicKey)
+		if err != nil {
+			fatalError(logger, "failed to parse public key base64", "err", err)
+		}
+		parsedPubKey, err := x509.ParsePKIXPublicKey(cfgPubKey)
+		if err != nil {
+			fatalError(logger, "failed to parse public key", "err", err)
+		}
+		if !k.PublicKey.Equal(parsedPubKey) {
+			spki, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
 			if err != nil {
-				fatalError(logger, "failed to parse public key base64", "err", err)
+				fatalError(logger, "failed to marshal public key from private key for display", "err", err)
 			}
-
-			parsedPubKey, err := x509.ParsePKIXPublicKey(cfgPubKey)
-			if err != nil {
-				fatalError(logger, "failed to parse public key", "err", err)
-			}
-
-			if !k.PublicKey.Equal(parsedPubKey) {
-				spki, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
-				if err != nil {
-					fatalError(logger, "failed to marshal public key from private key for display", "err", err)
-				}
-
-				publicFromPrivate := base64.StdEncoding.EncodeToString(spki)
-				fatalError(logger, "configured private and public keys do not match", "configured", lc.PublicKey, "publicFromPrivate", publicFromPrivate)
-			}
+			publicFromPrivate := base64.StdEncoding.EncodeToString(spki)
+			fatalError(logger, "configured private and public keys do not match", "configured", lc.PublicKey, "publicFromPrivate", publicFromPrivate)
 		}
 
 		// Compare the checkpoint from the Backend with the one accessible over
