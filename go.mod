@@ -1,12 +1,9 @@
 module filippo.io/sunlight
 
-go 1.22.5
+go 1.24rc2
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
-	filippo.io/bigmod v0.0.3
-	filippo.io/keygen v0.0.0-20240718133620-7f162efbbd87
-	filippo.io/nistec v0.0.3
 	github.com/aws/aws-sdk-go-v2 v1.30.3
 	github.com/aws/aws-sdk-go-v2/config v1.27.27
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.34.4
@@ -21,7 +18,12 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+// Do not upgrade filippo.io/keygen without checking that the ECDSA algorithm
+// has not changed.
+require filippo.io/keygen v0.0.0-20240718133620-7f162efbbd87
+
 require (
+	filippo.io/bigmod v0.0.3 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.3 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.27 // indirect

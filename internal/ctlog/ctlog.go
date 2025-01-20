@@ -26,7 +26,6 @@ import (
 
 	"crawshaw.io/sqlite"
 	"filippo.io/sunlight"
-	"filippo.io/sunlight/internal/rfc6979"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1032,7 +1031,7 @@ func (s *injectedSigner) Verifier() note.Verifier         { return s.v }
 // we produce is identical.
 func digitallySign(k *ecdsa.PrivateKey, msg []byte) ([]byte, error) {
 	h := sha256.Sum256(msg)
-	sig, err := rfc6979.Sign(k, h[:], crypto.SHA256)
+	sig, err := k.Sign(nil, h[:], crypto.SHA256)
 	if err != nil {
 		return nil, err
 	}
