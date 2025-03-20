@@ -1,6 +1,6 @@
 module filippo.io/sunlight
 
-go 1.24rc2
+go 1.24.1
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
