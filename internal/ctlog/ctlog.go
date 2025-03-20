@@ -682,12 +682,15 @@ func (l *Log) sequence(ctx context.Context) error {
 
 func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	oldSize := l.tree.N
+	start := time.Now()
+	seqLog := l.c.Log.With("old_tree_size", oldSize,
+		"entries", len(p.pendingLeaves), "start", start)
 	defer prometheus.NewTimer(l.m.SeqDuration).ObserveDuration()
 	defer func() {
 		if err != nil {
 			p.err = err
-			l.c.Log.ErrorContext(ctx, "pool sequencing failed", "old_tree_size", oldSize,
-				"entries", len(p.pendingLeaves), "err", err)
+			seqLog.ErrorContext(ctx, "pool sequencing failed",
+				"elapsed", time.Since(start), "err", err)
 			l.m.SeqCount.With(prometheus.Labels{"error": errorCategory(err)}).Inc()
 
 			// Non-fatal errors are delivered to the requests waiting on this
@@ -703,7 +706,6 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		close(p.done)
 	}()
 
-	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, sequenceTimeout)
 	defer cancel()
 
@@ -806,7 +808,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	}
 	stagingPath := stagingPath(tree.Tree)
 	l.c.Log.DebugContext(ctx, "uploading staged tiles", "old_tree_size", oldSize,
-		"tree_size", n, "path", stagingPath, "size", len(stagedUploads))
+		"tree_size", tree.N, "path", stagingPath, "size", len(stagedUploads))
 	if err := l.c.Backend.Upload(ctx, stagingPath, stagedUploads, optsStaging); err != nil {
 		return fmtErrorf("couldn't upload staged tiles: %w", err)
 	}
@@ -855,15 +857,14 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	// producing more cache false negatives and duplicates.
 	if err := l.cachePut(sequencedLeaves); err != nil {
 		l.c.Log.ErrorContext(ctx, "cache put failed",
-			"tree_size", tree.N, "entries", n-oldSize, "err", err)
+			"tree_size", tree.N, "entries", len(p.pendingLeaves), "err", err)
 		l.m.CachePutErrors.Inc()
 	}
 
 	for _, t := range edgeTiles {
 		l.c.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
-	l.c.Log.Info("sequenced pool",
-		"tree_size", tree.N, "entries", n-oldSize,
+	seqLog.Info("sequenced pool", "tree_size", tree.N,
 		"tiles", len(tileUploads), "timestamp", timestamp,
 		"elapsed", time.Since(start))
 	l.m.SeqTiles.Add(float64(len(tileUploads)))
