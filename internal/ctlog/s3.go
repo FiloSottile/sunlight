@@ -49,6 +49,13 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 		},
 		[]string{"method", "code"},
 	)
+	errors := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "s3_errors_total",
+			Help: "S3 attempt error codes.",
+		},
+		[]string{"retryable", "errorcode"},
+	)
 	uploadSize := prometheus.NewSummary(
 		prometheus.SummaryOpts{
 			Name:       "s3_upload_size_bytes",
@@ -96,6 +103,10 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 			}
 			o.HTTPClient = &http.Client{Transport: transport}
 			o.Retryer = retry.AddWithMaxBackoffDelay(retry.NewStandard(), 5*time.Millisecond)
+			// The AttemptResults, arguably the right way to do this, are
+			// exposed as part of middleware.Metadata, which is discarded by
+			// PutObject on error.
+			o.Retryer = &trackingRetryerV2{RetryerV2: o.Retryer.(aws.RetryerV2), errors: errors}
 		}),
 		bucket:    bucket,
 		keyPrefix: keyPrefix,
@@ -107,6 +118,23 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 		hedgeWins:     hedgeWins,
 		log:           l,
 	}, nil
+}
+
+type trackingRetryerV2 struct {
+	aws.RetryerV2
+	errors *prometheus.CounterVec
+}
+
+func (r *trackingRetryerV2) IsErrorRetryable(err error) bool {
+	code := "unknown"
+	var e interface{ ErrorCode() string }
+	if errors.As(err, &e) {
+		code = e.ErrorCode()
+	}
+
+	v := r.RetryerV2.IsErrorRetryable(err)
+	r.errors.WithLabelValues(fmt.Sprint(v), code).Inc()
+	return v
 }
 
 var _ Backend = &S3Backend{}
