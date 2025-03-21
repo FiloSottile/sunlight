@@ -657,7 +657,7 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 	}
 }
 
-const sequenceTimeout = 5 * time.Second
+const sequenceTimeout = 15 * time.Second
 
 var errFatal = errors.New("fatal sequencing error")
 
