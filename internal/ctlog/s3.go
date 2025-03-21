@@ -103,7 +103,7 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 				o.BaseEndpoint = aws.String(endpoint)
 			}
 			o.HTTPClient = &http.Client{Transport: transport}
-			o.Retryer = retry.AddWithMaxBackoffDelay(retry.NewStandard(), 5*time.Millisecond)
+			o.Retryer = retry.AddWithMaxBackoffDelay(retry.NewStandard(), 250*time.Millisecond)
 			// The AttemptResults, arguably the right way to do this, are
 			// exposed as part of middleware.Metadata, which is discarded by
 			// PutObject on error.
