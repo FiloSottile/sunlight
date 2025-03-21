@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go/logging"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -107,6 +108,8 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 			// exposed as part of middleware.Metadata, which is discarded by
 			// PutObject on error.
 			o.Retryer = &trackingRetryerV2{RetryerV2: o.Retryer.(aws.RetryerV2), errors: errors}
+			o.Logger = awsLogger{log: l}
+			o.ClientLogMode = aws.LogRequest | aws.LogResponse | aws.LogRetries
 		}),
 		bucket:    bucket,
 		keyPrefix: keyPrefix,
@@ -135,6 +138,16 @@ func (r *trackingRetryerV2) IsErrorRetryable(err error) bool {
 	v := r.RetryerV2.IsErrorRetryable(err)
 	r.errors.WithLabelValues(fmt.Sprint(v), code).Inc()
 	return v
+}
+
+type awsLogger struct {
+	log *slog.Logger
+}
+
+func (l awsLogger) Logf(classification logging.Classification, format string, v ...interface{}) {
+	if l.log.Enabled(context.Background(), slog.LevelDebug) {
+		l.log.Debug("AWS SDK log entry", "classification", classification, "text", fmt.Sprintf(format, v...))
+	}
 }
 
 var _ Backend = &S3Backend{}
