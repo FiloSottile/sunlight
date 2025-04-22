@@ -508,9 +508,6 @@ func main() {
 				if logHandler.Enabled(context.Background(), slog.LevelDebug) {
 					return true
 				}
-				if !strings.HasPrefix(r.Message, "http: TLS handshake error") {
-					return true
-				}
 				return strings.Contains(r.Message, "acme/autocert") &&
 					!strings.HasSuffix(r.Message, "missing server name") &&
 					!strings.HasSuffix(r.Message, "not configured in HostWhitelist") &&
