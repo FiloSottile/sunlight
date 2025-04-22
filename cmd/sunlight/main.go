@@ -480,7 +480,7 @@ func main() {
 		if err != nil {
 			fatalError(logger, "failed to upload log info", "err", err)
 		}
-		mux.HandleFunc(lc.HTTPPrefix+"/ct/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(lc.HTTPPrefix+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(j)
 		})
