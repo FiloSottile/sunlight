@@ -200,6 +200,12 @@ type LogConfig struct {
 	// going to be treated like a directory in many tools using S3.
 	S3KeyPrefix string
 
+	// LocalDirectory is the path to a local directory where the log will store
+	// its data. It must be dedicated to this specific log instance.
+	//
+	// Only one of S3Bucket or LocalDirectory can be set at the same time.
+	LocalDirectory string
+
 	// NotAfterStart is the start of the validity range for certificates
 	// accepted by this log instance, as and RFC 3339 date.
 	NotAfterStart string
@@ -347,9 +353,22 @@ func main() {
 			slog.String("log", lc.ShortName),
 		}))
 
-		b, err := ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, lc.S3Endpoint, lc.S3KeyPrefix, logger)
-		if err != nil {
-			fatalError(logger, "failed to create backend", "err", err)
+		var b ctlog.Backend
+		switch {
+		case lc.S3Bucket != "" && lc.LocalDirectory != "":
+			fatalError(logger, "only one of S3Bucket or LocalDirectory can be set at the same time")
+		case lc.S3Bucket != "":
+			b, err = ctlog.NewS3Backend(ctx, lc.S3Region, lc.S3Bucket, lc.S3Endpoint, lc.S3KeyPrefix, logger)
+			if err != nil {
+				fatalError(logger, "failed to create backend", "err", err)
+			}
+		case lc.LocalDirectory != "":
+			b, err = ctlog.NewLocalBackend(ctx, lc.LocalDirectory, logger)
+			if err != nil {
+				fatalError(logger, "failed to create backend", "err", err)
+			}
+		default:
+			fatalError(logger, "neither S3Bucket nor LocalDirectory are set, one must be used")
 		}
 
 		r := x509util.NewPEMCertPool()

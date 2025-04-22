@@ -53,9 +53,10 @@ operating a Sunlight instance:
     [#11](https://github.com/FiloSottile/sunlight/issues/11)) or overwriting
     protection (automatically enabled client-side on Tigris).
 
-    Eventual consistency is acceptable for this backend.
+    Eventual consistency is acceptable for this backend, but it must provide
+    strong durability guarantees.
 
-    Currently, S3 and S3-compatible APIs are supported.
+    Currently, S3-compatible APIs and local POSIX filesystems are supported.
 
   * A per-log deduplication cache, to return existing SCTs for previously
     submitted (pre-)certificates.
