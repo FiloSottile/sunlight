@@ -352,16 +352,18 @@ func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error
 
 var timeNowUnixMilli = func() int64 { return time.Now().UnixMilli() }
 
-// Backend is a strongly consistent object storage.
+// Backend is an object storage. It is dedicated to a single log instance.
 //
-// It is dedicated to a single log instance.
+// It can be eventually consistent, but writes must be durable once they return.
+//
+// The Upload and Fetch methods must be usable concurrently.
 type Backend interface {
-	// Upload is expected to retry transient errors, and only return an error
-	// for unrecoverable errors. When Upload returns, the object must be fully
-	// persisted. Upload can be called concurrently. opts may be nil.
+	// Upload writes the value for a key. Upload is expected to retry transient
+	// errors, and only return an error for unrecoverable errors. When Upload
+	// returns, the object must be fully persisted. opts may be nil.
 	Upload(ctx context.Context, key string, data []byte, opts *UploadOptions) error
 
-	// Fetch can be called concurrently. It's expected to decompress any data
+	// Fetch returns the value for a key. It's expected to decompress any data
 	// uploaded with UploadOptions.Compress true.
 	Fetch(ctx context.Context, key string) ([]byte, error)
 
@@ -395,6 +397,11 @@ var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 var ErrLogNotFound = errors.New("log not found")
 
 // A LockBackend is a database that supports compare-and-swap operations.
+//
+// The behavior of calls with the same logID must be serializable and have
+// read-after-write consistency, even across processes and restarts, and write
+// operations must be durable once they return. Calls with different logID
+// values don't need to be consistent.
 //
 // It is shared across multiple Log instances, and is used only to store the
 // latest checkpoint before making it publicly available.

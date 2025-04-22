@@ -53,6 +53,8 @@ operating a Sunlight instance:
     [#11](https://github.com/FiloSottile/sunlight/issues/11)) or overwriting
     protection (automatically enabled client-side on Tigris).
 
+    Eventual consistency is acceptable for this backend.
+
     Currently, S3 and S3-compatible APIs are supported.
 
   * A per-log deduplication cache, to return existing SCTs for previously
