@@ -3,6 +3,7 @@ package ctlog
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -207,7 +208,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		// Apply the staged tiles before continuing.
 		config.Log.WarnContext(ctx, "checkpoint in object storage is older than lock checkpoint",
 			"old_size", c1.N, "size", c.N)
-		stagedUploads, err := config.Backend.Fetch(ctx, stagingPath(c.Tree))
+		stagedUploads, err := fetchAndDecompress(ctx, config.Backend, stagingPath(c.Tree))
 		if err != nil {
 			return nil, fmt.Errorf("couldn't fetch staged uploads: %w", err)
 		}
@@ -244,7 +245,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		// Fetch the right-most data tile.
 		dataTile := edgeTiles[0]
 		dataTile.L = -1
-		dataTile.B, err = config.Backend.Fetch(ctx, dataTile.Path())
+		dataTile.B, err = fetchAndDecompress(ctx, config.Backend, dataTile.Path())
 		if err != nil {
 			return nil, fmt.Errorf("couldn't fetch right edge data tile: %w", err)
 		}
@@ -363,8 +364,7 @@ type Backend interface {
 	// returns, the object must be fully persisted. opts may be nil.
 	Upload(ctx context.Context, key string, data []byte, opts *UploadOptions) error
 
-	// Fetch returns the value for a key. It's expected to decompress any data
-	// uploaded with UploadOptions.Compress true.
+	// Fetch returns the value for a key.
 	Fetch(ctx context.Context, key string) ([]byte, error)
 
 	// Metrics returns the metrics to register for this log. The metrics should
@@ -379,9 +379,8 @@ type UploadOptions struct {
 	// "application/octet-stream".
 	ContentType string
 
-	// Compress is true if the data is compressible and should be compressed
-	// before uploading if possible.
-	Compress bool
+	// Compressed is true if the data is compressed with gzip.
+	Compressed bool
 
 	// Immutable is true if the data is never changed after being uploaded.
 	// Note that the same value may still be re-uploaded, and must succeed.
@@ -389,8 +388,8 @@ type UploadOptions struct {
 }
 
 var optsHashTile = &UploadOptions{Immutable: true}
-var optsDataTile = &UploadOptions{Compress: true, Immutable: true}
-var optsStaging = &UploadOptions{Compress: true, Immutable: true}
+var optsDataTile = &UploadOptions{Compressed: true, Immutable: true}
+var optsStaging = &UploadOptions{Compressed: true, Immutable: true}
 var optsIssuer = &UploadOptions{ContentType: "application/pkix-cert", Immutable: true}
 var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
@@ -763,11 +762,18 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			tile := tlog.TileForIndex(sunlight.TileHeight, tlog.StoredHashIndex(0, n-1))
 			tile.L = -1
 			edgeTiles[-1] = tileWithBytes{tile, dataTile}
-			l.c.Log.DebugContext(ctx, "staging full data tile",
-				"tree_size", n, "tile", tile, "size", len(dataTile))
+
+			gzipData, err := compress(dataTile)
+			if err != nil {
+				return fmtErrorf("couldn't compress data tile: %w", err)
+			}
+			l.c.Log.DebugContext(ctx, "staging full data tile", "tree_size", n,
+				"tile", tile, "size", len(dataTile), "gzip_size", len(gzipData))
 			l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
+			l.m.SeqDataTileGzipSize.Observe(float64(len(gzipData)))
+
 			tileUploads = append(tileUploads, &uploadAction{
-				sunlight.TilePath(tile), dataTile, optsDataTile})
+				sunlight.TilePath(tile), gzipData, optsDataTile})
 			dataTile = nil
 		}
 	}
@@ -777,11 +783,16 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		tile := tlog.TileForIndex(sunlight.TileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
 		edgeTiles[-1] = tileWithBytes{tile, dataTile}
-		l.c.Log.DebugContext(ctx, "staging partial data tile",
-			"tree_size", n, "tile", tile, "size", len(dataTile))
+		gzipData, err := compress(dataTile)
+		if err != nil {
+			return fmtErrorf("couldn't compress data tile: %w", err)
+		}
+		l.c.Log.DebugContext(ctx, "staging partial data tile", "tree_size", n,
+			"tile", tile, "size", len(dataTile), "gzip_size", len(gzipData))
 		l.m.SeqDataTileSize.Observe(float64(len(dataTile)))
+		l.m.SeqDataTileGzipSize.Observe(float64(len(gzipData)))
 		tileUploads = append(tileUploads, &uploadAction{
-			sunlight.TilePath(tile), dataTile, optsDataTile})
+			sunlight.TilePath(tile), gzipData, optsDataTile})
 	}
 
 	// Produce and stage new tree tiles.
@@ -823,11 +834,15 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	// end up re-uploading the tiles from the previous one, which is harmless.
 	if len(tileUploads) > 0 {
 		stagingPath := stagingPath(tree.Tree)
+		gzipData, err := compress(stagedUploads)
+		if err != nil {
+			return fmtErrorf("couldn't compress staged uploads: %w", err)
+		}
 		l.c.Log.DebugContext(ctx, "uploading staged tiles", "old_tree_size", oldSize,
-			"tree_size", tree.N, "path", stagingPath, "size", len(stagedUploads))
+			"tree_size", tree.N, "path", stagingPath, "size", len(stagedUploads), "gzip_size", len(gzipData))
 		ctxStrict, cancel := context.WithTimeout(ctx, strictTimeout)
 		defer cancel()
-		if err := l.c.Backend.Upload(ctxStrict, stagingPath, stagedUploads, optsStaging); err != nil {
+		if err := l.c.Backend.Upload(ctxStrict, stagingPath, gzipData, optsStaging); err != nil {
 			return fmtErrorf("couldn't upload staged tiles: %w", err)
 		}
 	}
@@ -1125,4 +1140,31 @@ func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
 		}
 		return list, nil
 	}
+}
+
+func compress(data []byte) ([]byte, error) {
+	b := &bytes.Buffer{}
+	w := gzip.NewWriter(b)
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
+
+const maxCompressRatio = 100
+
+func fetchAndDecompress(ctx context.Context, backend Backend, key string) ([]byte, error) {
+	data, err := backend.Fetch(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	maxSize := int64(len(data)) * maxCompressRatio
+	return io.ReadAll(io.LimitReader(r, maxSize))
 }

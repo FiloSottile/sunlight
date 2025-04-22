@@ -2,7 +2,6 @@ package ctlog
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -26,20 +25,12 @@ type S3Backend struct {
 	keyPrefix     string
 	metrics       []prometheus.Collector
 	uploadSize    prometheus.Summary
-	compressRatio prometheus.Summary
 	hedgeRequests prometheus.Counter
 	hedgeWins     prometheus.Counter
 	log           *slog.Logger
 }
 
 func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix string, l *slog.Logger) (*S3Backend, error) {
-	counter := prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "s3_requests_total",
-			Help: "S3 HTTP requests performed, by method and response code.",
-		},
-		[]string{"method", "code"},
-	)
 	duration := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Name:       "s3_request_duration_seconds",
@@ -60,16 +51,8 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 	uploadSize := prometheus.NewSummary(
 		prometheus.SummaryOpts{
 			Name:       "s3_upload_size_bytes",
-			Help:       "S3 (compressed) body size in bytes for object puts.",
+			Help:       "S3 body size in bytes for object puts.",
 			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
-			MaxAge:     1 * time.Minute,
-			AgeBuckets: 6,
-		},
-	)
-	compressRatio := prometheus.NewSummary(
-		prometheus.SummaryOpts{
-			Name:       "s3_compress_ratio",
-			Help:       "Ratio of compressed to uncompressed body size for compressible object puts.",
 			MaxAge:     1 * time.Minute,
 			AgeBuckets: 6,
 		},
@@ -88,7 +71,6 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 	)
 
 	transport := http.RoundTripper(http.DefaultTransport.(*http.Transport).Clone())
-	transport = promhttp.InstrumentRoundTripperCounter(counter, transport)
 	transport = promhttp.InstrumentRoundTripperDuration(duration, transport)
 
 	cfg, err := config.LoadDefaultConfig(ctx)
@@ -111,12 +93,10 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 			o.Logger = awsLogger{log: l}
 			o.ClientLogMode = aws.LogRequest | aws.LogResponse | aws.LogRetries
 		}),
-		bucket:    bucket,
-		keyPrefix: keyPrefix,
-		metrics: []prometheus.Collector{counter, duration,
-			uploadSize, compressRatio, hedgeRequests, hedgeWins},
+		bucket:        bucket,
+		keyPrefix:     keyPrefix,
+		metrics:       []prometheus.Collector{duration, uploadSize, hedgeRequests, hedgeWins},
 		uploadSize:    uploadSize,
-		compressRatio: compressRatio,
 		hedgeRequests: hedgeRequests,
 		hedgeWins:     hedgeWins,
 		log:           l,
@@ -159,17 +139,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 		contentType = aws.String(opts.ContentType)
 	}
 	var contentEncoding *string
-	if opts != nil && opts.Compress {
-		b := &bytes.Buffer{}
-		w := gzip.NewWriter(b)
-		if _, err := w.Write(data); err != nil {
-			return fmtErrorf("failed to compress %q: %w", key, err)
-		}
-		if err := w.Close(); err != nil {
-			return fmtErrorf("failed to compress %q: %w", key, err)
-		}
-		s.compressRatio.Observe(float64(b.Len()) / float64(len(data)))
-		data = b.Bytes()
+	if opts != nil && opts.Compressed {
 		contentEncoding = aws.String("gzip")
 	}
 	var cacheControl *string
@@ -210,7 +180,7 @@ func (s *S3Backend) Upload(ctx context.Context, key string, data []byte, opts *U
 		cancel(errors.New("competing request succeeded"))
 	}
 	s.log.DebugContext(ctx, "S3 PUT", "key", key, "size", len(data),
-		"compress", contentEncoding != nil, "type", *contentType,
+		"compressed", contentEncoding != nil, "type", *contentType,
 		"immutable", cacheControl != nil,
 		"elapsed", time.Since(start), "err", err)
 	s.uploadSize.Observe(float64(len(data)))
@@ -232,14 +202,7 @@ func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
 	defer out.Body.Close()
 	s.log.DebugContext(ctx, "S3 GET", "key", key,
 		"size", out.ContentLength, "encoding", out.ContentEncoding)
-	body := out.Body
-	if out.ContentEncoding != nil && *out.ContentEncoding == "gzip" {
-		body, err = gzip.NewReader(out.Body)
-		if err != nil {
-			return nil, fmtErrorf("failed to decompress %q from S3: %w", key, err)
-		}
-	}
-	data, err := io.ReadAll(body)
+	data, err := io.ReadAll(out.Body)
 	if err != nil {
 		return nil, fmtErrorf("failed to read %q from S3: %w", key, err)
 	}

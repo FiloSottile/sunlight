@@ -15,12 +15,13 @@ type metrics struct {
 	ReqInFlight *prometheus.GaugeVec
 	ReqDuration *prometheus.SummaryVec
 
-	SeqCount        *prometheus.CounterVec
-	SeqPoolSize     prometheus.Summary
-	SeqDuration     prometheus.Summary
-	SeqLeafSize     prometheus.Summary
-	SeqTiles        prometheus.Counter
-	SeqDataTileSize prometheus.Summary
+	SeqCount            *prometheus.CounterVec
+	SeqPoolSize         prometheus.Summary
+	SeqDuration         prometheus.Summary
+	SeqLeafSize         prometheus.Summary
+	SeqTiles            prometheus.Counter
+	SeqDataTileSize     prometheus.Summary
+	SeqDataTileGzipSize prometheus.Summary
 
 	TreeTime prometheus.Gauge
 	TreeSize prometheus.Gauge
@@ -110,6 +111,15 @@ func initMetrics() metrics {
 			prometheus.SummaryOpts{
 				Name:       "sequencing_data_tiles_bytes",
 				Help:       "Uncompressed size of uploaded data tiles, including partials.",
+				Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+				MaxAge:     1 * time.Minute,
+				AgeBuckets: 6,
+			},
+		),
+		SeqDataTileGzipSize: prometheus.NewSummary(
+			prometheus.SummaryOpts{
+				Name:       "sequencing_data_tiles_gzip_bytes",
+				Help:       "Compressed size of uploaded data tiles, including partials.",
 				Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 				MaxAge:     1 * time.Minute,
 				AgeBuckets: 6,

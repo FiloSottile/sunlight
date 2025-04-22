@@ -2,6 +2,7 @@ package ctlog_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -214,6 +215,10 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 			tile = lastTile
 		}
 		b, err := tl.Config.Backend.Fetch(context.Background(), sunlight.TilePath(tile))
+		fatalIfErr(t, err)
+		r, err := gzip.NewReader(bytes.NewReader(b))
+		fatalIfErr(t, err)
+		b, err = io.ReadAll(r)
 		fatalIfErr(t, err)
 		for i := 0; i < tile.W; i++ {
 			e, rest, err := sunlight.ReadTileLeaf(b)
