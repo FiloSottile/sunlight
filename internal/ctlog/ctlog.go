@@ -657,7 +657,11 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 	}
 }
 
+// sequenceTimeout is the maximum time a whole sequencing can take, but
+// non-fatal network operations (staging bundle and checkpoint uploads) are
+// subject to strictTimeout, as we'd rather fail a pool than accumulate backlog.
 const sequenceTimeout = 15 * time.Second
+const strictTimeout = 1 * time.Second
 
 var errFatal = errors.New("fatal sequencing error")
 
@@ -809,7 +813,9 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	stagingPath := stagingPath(tree.Tree)
 	l.c.Log.DebugContext(ctx, "uploading staged tiles", "old_tree_size", oldSize,
 		"tree_size", tree.N, "path", stagingPath, "size", len(stagedUploads))
-	if err := l.c.Backend.Upload(ctx, stagingPath, stagedUploads, optsStaging); err != nil {
+	ctxStrict, cancel := context.WithTimeout(ctx, strictTimeout)
+	defer cancel()
+	if err := l.c.Backend.Upload(ctxStrict, stagingPath, stagedUploads, optsStaging); err != nil {
 		return fmtErrorf("couldn't upload staged tiles: %w", err)
 	}
 
@@ -845,7 +851,9 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		return fmtErrorf("%w: couldn't upload a tile: %w", errFatal, err)
 	}
 
-	if err := l.c.Backend.Upload(ctx, "checkpoint", checkpoint, optsCheckpoint); err != nil {
+	ctxStrict, cancel := context.WithTimeout(ctx, strictTimeout)
+	defer cancel()
+	if err := l.c.Backend.Upload(ctxStrict, "checkpoint", checkpoint, optsCheckpoint); err != nil {
 		// Return an error so we don't produce SCTs that, although safely
 		// serialized, wouldn't be part of a publicly visible tree.
 		return fmtErrorf("couldn't upload checkpoint to object storage: %w", err)
