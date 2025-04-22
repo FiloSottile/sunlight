@@ -1,5 +1,8 @@
 // Package durable provides equivalent functionality to the os package, but with
 // additional guarantees for durability based on [os.File.Sync].
+//
+// See https://wiki.postgresql.org/wiki/Fsync_Errors for a discussion of the
+// reliability of fsync.
 package durable
 
 import (
@@ -10,30 +13,35 @@ import (
 
 // WriteFile behaves like [os.WriteFile], but it also syncs the file contents
 // and the directory containing the file to disk.
-func WriteFile(name string, data []byte, perm os.FileMode) error {
+func WriteFile(name string, data []byte, perm os.FileMode) (err error) {
+	// After the file, sync the directory in which the entry resides. Otherwise,
+	// after a power failure the file may not exist.
+	//
+	// Keep the parent open during the operation, to prevent it from being
+	// evicted from the inode cache, which can discard a write-through error.
+	//
+	// Note that this is not necessary if the file already exists. Our use of
+	// this function is mostly for creating new files, so we don't optimize for
+	// the case where the file already exists.
+	parent, err := os.Open(filepath.Dir(name))
+	if err != nil {
+		return &os.PathError{Op: "write", Path: name, Err: err}
+	}
+	defer fsyncAndClose(parent, &err)
+
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
+	defer fsyncAndClose(f, &err)
+
 	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	if err1 := f.Close(); err1 != nil && err == nil {
-		err = err1
-	}
-	if err == nil {
-		// Note that this is not necessary if the file was not just created.
-		// Our use of this function is mostly for creating new files, so we
-		// don't optimize for the case where the file already exists.
-		err = fsyncDirectory(name)
-	}
 	return err
 }
 
-// MkdirAll behaves like [os.MkdirAll], but it also syncs the directory
-// containing each created directory to disk.
-func MkdirAll(path string, perm os.FileMode) error {
+// MkdirAll behaves like [os.MkdirAll], but it also syncs each affected
+// directory to disk.
+func MkdirAll(path string, perm os.FileMode) (err error) {
 	if dir, err := os.Stat(path); err == nil {
 		if dir.IsDir() {
 			return nil
@@ -48,36 +56,39 @@ func MkdirAll(path string, perm os.FileMode) error {
 		}
 	}
 
+	// This is a little inefficient because if we are creating two levels of
+	// directories, we will sync the intermediate directory twice. That's going
+	// to be rare in our use case, so we don't optimize for it.
 	return Mkdir(path, perm)
 }
 
 // Mkdir behaves like [os.Mkdir], but it also syncs the directory containing
 // the created directory to disk.
 func Mkdir(path string, perm os.FileMode) (err error) {
-	defer func() {
-		if err == nil {
-			err = fsyncDirectory(path)
-		}
-	}()
-
-	// Do we need to sync path itself? Presumably not, since otherwise the
-	// synced parent directory would have a dangling entry.
-	return os.Mkdir(path, perm)
-}
-
-// fsyncDirectory syncs the directory in which the directory entry for path
-// resides. Otherwise, after a power failure the file at path may not exist.
-// See https://github.com/sqlite/sqlite/blob/024818be2/src/os_unix.c#L3739-L3799
-// for confirmation that operating on a file, then opening the directory and
-// calling fsync on it is the correct sequence of operations.
-func fsyncDirectory(path string) error {
 	parent, err := os.Open(filepath.Dir(path))
 	if err != nil {
+		return &os.PathError{Op: "mkdir", Path: path, Err: err}
+	}
+	defer fsyncAndClose(parent, &err)
+
+	if err := os.Mkdir(path, perm); err != nil {
 		return err
 	}
-	err = parent.Sync()
-	if err1 := parent.Close(); err1 != nil && err == nil {
-		err = err1
+
+	f, err := os.Open(path)
+	if err != nil {
+		return &os.PathError{Op: "mkdir", Path: path, Err: err}
 	}
-	return err
+	defer fsyncAndClose(f, &err)
+
+	return nil
+}
+
+func fsyncAndClose(f *os.File, err *error) {
+	if *err == nil {
+		*err = f.Sync()
+	}
+	if err1 := f.Close(); err1 != nil && *err == nil {
+		*err = err1
+	}
 }
