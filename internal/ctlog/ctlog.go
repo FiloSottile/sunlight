@@ -381,13 +381,14 @@ type UploadOptions struct {
 	// before uploading if possible.
 	Compress bool
 
-	// Immutable is true if the data is never updated after being uploaded.
+	// Immutable is true if the data is never changed after being uploaded.
+	// Note that the same value may still be re-uploaded, and must succeed.
 	Immutable bool
 }
 
 var optsHashTile = &UploadOptions{Immutable: true}
 var optsDataTile = &UploadOptions{Compress: true, Immutable: true}
-var optsStaging = &UploadOptions{Compress: true}
+var optsStaging = &UploadOptions{Compress: true, Immutable: true}
 var optsIssuer = &UploadOptions{ContentType: "application/pkix-cert", Immutable: true}
 var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
 
@@ -810,13 +811,18 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	if err != nil {
 		return fmtErrorf("couldn't marshal staged uploads: %w", err)
 	}
-	stagingPath := stagingPath(tree.Tree)
-	l.c.Log.DebugContext(ctx, "uploading staged tiles", "old_tree_size", oldSize,
-		"tree_size", tree.N, "path", stagingPath, "size", len(stagedUploads))
-	ctxStrict, cancel := context.WithTimeout(ctx, strictTimeout)
-	defer cancel()
-	if err := l.c.Backend.Upload(ctxStrict, stagingPath, stagedUploads, optsStaging); err != nil {
-		return fmtErrorf("couldn't upload staged tiles: %w", err)
+	// Don't upload an empty staging bundle, as it would have the same path of
+	// the previous one, but different (empty) content. Note that LoadLog might
+	// end up re-uploading the tiles from the previous one, which is harmless.
+	if len(tileUploads) > 0 {
+		stagingPath := stagingPath(tree.Tree)
+		l.c.Log.DebugContext(ctx, "uploading staged tiles", "old_tree_size", oldSize,
+			"tree_size", tree.N, "path", stagingPath, "size", len(stagedUploads))
+		ctxStrict, cancel := context.WithTimeout(ctx, strictTimeout)
+		defer cancel()
+		if err := l.c.Backend.Upload(ctxStrict, stagingPath, stagedUploads, optsStaging); err != nil {
+			return fmtErrorf("couldn't upload staged tiles: %w", err)
+		}
 	}
 
 	checkpoint, err := signTreeHead(l.c, tree)

@@ -131,11 +131,10 @@ func TestSequenceUploadCount(t *testing.T) {
 	}
 	uploads()
 
-	// Empty rounds should cause only two uploads (an empty staging bundle and
-	// the checkpoint).
+	// Empty rounds should cause only one upload: the checkpoint.
 	fatalIfErr(t, tl.Log.Sequence())
-	if n := uploads(); n != 2 {
-		t.Errorf("got %d uploads, expected 2", n)
+	if n := uploads(); n != 1 {
+		t.Errorf("got %d uploads, expected 1", n)
 	}
 
 	// One entry in steady state (not at tile boundary) should cause four
@@ -444,6 +443,8 @@ func TestStagingCollision(t *testing.T) {
 	ctlog.SetTimeNowUnixMilli(func() int64 { return time })
 	t.Cleanup(func() { ctlog.SetTimeNowUnixMilli(monotonicTime) })
 
+	// First, upload a staging bundle but fail sequencing.
+
 	addCertificateExpectFailureWithSeed(t, tl, 'A')
 	addCertificateExpectFailureWithSeed(t, tl, 'B')
 
@@ -455,7 +456,7 @@ func TestStagingCollision(t *testing.T) {
 	tl = ReloadLog(t, tl)
 	tl.CheckLog(1)
 
-	// First, cause the exact same staging bundle to be uploaded.
+	// Then, cause the exact same staging bundle to be uploaded.
 
 	addCertificateWithSeed(t, tl, 'A')
 	addCertificateWithSeed(t, tl, 'B')
@@ -480,11 +481,41 @@ func TestStagingCollision(t *testing.T) {
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog(5)
 
-	// We wanted to also test reaching the same point through two different
-	// sequencing paths, as suggested in
-	// https://github.com/FiloSottile/sunlight/pull/18#discussion_r1704174301
-	// but that doesn't seem possible since time is required to move forward at
-	// each sequencing.
+	// Again, but reload the log after the failed upload.
+
+	time++
+
+	addCertificateExpectFailureWithSeed(t, tl, 'E')
+	addCertificateExpectFailureWithSeed(t, tl, 'F')
+
+	tl.Config.Backend.(*MemoryBackend).UploadCallback = failStagingButPersist
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(5)
+
+	tl.Config.Backend.(*MemoryBackend).UploadCallback = nil
+	tl = ReloadLog(t, tl)
+	tl.CheckLog(5)
+
+	addCertificateWithSeed(t, tl, 'E')
+	addCertificateWithSeed(t, tl, 'F')
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(7)
+
+	// If the log doesn't progress, the staging path is the same.
+	// LoadLog will re-upload the previous non-empty staging bundle.
+
+	time++
+
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(7)
+
+	tl = ReloadLog(t, tl)
+	tl.CheckLog(7)
+
+	// Note that it's not possible to reach the same tree hash through different
+	// sequencing paths, e.g. "[A, B, C]; [D, E]" and "[A, B]; [C, D, E]",
+	// except for the trivial "[A, B, C]; []" case, because time must advance at
+	// every sequencing, and it's embedded in the Merkle tree leaves.
 }
 
 func sequenceExpectFailure(t *testing.T, tl *TestLog) {
