@@ -1,8 +1,13 @@
 // Package durable provides equivalent functionality to the os package, but with
 // additional guarantees for durability based on [os.File.Sync].
 //
-// See https://wiki.postgresql.org/wiki/Fsync_Errors for a discussion of the
-// reliability of fsync.
+// Note that after an fsync error, files and caches may be in a number of
+// unreliable states, such that the only potentially safe course of action is
+// starting over without reading back the failed files.
+//
+// See also https://www.usenix.org/conference/atc20/presentation/rebello,
+// https://wiki.postgresql.org/wiki/Fsync_Errors, and
+// https://danluu.com/deconstruct-files/.
 package durable
 
 import (
@@ -11,26 +16,36 @@ import (
 	"syscall"
 )
 
-// WriteFile behaves like [os.WriteFile], but it also syncs the file contents
-// and the directory containing the file to disk.
+// WriteFile behaves somewhat like [os.WriteFile], but it also syncs the file
+// contents and the directory entry to disk before returning, and prevents
+// partial writes from being visible.
+//
+// If the file already exists, it takes the specified permissions.
 func WriteFile(name string, data []byte, perm os.FileMode) (err error) {
 	// After the file, sync the directory in which the entry resides. Otherwise,
-	// after a power failure the file may not exist.
+	// after a power failure the file may not exist or the rename may rollback.
 	//
 	// Keep the parent open during the operation, to prevent it from being
 	// evicted from the inode cache, which can discard a write-through error.
-	//
-	// Note that this is not necessary if the file already exists. Our use of
-	// this function is mostly for creating new files, so we don't optimize for
-	// the case where the file already exists.
-	parent, err := os.Open(filepath.Dir(name))
+	parent, err := os.OpenFile(filepath.Dir(name), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
-		return &os.PathError{Op: "write", Path: name, Err: err}
+		return &os.PathError{Op: "durablewrite", Path: name, Err: err}
 	}
 	defer fsyncAndClose(parent, &err)
 
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	f, err := os.CreateTemp(filepath.Dir(name), "."+filepath.Base(name))
 	if err != nil {
+		return &os.PathError{Op: "durablewrite", Path: name, Err: err}
+	}
+	defer func() {
+		if err == nil {
+			err = os.Rename(f.Name(), name)
+		} else {
+			os.Remove(f.Name())
+		}
+	}()
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
 		return err
 	}
 	defer fsyncAndClose(f, &err)
@@ -65,7 +80,7 @@ func MkdirAll(path string, perm os.FileMode) (err error) {
 // Mkdir behaves like [os.Mkdir], but it also syncs the directory containing
 // the created directory to disk.
 func Mkdir(path string, perm os.FileMode) (err error) {
-	parent, err := os.Open(filepath.Dir(path))
+	parent, err := os.OpenFile(filepath.Dir(path), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return &os.PathError{Op: "mkdir", Path: path, Err: err}
 	}
