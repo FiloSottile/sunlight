@@ -1,7 +1,10 @@
 package ctlog
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -45,6 +48,14 @@ func (s *LocalBackend) Upload(ctx context.Context, key string, data []byte, opts
 	var perms os.FileMode = 0644
 	if opts != nil && opts.Immutable {
 		perms = 0444
+		if f, err := os.Open(path); err == nil {
+			defer f.Close()
+			if err := compareFile(f, data); err != nil {
+				return fmtErrorf("immutable file %q already exists and does not match: %w", path, err)
+			}
+			s.log.WarnContext(ctx, "local file already exists", "key", key, "path", path)
+			return nil
+		}
 	}
 	err = durable.WriteFile(path, data, perms)
 	s.log.DebugContext(ctx, "local file write", "key", key, "size", len(data),
@@ -64,4 +75,24 @@ func (s *LocalBackend) Fetch(ctx context.Context, key string) ([]byte, error) {
 
 func (s *LocalBackend) Metrics() []prometheus.Collector {
 	return s.metrics
+}
+
+func compareFile(f *os.File, data []byte) error {
+	b := make([]byte, min(len(data), 16384))
+	for {
+		n, err := f.Read(b)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if n > len(data) || !bytes.Equal(b[:n], data[:n]) {
+			return errors.New("file contents do not match")
+		}
+		data = data[n:]
+		if err == io.EOF {
+			if len(data) == 0 {
+				return nil
+			}
+			return errors.New("file contents do not match")
+		}
+	}
 }
