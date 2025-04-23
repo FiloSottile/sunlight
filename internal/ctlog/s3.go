@@ -209,6 +209,12 @@ func (s *S3Backend) Fetch(ctx context.Context, key string) ([]byte, error) {
 	return data, nil
 }
 
+func (s *S3Backend) Discard(ctx context.Context, key string) error {
+	// For remote backends, DELETE requests are not cost-effective and a waste
+	// of latency. Lifecycle rules can be used to delete old staging bundles.
+	return nil
+}
+
 func (s *S3Backend) Metrics() []prometheus.Collector {
 	return s.metrics
 }

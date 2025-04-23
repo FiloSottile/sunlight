@@ -449,6 +449,7 @@ type MemoryBackend struct {
 	mu  sync.Mutex
 	m   map[string][]byte
 	imm map[string]bool
+	del map[string]bool
 
 	uploads uint64
 
@@ -457,7 +458,7 @@ type MemoryBackend struct {
 
 func NewMemoryBackend(t testing.TB) *MemoryBackend {
 	return &MemoryBackend{
-		t: t, m: make(map[string][]byte), imm: make(map[string]bool),
+		t: t, m: make(map[string][]byte), imm: make(map[string]bool), del: make(map[string]bool),
 	}
 }
 
@@ -482,6 +483,9 @@ func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opt
 	defer b.mu.Unlock()
 	if b.imm[key] && !bytes.Equal(b.m[key], data) {
 		b.t.Errorf("immutable key %q was modified", key)
+	}
+	if b.del[key] {
+		b.t.Errorf("deleted key %q was re-uploaded", key)
 	}
 	b.m[key] = data
 	b.imm[key] = opts.Immutable
@@ -554,7 +558,29 @@ func (b *MemoryBackend) Fetch(ctx context.Context, key string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("key %q not found", key)
 	}
+	if b.del[key] {
+		b.t.Errorf("deleted key %q was fetched", key)
+		return nil, fmt.Errorf("key %q not found", key)
+	}
 	return data, nil
+}
+
+func (b *MemoryBackend) Discard(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.m[key]; !ok {
+		b.t.Errorf("deleted missing key %q", key)
+		return fmt.Errorf("key %q not found", key)
+	}
+	if b.del[key] {
+		b.t.Errorf("deleted key %q was deleted again", key)
+		return fmt.Errorf("key %q not found", key)
+	}
+	b.del[key] = true
+	return nil
 }
 
 func (b *MemoryBackend) Metrics() []prometheus.Collector { return nil }

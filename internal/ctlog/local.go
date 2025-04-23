@@ -88,6 +88,18 @@ func (s *LocalBackend) Fetch(ctx context.Context, key string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+func (s *LocalBackend) Discard(ctx context.Context, key string) error {
+	defer prometheus.NewTimer(s.duration.WithLabelValues("discard")).ObserveDuration()
+	name, err := filepath.Localize(key)
+	if err != nil {
+		return fmtErrorf("failed to localize key %q as a filesystem path: %w", key, err)
+	}
+	path := filepath.Join(s.dir, name)
+	s.log.DebugContext(ctx, "local file delete", "key", key, "path", path)
+	unsetImmutable(path)
+	return os.Remove(path)
+}
+
 func (s *LocalBackend) Metrics() []prometheus.Collector {
 	return s.metrics
 }

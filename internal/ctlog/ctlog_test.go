@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -203,6 +204,23 @@ func TestSequenceUploadPaths(t *testing.T) {
 	}
 	if !reflect.DeepEqual(keys, expected) {
 		t.Errorf("got %#v, expected %#v", keys, expected)
+	}
+
+	for _, key := range keys {
+		expectedImmutable := false
+		expectedDeleted := false
+		if key != "checkpoint" {
+			expectedImmutable = true
+		}
+		if strings.HasPrefix(key, "staging/") {
+			expectedDeleted = true
+		}
+		if tl.Config.Backend.(*MemoryBackend).del[key] != expectedDeleted {
+			t.Errorf("got deleted %v, expected %v for key %q", tl.Config.Backend.(*MemoryBackend).del[key], expectedDeleted, key)
+		}
+		if tl.Config.Backend.(*MemoryBackend).imm[key] != expectedImmutable {
+			t.Errorf("got immutable %v, expected %v for key %q", tl.Config.Backend.(*MemoryBackend).imm[key], expectedImmutable, key)
+		}
 	}
 }
 

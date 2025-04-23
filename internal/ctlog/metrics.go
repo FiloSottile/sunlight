@@ -38,6 +38,8 @@ type metrics struct {
 	CacheGetDuration prometheus.Summary
 	CachePutDuration prometheus.Summary
 	CachePutErrors   prometheus.Counter
+
+	StagingDiscardErrors prometheus.Counter
 }
 
 func initMetrics() metrics {
@@ -204,6 +206,12 @@ func initMetrics() metrics {
 			prometheus.CounterOpts{
 				Name: "cache_put_errors_total",
 				Help: "Number of failed deduplication cache inserts.",
+			},
+		),
+		StagingDiscardErrors: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "staging_discard_errors_total",
+				Help: "Number of errors discarding staging entries.",
 			},
 		),
 	}

@@ -367,6 +367,9 @@ type Backend interface {
 	// Fetch returns the value for a key.
 	Fetch(ctx context.Context, key string) ([]byte, error)
 
+	// Discard suggests to the backend that the key can be deleted.
+	Discard(ctx context.Context, key string) error
+
 	// Metrics returns the metrics to register for this log. The metrics should
 	// not be shared by any other logs.
 	Metrics() []prometheus.Collector
@@ -384,6 +387,7 @@ type UploadOptions struct {
 
 	// Immutable is true if the data is never changed after being uploaded.
 	// Note that the same value may still be re-uploaded, and must succeed.
+	// [Backend.Discard] can still be used on immutable entries.
 	Immutable bool
 }
 
@@ -829,11 +833,11 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	if err != nil {
 		return fmtErrorf("couldn't marshal staged uploads: %w", err)
 	}
+	stagingPath := stagingPath(tree.Tree)
 	// Don't upload an empty staging bundle, as it would have the same path of
 	// the previous one, but different (empty) content. Note that LoadLog might
 	// end up re-uploading the tiles from the previous one, which is harmless.
 	if len(tileUploads) > 0 {
-		stagingPath := stagingPath(tree.Tree)
 		gzipData, err := compress(stagedUploads)
 		if err != nil {
 			return fmtErrorf("couldn't compress staged uploads: %w", err)
@@ -885,6 +889,16 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		// Return an error so we don't produce SCTs that, although safely
 		// serialized, wouldn't be part of a publicly visible tree.
 		return fmtErrorf("couldn't upload checkpoint to object storage: %w", err)
+	}
+
+	// Once the checkpoint is uploaded to object storage, we can safely delete the
+	// staging bundle, if any. No need to fail the sequencing if this fails.
+	if len(tileUploads) > 0 {
+		if err := l.c.Backend.Discard(ctx, stagingPath); err != nil {
+			l.c.Log.ErrorContext(ctx, "staging bundle discard failed",
+				"tree_size", tree.N, "err", err)
+			l.m.StagingDiscardErrors.Inc()
+		}
 	}
 
 	// At this point if the cache put fails, there's no reason to return errors
