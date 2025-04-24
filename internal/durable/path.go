@@ -37,13 +37,14 @@ func WriteFile(name string, data []byte, perm os.FileMode) (err error) {
 	if err != nil {
 		return &os.PathError{Op: "durablewrite", Path: name, Err: err}
 	}
-	defer func() {
+	defer func(tmpname string) {
 		if err == nil {
-			err = os.Rename(f.Name(), name)
-		} else {
-			os.Remove(f.Name())
+			err = os.Rename(tmpname, name)
 		}
-	}()
+		if err != nil {
+			os.Remove(tmpname)
+		}
+	}(f.Name())
 	if err := f.Chmod(perm); err != nil {
 		f.Close()
 		return err
