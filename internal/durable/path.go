@@ -16,6 +16,19 @@ import (
 	"syscall"
 )
 
+// The sequence of syscalls for a happy path call to WriteFile looks like this:
+//
+//     openat(AT_FDCWD, "dir", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 3
+//     openat(AT_FDCWD, "dir/.file4057926228", O_RDWR|O_CREAT|O_EXCL|O_CLOEXEC, 0600) = 6
+//     fchmod(6, 0644)                         = 0
+//     write(6, "hello world", 11)             = 11
+//     fsync(6)                                = 0
+//     close(6)                                = 0
+//     renameat(AT_FDCWD, "dir/.file4057926228", AT_FDCWD, "dir/file") = 0
+//     fsync(3)                                = 0
+//     close(3)                                = 0
+//
+
 // WriteFile behaves somewhat like [os.WriteFile], but it also syncs the file
 // contents and the directory entry to disk before returning, and prevents
 // partial writes from being visible.
@@ -77,6 +90,17 @@ func MkdirAll(path string, perm os.FileMode) (err error) {
 	// to be rare in our use case, so we don't optimize for it.
 	return Mkdir(path, perm)
 }
+
+// The sequence of syscalls for a happy path call to Mkdir looks like this:
+//
+//     openat(AT_FDCWD, "dir1", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 3
+//     mkdirat(AT_FDCWD, "dir1/dir2", 0755)    = 0
+//     openat(AT_FDCWD, "dir1/dir2", O_RDONLY|O_CLOEXEC) = 6
+//     fsync(6)                                = 0
+//     close(6)                                = 0
+//     fsync(3)                                = 0
+//     close(3)                                = 0
+//
 
 // Mkdir behaves like [os.Mkdir], but it also syncs the directory containing
 // the created directory to disk.
