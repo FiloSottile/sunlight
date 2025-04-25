@@ -64,8 +64,8 @@ type Config struct {
 		// Email is the email address to use for ACME account registration.
 		Email string
 
-		// Host is the name for which autocert will obtain a certificate.
-		Host string
+		// Hosts are the names for which autocert will obtain a certificate.
+		Hosts []string
 
 		// Cache is the path to the autocert cache directory.
 		Cache string
@@ -547,12 +547,12 @@ func main() {
 		s.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
-	} else if c.ACME.Host != "" {
+	} else if len(c.ACME.Hosts) > 0 {
 		m := &autocert.Manager{
 			Cache:      autocert.DirCache(c.ACME.Cache),
 			Prompt:     autocert.AcceptTOS,
 			Email:      c.ACME.Email,
-			HostPolicy: autocert.HostWhitelist(c.ACME.Host),
+			HostPolicy: autocert.HostWhitelist(c.ACME.Hosts...),
 			Client: &acme.Client{
 				DirectoryURL: c.ACME.Directory,
 				UserAgent:    "filippo.io/sunlight",
