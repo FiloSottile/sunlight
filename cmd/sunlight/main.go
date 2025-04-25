@@ -55,8 +55,8 @@ import (
 )
 
 type Config struct {
-	// Listen is the address to listen on, e.g. ":443".
-	Listen string
+	// Listen are the addresses to listen on, e.g. ":443".
+	Listen []string
 
 	// ACME is the configuration for the ACME client. Optional. If missing,
 	// Sunlight will listen for plain HTTP or h2c.
@@ -309,6 +309,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	serveGroup, ctx := errgroup.WithContext(ctx)
+
 	var db ctlog.LockBackend
 	switch {
 	case c.Checkpoints != "" && c.DynamoDB.Table != "" ||
@@ -520,7 +522,6 @@ func main() {
 	})
 
 	s := &http.Server{
-		Addr:         c.Listen,
 		Handler:      mux,
 		ConnContext:  ctlog.ReusedConnContext,
 		ReadTimeout:  5 * time.Second,
@@ -567,16 +568,18 @@ func main() {
 		s.Handler = http.MaxBytesHandler(s.Handler, 128*1024)
 	}
 
-	go func() {
-		if s.TLSConfig != nil {
-			err := s.ListenAndServeTLS("", "")
-			logger.Error("ListenAndServeTLS error", "err", err)
-		} else {
-			err := s.ListenAndServe()
-			logger.Error("ListenAndServe error", "err", err)
+	for _, addr := range c.Listen {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			fatalError(logger, "failed to listen", "addr", addr, "err", err)
 		}
-		stop()
-	}()
+		serveGroup.Go(func() error {
+			if s.TLSConfig != nil {
+				return s.ServeTLS(l, "", "")
+			}
+			return s.Serve(l)
+		})
+	}
 
 	sequencerGroup.Wait()
 
@@ -584,6 +587,10 @@ func main() {
 	defer cancel()
 	if err := s.Shutdown(ctx); err != nil {
 		logger.Error("Shutdown error", "err", err)
+	}
+
+	if err := serveGroup.Wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error("serve error", "err", err)
 	}
 
 	os.Exit(1)
