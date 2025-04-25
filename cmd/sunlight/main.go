@@ -156,7 +156,8 @@ type LogConfig struct {
 	Roots string
 
 	// Seed is the path to a file containing a secret seed from which the log's
-	// private keys are derived. The whole file is used as HKDF input.
+	// private keys are derived. The whole file is used as HKDF input. It must
+	// be at least 32 bytes long.
 	//
 	// To generate a new seed, run:
 	//
@@ -379,6 +380,9 @@ func main() {
 		seed, err := os.ReadFile(lc.Seed)
 		if err != nil {
 			fatalError(logger, "failed to load seed", "err", err)
+		}
+		if len(seed) < 32 {
+			fatalError(logger, "seed file too short, must be at least 32 bytes")
 		}
 
 		ecdsaSecret := make([]byte, 32)
