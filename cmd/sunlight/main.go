@@ -139,6 +139,9 @@ type LogConfig struct {
 	// due to misconfiguration, and prevents accidental forks.
 	Inception string
 
+	// HTTPHost is the host name for the HTTP endpoint of this log instance.
+	HTTPHost string
+
 	// HTTPPrefix is the prefix for the HTTP endpoint of this log instance,
 	// without trailing slash, but with a leading slash if not empty, and
 	// without "/ct/v1" suffix.
@@ -470,7 +473,7 @@ func main() {
 			return l.RunSequencer(sequencerContext, 1*time.Second)
 		})
 
-		mux.Handle(lc.HTTPPrefix+"/", http.StripPrefix(lc.HTTPPrefix, l.Handler()))
+		mux.Handle(lc.HTTPHost+lc.HTTPPrefix+"/", http.StripPrefix(lc.HTTPPrefix, l.Handler()))
 
 		prometheus.WrapRegistererWith(prometheus.Labels{"log": lc.ShortName}, sunlightMetrics).
 			MustRegister(l.Metrics()...)
