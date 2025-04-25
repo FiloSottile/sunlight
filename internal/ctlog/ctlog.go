@@ -657,11 +657,9 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 	for {
 		select {
 		case <-ctx.Done():
-			l.c.Log.InfoContext(ctx, "sequencer stopped")
 			return ctx.Err()
 		case <-t.C:
 			if err := l.sequence(ctx); err != nil {
-				l.c.Log.ErrorContext(ctx, "fatal sequencing error", "err", err)
 				return err
 			}
 		}

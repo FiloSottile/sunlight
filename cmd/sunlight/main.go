@@ -581,7 +581,9 @@ func main() {
 		})
 	}
 
-	sequencerGroup.Wait()
+	if err := sequencerGroup.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Error("sequencer error", "err", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
