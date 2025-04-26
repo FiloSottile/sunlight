@@ -351,6 +351,13 @@ func main() {
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 
 	var logList []logInfo
+	serveHome := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if err := homeTmpl.Execute(w, logList); err != nil {
+			logger.Error("failed to execute homepage template", "err", err)
+		}
+	}
+	mux.HandleFunc("/{$}", serveHome)
 	for _, lc := range c.Logs {
 		if lc.Name == "" || lc.ShortName == "" {
 			fatalError(logger, "missing name or short name for log")
@@ -508,18 +515,15 @@ func main() {
 		if err != nil {
 			fatalError(logger, "failed to upload log info", "err", err)
 		}
-		mux.HandleFunc(lc.HTTPPrefix+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(lc.HTTPHost+lc.HTTPPrefix+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(j)
 		})
-	}
 
-	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		if err := homeTmpl.Execute(w, logList); err != nil {
-			logger.Error("failed to execute homepage template", "err", err)
+		if lc.HTTPHost != "" {
+			mux.HandleFunc(lc.HTTPHost+"/{$}", serveHome)
 		}
-	})
+	}
 
 	s := &http.Server{
 		Handler:      mux,
