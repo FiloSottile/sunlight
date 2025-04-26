@@ -95,15 +95,16 @@ func MkdirAll(path string, perm os.FileMode) (err error) {
 //
 //     openat(AT_FDCWD, "dir1", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 3
 //     mkdirat(AT_FDCWD, "dir1/dir2", 0755)    = 0
-//     openat(AT_FDCWD, "dir1/dir2", O_RDONLY|O_CLOEXEC) = 6
+//     openat(AT_FDCWD, "dir1/dir2", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 6
 //     fsync(6)                                = 0
 //     close(6)                                = 0
 //     fsync(3)                                = 0
 //     close(3)                                = 0
 //
 
-// Mkdir behaves like [os.Mkdir], but it also syncs the directory containing
-// the created directory to disk.
+// Mkdir behaves like [os.Mkdir], but it also syncs the directory and its parent
+// to disk. Unlike [os.Mkdir], it returns nil if the directory already exists to
+// prevent returning errors in case of races.
 func Mkdir(path string, perm os.FileMode) (err error) {
 	parent, err := os.OpenFile(filepath.Dir(path), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
@@ -111,11 +112,11 @@ func Mkdir(path string, perm os.FileMode) (err error) {
 	}
 	defer fsyncAndClose(parent, &err)
 
-	if err := os.Mkdir(path, perm); err != nil {
+	if err := os.Mkdir(path, perm); err != nil && !os.IsExist(err) {
 		return err
 	}
 
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return &os.PathError{Op: "mkdir", Path: path, Err: err}
 	}
