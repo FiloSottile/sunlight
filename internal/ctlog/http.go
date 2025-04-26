@@ -43,7 +43,9 @@ func (l *Log) Handler() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /ct/v1/add-chain", addChain)
+	mux.Handle("OPTIONS /ct/v1/add-chain", addChain)
 	mux.Handle("POST /ct/v1/add-pre-chain", addPreChain)
+	mux.Handle("OPTIONS /ct/v1/add-pre-chain", addPreChain)
 	mux.Handle("GET /ct/v1/get-roots", getRoots)
 	return http.MaxBytesHandler(mux, 128*1024)
 }
@@ -57,6 +59,13 @@ func ReusedConnContext(ctx context.Context, c net.Conn) context.Context {
 }
 
 func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
+	rw.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		rw.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		rw.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *PendingLogEntry) error {
 		if le.IsPrecert {
 			return fmtErrorf("pre-certificate submitted to add-chain")
@@ -83,6 +92,13 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
+	rw.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		rw.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		rw.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *PendingLogEntry) error {
 		if !le.IsPrecert {
 			return fmtErrorf("final certificate submitted to add-pre-chain")
@@ -240,6 +256,7 @@ func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {
 		res.Certificates = append(res.Certificates, r.Raw)
 	}
 
+	rw.Header().Set("Access-Control-Allow-Origin", "*")
 	rw.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(rw).Encode(res); err != nil {
 		l.c.Log.DebugContext(r.Context(), "failed to write get-roots response", "err", err)
