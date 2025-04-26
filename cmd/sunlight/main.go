@@ -41,6 +41,7 @@ import (
 
 	"filippo.io/keygen"
 	"filippo.io/sunlight/internal/ctlog"
+	"filippo.io/sunlight/internal/slogx"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -255,7 +256,7 @@ func main() {
 	fs.Parse(os.Args[1:])
 
 	logLevel := new(slog.LevelVar)
-	logHandler := multiHandler([]slog.Handler{
+	logHandler := slogx.MultiHandler([]slog.Handler{
 		slog.Handler(slog.NewJSONHandler(os.Stdout,
 			&slog.HandlerOptions{AddSource: true, Level: logLevel})),
 		slog.Handler(slog.NewTextHandler(os.Stderr,
@@ -530,11 +531,11 @@ func main() {
 		ConnContext:  ctlog.ReusedConnContext,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 15 * time.Second,
-		ErrorLog: slog.NewLogLogger(filterHandler{
-			handler: logHandler.WithAttrs(
+		ErrorLog: slog.NewLogLogger(slogx.NewFilterHandler(
+			logHandler.WithAttrs(
 				[]slog.Attr{slog.String("source", "http.Server")},
 			),
-			filter: func(r slog.Record) bool {
+			func(r slog.Record) bool {
 				// Unless debug logging is enabled, hide Internet background radiation.
 				if logHandler.Enabled(context.Background(), slog.LevelDebug) {
 					return true
@@ -545,7 +546,7 @@ func main() {
 					!strings.HasSuffix(r.Message, "server name contains invalid character") &&
 					!strings.HasSuffix(r.Message, "server name component count invalid")
 			},
-		}, slog.LevelWarn),
+		), slog.LevelWarn),
 	}
 	if *testCertFlag {
 		cert, err := tls.LoadX509KeyPair("sunlight.pem", "sunlight-key.pem")
