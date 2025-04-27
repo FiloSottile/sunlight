@@ -24,6 +24,17 @@ func TilePath(t tlog.Tile) string {
 	return "tile/" + strings.TrimPrefix(t.Path(), "tile/8/")
 }
 
+// ParseTilePath parses a tile coordinate path according to c2sp.org/sunlight.
+// It differs from [tlog.ParseTilePath] in that it doesn't include an explicit
+// tile height.
+func ParseTilePath(path string) (tlog.Tile, error) {
+	if !strings.HasPrefix(path, "tile/") {
+		return tlog.Tile{}, fmt.Errorf("malformed tile path %q", path)
+	}
+	path = "tile/8/" + strings.TrimPrefix(path, "tile/")
+	return tlog.ParseTilePath(path)
+}
+
 type LogEntry struct {
 	// Certificate is either the TimestampedEntry.signed_entry, or the
 	// PreCert.tbs_certificate for Precertificates.

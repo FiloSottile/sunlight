@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/slogx"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -117,7 +118,7 @@ func main() {
 			Name: "http_requests_total",
 			Help: "HTTP requests served.",
 		},
-		[]string{"log", "code"},
+		[]string{"log", "kind", "code"},
 	)
 	reqDuration := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
@@ -127,7 +128,7 @@ func main() {
 			MaxAge:     1 * time.Minute,
 			AgeBuckets: 6,
 		},
-		[]string{"log"},
+		[]string{"log", "kind"},
 	)
 	resSize := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
@@ -137,10 +138,10 @@ func main() {
 			MaxAge:     1 * time.Minute,
 			AgeBuckets: 6,
 		},
-		[]string{"log"},
+		[]string{"log", "kind"},
 	)
 	skylightMetrics := prometheus.WrapRegistererWithPrefix("skylight_", metrics)
-	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration)
+	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -159,33 +160,85 @@ func main() {
 		}
 		handler := http.FileServerFS(root.FS())
 
+		type kindContextKey struct{}
+		kindFromContext := func(ctx context.Context) string {
+			if k, ok := ctx.Value(kindContextKey{}).(string); ok {
+				return k
+			}
+			return ""
+		}
+
 		labels := prometheus.Labels{"log": lc.ShortName}
-		handler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), handler)
-		handler = promhttp.InstrumentHandlerDuration(reqDuration.MustCurryWith(labels), handler)
 		handler = promhttp.InstrumentHandlerInFlight(reqInFlight.With(labels), handler)
-		handler = promhttp.InstrumentHandlerResponseSize(resSize.MustCurryWith(labels), handler)
+		handler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), handler,
+			promhttp.WithLabelFromCtx("kind", kindFromContext))
+		handler = promhttp.InstrumentHandlerDuration(reqDuration.MustCurryWith(labels), handler,
+			promhttp.WithLabelFromCtx("kind", kindFromContext))
+		handler = promhttp.InstrumentHandlerResponseSize(resSize.MustCurryWith(labels), handler,
+			promhttp.WithLabelFromCtx("kind", kindFromContext))
 
 		// TODO:
 		//
-		//   - Disable sniffing
-		//   - Disable directory listings
-		//   - Content-Type
-		//   - Content-Encoding
-		//   - Cache-Control
-		//   - Access-Control-Allow-Origin
-		//   - Hide staging bundles
-		//   - Rate limit partial tiles
-		//   - Hide partial tiles if full ones are present?
+		//   - Rate limit partial data tiles
 		//   - Rate limit unidentified clients
-		//   - Curry metrics by checkpoint/issuers/tree/data/partial
 		//   - Throttle new connections and track reuse
 		//   - User-Agent metrics?
+		//   - golang.org/x/website/internal/webtest
 		//
 
 		patternPrefix := "GET " + lc.HTTPHost + lc.HTTPPrefix
-		mux.Handle(patternPrefix+"/", handler)
-		mux.Handle(patternPrefix+"/{$}",
-			http.RedirectHandler(lc.HomeRedirect, http.StatusFound))
+		mux.HandleFunc(patternPrefix+"/checkpoint", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "checkpoint"))
+			handler.ServeHTTP(w, r)
+		})
+		mux.HandleFunc(patternPrefix+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Content-Type", "application/json")
+			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "log.v3.json"))
+			handler.ServeHTTP(w, r)
+		})
+		mux.HandleFunc(patternPrefix+"/issuer/{issuer}", func(w http.ResponseWriter, r *http.Request) {
+			if r.PathValue("issuer") == "" {
+				reqCount.MustCurryWith(labels).WithLabelValues("issuer", "400").Inc()
+				http.Error(w, "missing issuer", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Content-Type", "application/pkix-cert")
+			w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "issuer"))
+			handler.ServeHTTP(w, r)
+		})
+		mux.HandleFunc(patternPrefix+"/tile/{tile...}", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+			tilePath := "tile/" + r.PathValue("tile")
+			tile, err := sunlight.ParseTilePath(tilePath)
+			if err != nil {
+				reqCount.MustCurryWith(labels).WithLabelValues("tile", "400").Inc()
+				http.Error(w, "invalid tile path", http.StatusBadRequest)
+				return
+			}
+			if tile.L == -1 {
+				w.Header().Set("Content-Encoding", "gzip")
+				if tile.W < sunlight.TileWidth {
+					r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "partial"))
+				} else {
+					r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "data"))
+				}
+			} else {
+				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "tile"))
+			}
+			handler.ServeHTTP(w, r)
+		})
+		mux.HandleFunc(patternPrefix+"/{$}", func(w http.ResponseWriter, r *http.Request) {
+			reqCount.MustCurryWith(labels).WithLabelValues("index", "302").Inc()
+			http.Redirect(w, r, lc.HomeRedirect, http.StatusFound)
+		})
 	}
 
 	s := &http.Server{
