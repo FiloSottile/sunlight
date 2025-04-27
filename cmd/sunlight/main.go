@@ -541,8 +541,7 @@ func main() {
 				if logHandler.Enabled(context.Background(), slog.LevelDebug) {
 					return true
 				}
-				return strings.Contains(r.Message, "acme/autocert") &&
-					!strings.HasSuffix(r.Message, "missing server name") &&
+				return !strings.HasSuffix(r.Message, "missing server name") &&
 					!strings.HasSuffix(r.Message, "not configured in HostWhitelist") &&
 					!strings.HasSuffix(r.Message, "server name contains invalid character") &&
 					!strings.HasSuffix(r.Message, "server name component count invalid")
