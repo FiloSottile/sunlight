@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"filippo.io/sunlight"
@@ -70,6 +72,97 @@ type LogConfig struct {
 	LocalDirectory string
 }
 
+// TAT is the Theoretical Arrival Time of a Generic Cell Rate Algorithm (GCRA)
+// rate limit. See https://letsencrypt.org/2025/01/30/scaling-rate-limits/.
+type TAT struct {
+	sync.Mutex
+	time.Time
+}
+
+// Allow returns whether the request is allowed. If it is allowed, it updates
+// the TAT. Otherwise, it returns the time at which the request can be retried.
+func (t *TAT) Allow(interval time.Duration, burst int) (allow bool, retryAfter time.Time) {
+	now := time.Now()
+	t.Lock()
+	defer t.Unlock()
+	tat := t.Time
+	if tat.Before(now) {
+		t.Time = now.Add(interval)
+		return true, time.Time{}
+	}
+	nowPlusBurst := now.Add(interval * time.Duration(burst))
+	if tat.Before(nowPlusBurst) {
+		t.Time = tat.Add(interval)
+		return true, time.Time{}
+	}
+	return false, now.Add(tat.Sub(nowPlusBurst))
+}
+
+// rateLimitInterval allows 75 req/s, which at the average size of a full data
+// tile works out to about 100Mbps.
+const rateLimitInterval = 1 * time.Second / 75
+const rateLimitBurst = 10
+
+// anonymousClientLimit is the rate-limit for alicents that don't specify an
+// email address in their User-Agent.
+var anonymousClientLimit TAT
+
+// partialDataTileLimit is the rate-limit for partial data tiles, which should
+// be avoidable by just waiting for the tile to fill up.
+var partialDataTileLimit TAT
+
+func newRateLimitHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if clientFromContext(r.Context()) == "anonymous" {
+			msg := "Please add an email address to your User-Agent."
+			r.Header.Add("Skylight-Rate-Limited", msg)
+			allow, retryAfter := anonymousClientLimit.Allow(rateLimitInterval, rateLimitBurst)
+			if !allow {
+				w.Header().Set("Retry-After", retryAfter.Format(time.RFC1123))
+				http.Error(w, msg, http.StatusTooManyRequests)
+				return
+			}
+		}
+		if kindFromContext(r.Context()) == "partial" {
+			msg := "Please avoid partial data tile fetches."
+			msg += " " + "See https://c2sp.org/static-ct-api#partial-tiles."
+			r.Header.Add("Skylight-Rate-Limited", msg)
+			allow, retryAfter := partialDataTileLimit.Allow(rateLimitInterval, rateLimitBurst)
+			if !allow {
+				w.Header().Set("Retry-After", retryAfter.Format(time.RFC1123))
+				http.Error(w, msg, http.StatusTooManyRequests)
+				return
+			}
+		}
+		handler.ServeHTTP(w, r)
+	})
+}
+
+type kindContextKey struct{}
+
+func kindFromContext(ctx context.Context) string {
+	k, _ := ctx.Value(kindContextKey{}).(string)
+	return k
+}
+
+type clientContextKey struct{}
+
+func clientFromContext(ctx context.Context) string {
+	c, _ := ctx.Value(clientContextKey{}).(string)
+	return c
+}
+
+func newClientCategorizationHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.UserAgent(), "@") {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "identified"))
+		} else {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
+		}
+		handler.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	fs := flag.NewFlagSet("skylight", flag.ExitOnError)
 	configFlag := fs.String("c", "skylight.yaml", "path to the config file")
@@ -102,29 +195,30 @@ func main() {
 	metrics := prometheus.NewRegistry()
 	metrics.MustRegister(collectors.NewGoCollector())
 	metrics.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	mux.Handle("/metrics", promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
-		ErrorLog: slog.NewLogLogger(logHandler.WithAttrs(
-			[]slog.Attr{slog.String("source", "metrics")},
-		), slog.LevelWarn),
-	}))
-	reqInFlight := prometheus.NewGaugeVec(
+	mux.Handle("/metrics", promhttp.InstrumentMetricHandler(metrics,
+		promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
+			ErrorLog: slog.NewLogLogger(logHandler.WithAttrs(
+				[]slog.Attr{slog.String("source", "metrics")},
+			), slog.LevelWarn),
+			Registry: metrics,
+		})))
+	reqInFlight := prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "http_in_flight_requests",
 			Help: "Requests currently being served.",
 		},
-		[]string{"log"},
 	)
 	reqCount := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "http_requests_total",
 			Help: "HTTP requests served.",
 		},
-		[]string{"log", "kind", "reused", "code"},
+		[]string{"log", "kind", "client", "reused", "code"},
 	)
 	reqDuration := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Name:       "http_request_duration_seconds",
-			Help:       "HTTP request serving latencies in seconds.",
+			Help:       "HTTP request serving latencies in seconds, at the file handler.",
 			Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
 			MaxAge:     1 * time.Minute,
 			AgeBuckets: 6,
@@ -134,7 +228,7 @@ func main() {
 	resSize := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Name:       "http_response_size_bytes",
-			Help:       "HTTP response sizes in bytes.",
+			Help:       "HTTP response sizes in bytes for file, at the file handler.",
 			Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
 			MaxAge:     1 * time.Minute,
 			AgeBuckets: 6,
@@ -143,21 +237,6 @@ func main() {
 	)
 	skylightMetrics := prometheus.WrapRegistererWithPrefix("skylight_", metrics)
 	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize)
-
-	type kindContextKey struct{}
-	kindFromContext := func(ctx context.Context) string {
-		if k, ok := ctx.Value(kindContextKey{}).(string); ok {
-			return k
-		}
-		return ""
-	}
-
-	reusedConnFromContext := func(ctx context.Context) string {
-		if r, ok := ctx.Value(reused.ContextKey).(bool); ok && r {
-			return "true"
-		}
-		return "false"
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -176,26 +255,44 @@ func main() {
 		}
 		handler := http.FileServerFS(root.FS())
 
+		// Wrap the file handler with duration and response size metrics.
+		// Avoid tracking the size and duration of errors or simple responses.
 		labels := prometheus.Labels{"log": lc.ShortName}
-		handler = promhttp.InstrumentHandlerInFlight(reqInFlight.With(labels), handler)
-		handler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), handler,
-			promhttp.WithLabelFromCtx("kind", kindFromContext),
-			promhttp.WithLabelFromCtx("reused", reusedConnFromContext))
 		handler = promhttp.InstrumentHandlerDuration(reqDuration.MustCurryWith(labels), handler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext))
 		handler = promhttp.InstrumentHandlerResponseSize(resSize.MustCurryWith(labels), handler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext))
 
-		// TODO:
-		//
-		//   - Rate limit partial data tiles
-		//   - Rate limit unidentified clients
-		// https://github.com/letsencrypt/boulder/blob/main/ratelimits/gcra.go
-		//   - Throttle new connections
-		//   - User-Agent metrics?
-		//   - golang.org/x/website/internal/webtest
-		//
+		// Then, apply the rate limit handler.
+		handler = newRateLimitHandler(handler)
 
+		// Next, the request counter. It needs to go before the mux as it uses
+		// the context keys we set in the per-path handlers, but after the rate
+		// limit handler, so it will capture the 429 errors.
+		handler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), handler,
+			promhttp.WithLabelFromCtx("kind", kindFromContext),
+			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
+			promhttp.WithLabelFromCtx("client", clientFromContext))
+
+		// All paths that don't reach the instrumented handler need to observe
+		// their own request count metric.
+		httpError := func(w http.ResponseWriter, r *http.Request, kind, error string, code int) {
+			reused := reused.LabelFromContext(r.Context())
+			client := clientFromContext(r.Context())
+			reqCount.WithLabelValues(lc.ShortName, kind, client, reused, strconv.Itoa(code)).Inc()
+			w.Header().Del("Content-Encoding")
+			w.Header().Del("Cache-Control")
+			http.Error(w, error, code)
+		}
+		httpRedirect := func(w http.ResponseWriter, r *http.Request, kind, url string, code int) {
+			reused := reused.LabelFromContext(r.Context())
+			client := clientFromContext(r.Context())
+			reqCount.WithLabelValues(lc.ShortName, kind, client, reused, strconv.Itoa(code)).Inc()
+			http.Redirect(w, r, url, code)
+		}
+
+		// Finally, the per-path mux handler that specialize the request,
+		// setting headers and context keys.
 		patternPrefix := "GET " + lc.HTTPHost + lc.HTTPPrefix
 		mux.HandleFunc(patternPrefix+"/checkpoint", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -211,14 +308,13 @@ func main() {
 			handler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/issuer/{issuer}", func(w http.ResponseWriter, r *http.Request) {
-			if r.PathValue("issuer") == "" {
-				reqCount.MustCurryWith(labels).WithLabelValues("issuer", "400").Inc()
-				http.Error(w, "missing issuer", http.StatusBadRequest)
-				return
-			}
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Content-Type", "application/pkix-cert")
 			w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+			if r.PathValue("issuer") == "" {
+				httpError(w, r, "issuer", "missing issuer", http.StatusBadRequest)
+				return
+			}
 			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "issuer"))
 			handler.ServeHTTP(w, r)
 		})
@@ -229,8 +325,7 @@ func main() {
 			tilePath := "tile/" + r.PathValue("tile")
 			tile, err := sunlight.ParseTilePath(tilePath)
 			if err != nil {
-				reqCount.MustCurryWith(labels).WithLabelValues("tile", "400").Inc()
-				http.Error(w, "invalid tile path", http.StatusBadRequest)
+				httpError(w, r, "tile", "invalid tile path", http.StatusBadRequest)
 				return
 			}
 			if tile.L == -1 {
@@ -246,14 +341,16 @@ func main() {
 			handler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/{$}", func(w http.ResponseWriter, r *http.Request) {
-			reused := reusedConnFromContext(r.Context())
-			reqCount.MustCurryWith(labels).WithLabelValues("index", reused, "302").Inc()
-			http.Redirect(w, r, lc.HomeRedirect, http.StatusFound)
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			httpRedirect(w, r, "index", lc.HomeRedirect, http.StatusFound)
 		})
 	}
 
+	handler := promhttp.InstrumentHandlerInFlight(reqInFlight, mux)
+	handler = newClientCategorizationHandler(handler)
+	handler = reused.NewHandler(handler)
 	s := &http.Server{
-		Handler:      reused.NewHandler(mux),
+		Handler:      handler,
 		ConnContext:  reused.ConnContext,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 15 * time.Second,

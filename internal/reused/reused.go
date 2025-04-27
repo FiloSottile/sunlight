@@ -2,6 +2,7 @@ package reused
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -15,6 +16,13 @@ var ContextKey = reusedConnContextKey{}
 
 func ConnContext(ctx context.Context, c net.Conn) context.Context {
 	return context.WithValue(ctx, connGlobalContextKey{}, &atomic.Bool{})
+}
+
+func LabelFromContext(ctx context.Context) string {
+	if r, ok := ctx.Value(ContextKey).(bool); ok {
+		return fmt.Sprintf("%t", r)
+	}
+	return ""
 }
 
 func NewHandler(handler http.Handler) http.Handler {
