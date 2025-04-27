@@ -8,12 +8,11 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
-	"net"
 	"net/http"
-	"sync/atomic"
 	"time"
 
 	"filippo.io/sunlight"
+	"filippo.io/sunlight/internal/reused"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/trillian/ctfe"
 	"github.com/google/certificate-transparency-go/x509"
@@ -48,14 +47,6 @@ func (l *Log) Handler() http.Handler {
 	mux.Handle("OPTIONS /ct/v1/add-pre-chain", addPreChain)
 	mux.Handle("GET /ct/v1/get-roots", getRoots)
 	return http.MaxBytesHandler(mux, 128*1024)
-}
-
-type reusedConnContextKey struct{}
-
-// ReusedConnContext must be used as the http.Server.ConnContext field to allow
-// tracking of reused connections.
-func ReusedConnContext(ctx context.Context, c net.Conn) context.Context {
-	return context.WithValue(ctx, reusedConnContextKey{}, &atomic.Bool{})
 }
 
 func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
@@ -133,8 +124,8 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		}
 		l.m.AddChainCount.With(labels).Inc()
 	}()
-	if b, ok := ctx.Value(reusedConnContextKey{}).(*atomic.Bool); ok && b.Swap(true) {
-		labels["reused"] = "true"
+	if r, ok := ctx.Value(reused.ContextKey).(bool); ok {
+		labels["reused"] = fmt.Sprintf("%t", r)
 	}
 
 	body, err := io.ReadAll(reqBody)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"filippo.io/sunlight"
+	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/slogx"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -118,7 +119,7 @@ func main() {
 			Name: "http_requests_total",
 			Help: "HTTP requests served.",
 		},
-		[]string{"log", "kind", "code"},
+		[]string{"log", "kind", "reused", "code"},
 	)
 	reqDuration := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
@@ -143,6 +144,21 @@ func main() {
 	skylightMetrics := prometheus.WrapRegistererWithPrefix("skylight_", metrics)
 	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize)
 
+	type kindContextKey struct{}
+	kindFromContext := func(ctx context.Context) string {
+		if k, ok := ctx.Value(kindContextKey{}).(string); ok {
+			return k
+		}
+		return ""
+	}
+
+	reusedConnFromContext := func(ctx context.Context) string {
+		if r, ok := ctx.Value(reused.ContextKey).(bool); ok && r {
+			return "true"
+		}
+		return "false"
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -160,18 +176,11 @@ func main() {
 		}
 		handler := http.FileServerFS(root.FS())
 
-		type kindContextKey struct{}
-		kindFromContext := func(ctx context.Context) string {
-			if k, ok := ctx.Value(kindContextKey{}).(string); ok {
-				return k
-			}
-			return ""
-		}
-
 		labels := prometheus.Labels{"log": lc.ShortName}
 		handler = promhttp.InstrumentHandlerInFlight(reqInFlight.With(labels), handler)
 		handler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), handler,
-			promhttp.WithLabelFromCtx("kind", kindFromContext))
+			promhttp.WithLabelFromCtx("kind", kindFromContext),
+			promhttp.WithLabelFromCtx("reused", reusedConnFromContext))
 		handler = promhttp.InstrumentHandlerDuration(reqDuration.MustCurryWith(labels), handler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext))
 		handler = promhttp.InstrumentHandlerResponseSize(resSize.MustCurryWith(labels), handler,
@@ -181,7 +190,8 @@ func main() {
 		//
 		//   - Rate limit partial data tiles
 		//   - Rate limit unidentified clients
-		//   - Throttle new connections and track reuse
+		// https://github.com/letsencrypt/boulder/blob/main/ratelimits/gcra.go
+		//   - Throttle new connections
 		//   - User-Agent metrics?
 		//   - golang.org/x/website/internal/webtest
 		//
@@ -236,13 +246,15 @@ func main() {
 			handler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/{$}", func(w http.ResponseWriter, r *http.Request) {
-			reqCount.MustCurryWith(labels).WithLabelValues("index", "302").Inc()
+			reused := reusedConnFromContext(r.Context())
+			reqCount.MustCurryWith(labels).WithLabelValues("index", reused, "302").Inc()
 			http.Redirect(w, r, lc.HomeRedirect, http.StatusFound)
 		})
 	}
 
 	s := &http.Server{
-		Handler:      mux,
+		Handler:      reused.NewHandler(mux),
+		ConnContext:  reused.ConnContext,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		ErrorLog: slog.NewLogLogger(slogx.NewFilterHandler(

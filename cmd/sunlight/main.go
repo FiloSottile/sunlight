@@ -41,6 +41,7 @@ import (
 
 	"filippo.io/keygen"
 	"filippo.io/sunlight/internal/ctlog"
+	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/slogx"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -527,8 +528,8 @@ func main() {
 	}
 
 	s := &http.Server{
-		Handler:      mux,
-		ConnContext:  ctlog.ReusedConnContext,
+		Handler:      reused.NewHandler(mux),
+		ConnContext:  reused.ConnContext,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		ErrorLog: slog.NewLogLogger(slogx.NewFilterHandler(
