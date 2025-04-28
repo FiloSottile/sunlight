@@ -16,77 +16,15 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"filippo.io/torchwood"
 	ct "github.com/google/certificate-transparency-go"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
-	"golang.org/x/mod/sumdb/tlog"
 )
-
-const maxCheckpointSize = 1e6
-
-// A Checkpoint is a tree head to be formatted according to c2sp.org/checkpoint.
-//
-// A checkpoint looks like this:
-//
-//	example.com/origin
-//	923748
-//	nND/nri/U0xuHUrYSy0HtMeal2vzD9V4k/BO79C+QeI=
-//
-// It can be followed by extra extension lines.
-type Checkpoint struct {
-	Origin string
-	tlog.Tree
-
-	// Extension is empty or a sequence of non-empty lines,
-	// each terminated by a newline character.
-	Extension string
-}
-
-func ParseCheckpoint(text string) (Checkpoint, error) {
-	// This is an extended version of tlog.ParseTree.
-
-	if strings.Count(text, "\n") < 3 || len(text) > maxCheckpointSize {
-		return Checkpoint{}, errors.New("malformed checkpoint")
-	}
-	if !strings.HasSuffix(text, "\n") {
-		return Checkpoint{}, errors.New("malformed checkpoint")
-	}
-
-	lines := strings.SplitN(text, "\n", 4)
-
-	n, err := strconv.ParseInt(lines[1], 10, 64)
-	if err != nil || n < 0 || lines[1] != strconv.FormatInt(n, 10) {
-		return Checkpoint{}, errors.New("malformed checkpoint")
-	}
-
-	h, err := base64.StdEncoding.DecodeString(lines[2])
-	if err != nil || len(h) != tlog.HashSize {
-		return Checkpoint{}, errors.New("malformed checkpoint")
-	}
-
-	rest := lines[3]
-	for rest != "" {
-		before, after, found := strings.Cut(rest, "\n")
-		if before == "" || !found {
-			return Checkpoint{}, errors.New("malformed checkpoint")
-		}
-		rest = after
-	}
-
-	var hash tlog.Hash
-	copy(hash[:], h)
-	return Checkpoint{lines[0], tlog.Tree{N: n, Hash: hash}, lines[3]}, nil
-}
-
-func FormatCheckpoint(c Checkpoint) string {
-	return fmt.Sprintf("%s\n%d\n%s\n%s",
-		c.Origin, c.N, base64.StdEncoding.EncodeToString(c.Hash[:]), c.Extension)
-}
 
 // NewRFC6962Verifier constructs a new [note.Verifier] that verifies a RFC 6962
 // TreeHeadSignature formatted according to c2sp.org/sunlight.
@@ -193,4 +131,20 @@ func RFC6962SignatureTimestamp(sig note.Signature) (int64, error) {
 		return 0, errors.New("malformed RFC 6962 TreeHeadSignature")
 	}
 	return int64(timestamp), nil
+}
+
+// Backwards compatibility shims for functionality that was originally
+// duplicated from [torchwood] and that's not Sunlight specific.
+
+//go:fix inline
+type Checkpoint = torchwood.Checkpoint
+
+//go:fix inline
+func ParseCheckpoint(text string) (Checkpoint, error) {
+	return torchwood.ParseCheckpoint(text)
+}
+
+//go:fix inline
+func FormatCheckpoint(c Checkpoint) string {
+	return c.String()
 }
