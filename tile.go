@@ -28,11 +28,14 @@ func TilePath(t tlog.Tile) string {
 // It differs from [tlog.ParseTilePath] in that it doesn't include an explicit
 // tile height.
 func ParseTilePath(path string) (tlog.Tile, error) {
-	if !strings.HasPrefix(path, "tile/") {
-		return tlog.Tile{}, fmt.Errorf("malformed tile path %q", path)
+	if rest, ok := strings.CutPrefix(path, "tile/"); ok {
+		t, err := tlog.ParseTilePath("tile/8/" + rest)
+		if err != nil {
+			return tlog.Tile{}, fmt.Errorf("malformed tile path %q", path)
+		}
+		return t, nil
 	}
-	path = "tile/8/" + strings.TrimPrefix(path, "tile/")
-	return tlog.ParseTilePath(path)
+	return tlog.Tile{}, fmt.Errorf("malformed tile path %q", path)
 }
 
 type LogEntry struct {
