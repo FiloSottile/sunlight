@@ -4,7 +4,7 @@ go 1.24.2
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
-	filippo.io/torchwood v0.5.0
+	filippo.io/torchwood v0.5.1-0.20250428155307-54a0f0ff1812
 	github.com/aws/aws-sdk-go-v2 v1.30.3
 	github.com/aws/aws-sdk-go-v2/config v1.27.27
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.34.4
