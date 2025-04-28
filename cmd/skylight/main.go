@@ -5,9 +5,11 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"filippo.io/sunlight"
+	"filippo.io/sunlight/internal/frequent"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/slogx"
 	"github.com/prometheus/client_golang/prometheus"
@@ -152,8 +155,9 @@ func clientFromContext(ctx context.Context) string {
 	return c
 }
 
-func newClientCategorizationHandler(handler http.Handler) http.Handler {
+func newUserAgentHandler(handler http.Handler, table *frequent.Table) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		table.Count(r.UserAgent())
 		if strings.Contains(r.UserAgent(), "@") {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "identified"))
 		} else {
@@ -186,6 +190,26 @@ func main() {
 	if err := yaml.Unmarshal(yml, c); err != nil {
 		fatalError(logger, "failed to parse config file", "err", err)
 	}
+
+	userAgents := frequent.New(1000)
+	http.HandleFunc("/useragents", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		for _, item := range userAgents.Top(100) {
+			halfError := item.MaxError / 2
+			fmt.Fprintf(w, "%d (± %d)\t%q\n", item.Count-halfError, halfError, item.Value)
+		}
+	})
+	go func() {
+		ln, err := net.Listen("tcp", "localhost:")
+		if err != nil {
+			logger.Error("failed to start debug server", "err", err)
+		} else {
+			logger.Info("debug server listening", "addr", ln.Addr())
+			err := http.Serve(ln, nil)
+			logger.Error("debug server exited", "err", err)
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -347,7 +371,7 @@ func main() {
 	}
 
 	handler := promhttp.InstrumentHandlerInFlight(reqInFlight, mux)
-	handler = newClientCategorizationHandler(handler)
+	handler = newUserAgentHandler(handler, userAgents)
 	handler = reused.NewHandler(handler)
 	s := &http.Server{
 		Handler:      handler,
