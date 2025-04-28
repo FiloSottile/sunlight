@@ -1,3 +1,21 @@
+// Command skylight runs a Certificate Transparency log read-path server.
+//
+// A YAML config file is required (specified with -c, by default skylight.yaml),
+// the keys are documented in the [Config] type.
+//
+// If the command line flag -testcert is passed, ACME will be disabled and the
+// certificate will be loaded from skylight.pem and skylight-key.pem.
+//
+// Requests from clients that don't specify an email address in their
+// User-Agent, and requests for partial data tiles will each be globally
+// rate-limited to 75 requests per second.
+//
+// Metrics are exposed publicly at /metrics, and logs are written to stderr in
+// human-readable format, and to stdout in JSON format.
+//
+// A private HTTP debug server is also started on a random port on localhost. It
+// serves the net/http/pprof endpoints, as well as a list of the 100 most
+// frequently observed User-Agent headers at /useragents.
 package main
 
 import (

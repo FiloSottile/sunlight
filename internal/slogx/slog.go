@@ -1,3 +1,4 @@
+// Package slogx provides additional handlers for the [log/slog] package.
 package slogx
 
 import (

@@ -1,3 +1,4 @@
+// Package reused allows tracking connection reuse in HTTP requests.
 package reused
 
 import (
