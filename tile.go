@@ -13,7 +13,7 @@ const TileHeight = 8
 const TileWidth = 1 << TileHeight
 
 // TilePath returns a tile coordinate path describing t, according to
-// c2sp.org/sunlight. It differs from [tlog.Tile.Path] in that it doesn't
+// c2sp.org/static-st-api. It differs from [tlog.Tile.Path] in that it doesn't
 // include an explicit tile height.
 //
 // If t.Height is not TileHeight, TilePath panics.
@@ -24,7 +24,7 @@ func TilePath(t tlog.Tile) string {
 	return "tile/" + strings.TrimPrefix(t.Path(), "tile/8/")
 }
 
-// ParseTilePath parses a tile coordinate path according to c2sp.org/sunlight.
+// ParseTilePath parses a tile coordinate path according to c2sp.org/static-st-api.
 // It differs from [tlog.ParseTilePath] in that it doesn't include an explicit
 // tile height.
 func ParseTilePath(path string) (tlog.Tile, error) {

@@ -7,7 +7,7 @@ import (
 )
 
 // Extensions is the CTExtensions field of SignedCertificateTimestamp and
-// TimestampedEntry, according to c2sp.org/sunlight.
+// TimestampedEntry, according to c2sp.org/static-ct-api.
 type Extensions struct {
 	LeafIndex int64
 }

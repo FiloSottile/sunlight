@@ -27,7 +27,7 @@ import (
 )
 
 // NewRFC6962Verifier constructs a new [note.Verifier] that verifies a RFC 6962
-// TreeHeadSignature formatted according to c2sp.org/sunlight.
+// TreeHeadSignature formatted according to c2sp.org/static-ct-api.
 func NewRFC6962Verifier(name string, key crypto.PublicKey) (note.Verifier, error) {
 	if !isValidName(name) {
 		return nil, fmt.Errorf("invalid name %q", name)
