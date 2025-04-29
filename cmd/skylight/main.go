@@ -19,11 +19,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -39,11 +44,13 @@ import (
 	"filippo.io/sunlight/internal/frequent"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/slogx"
+	"filippo.io/torchwood"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sync/errgroup"
@@ -230,9 +237,6 @@ func main() {
 	}()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
 
 	metrics := prometheus.NewRegistry()
 	metrics.MustRegister(collectors.NewGoCollector())
@@ -283,6 +287,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	roots := make(map[string]*os.Root)
 	for _, lc := range c.Logs {
 		if lc.ShortName == "" {
 			fatalError(logger, "missing name or short name for log")
@@ -295,6 +300,7 @@ func main() {
 		if err != nil {
 			fatalError(logger, "failed to open local directory", "err", err)
 		}
+		roots[lc.ShortName] = root
 		handler := http.FileServerFS(root.FS())
 
 		// Wrap the file handler with duration and response size metrics.
@@ -388,6 +394,28 @@ func main() {
 		})
 	}
 
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		status := http.StatusOK
+		buf := &bytes.Buffer{}
+		for log, root := range roots {
+			if err := checkLog(root); err != nil {
+				status = http.StatusInternalServerError
+				fmt.Fprintf(buf, "%s: %v\n", log, err)
+			} else {
+				fmt.Fprintf(buf, "%s: OK\n", log)
+			}
+		}
+
+		reused := reused.LabelFromContext(r.Context())
+		client := clientFromContext(r.Context())
+		reqCount.WithLabelValues("", "health", client, reused, strconv.Itoa(status)).Inc()
+
+		w.WriteHeader(status)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		io.Copy(w, buf)
+	})
+
 	handler := promhttp.InstrumentHandlerInFlight(reqInFlight, mux)
 	handler = newUserAgentHandler(handler, userAgents)
 	handler = reused.NewHandler(handler)
@@ -463,6 +491,53 @@ func main() {
 	}
 
 	os.Exit(1)
+}
+
+type logInfo struct {
+	Name         string `json:"description"`
+	PublicKeyDER []byte `json:"key"`
+}
+
+func checkLog(root *os.Root) error {
+	logJSON, err := fs.ReadFile(root.FS(), "log.v3.json")
+	if err != nil {
+		return err
+	}
+	var log logInfo
+	if err := json.Unmarshal(logJSON, &log); err != nil {
+		return err
+	}
+	key, err := x509.ParsePKIXPublicKey(log.PublicKeyDER)
+	if err != nil {
+		return err
+	}
+	verifier, err := sunlight.NewRFC6962Verifier(log.Name, key)
+	if err != nil {
+		return err
+	}
+	signedCheckpoint, err := fs.ReadFile(root.FS(), "checkpoint")
+	if err != nil {
+		return err
+	}
+	n, err := note.Open(signedCheckpoint, note.VerifierList(verifier))
+	if err != nil {
+		return err
+	}
+	checkpoint, err := torchwood.ParseCheckpoint(n.Text)
+	if err != nil {
+		return err
+	}
+	if checkpoint.Origin != log.Name {
+		return fmt.Errorf("origin mismatch: %q != %q", checkpoint.Origin, log.Name)
+	}
+	t, err := sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
+	if err != nil {
+		return err
+	}
+	if ct := time.UnixMilli(t); time.Since(ct) > 5*time.Second {
+		return fmt.Errorf("checkpoint is too old: %v", ct)
+	}
+	return nil
 }
 
 func fatalError(logger *slog.Logger, msg string, args ...any) {

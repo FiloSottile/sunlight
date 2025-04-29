@@ -295,6 +295,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		// TODO: print total certificates serialized in last 60s.
 		w.WriteHeader(http.StatusOK)
 	})
 
