@@ -182,9 +182,12 @@ func clientFromContext(ctx context.Context) string {
 
 func newUserAgentHandler(handler http.Handler, table *frequent.Table) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		table.Count(r.UserAgent())
-		if strings.Contains(r.UserAgent(), "@") {
-			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "identified"))
+		userAgent := r.UserAgent()
+		table.Count(userAgent)
+		if strings.Contains(userAgent, "@") {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-email"))
+		} else if strings.Contains(userAgent, "https://") {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-url"))
 		} else {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
 		}
