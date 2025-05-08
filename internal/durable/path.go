@@ -58,7 +58,8 @@ func WriteFile(name string, data []byte, perm os.FileMode) (err error) {
 			os.Remove(tmpname)
 		}
 	}(f.Name())
-	if err := f.Chmod(perm); err != nil {
+	err = f.Chmod(perm)
+	if err != nil {
 		f.Close()
 		return err
 	}
