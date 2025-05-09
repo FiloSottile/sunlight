@@ -436,10 +436,16 @@ func main() {
 				if logHandler.Enabled(context.Background(), slog.LevelDebug) {
 					return true
 				}
-				return !strings.HasSuffix(r.Message, "missing server name") &&
-					!strings.HasSuffix(r.Message, "not configured in HostWhitelist") &&
-					!strings.HasSuffix(r.Message, "server name contains invalid character") &&
-					!strings.HasSuffix(r.Message, "server name component count invalid")
+				if strings.HasPrefix(r.Message, "http: TLS handshake error") {
+					// Only log TLS handshake errors from autocert, filtering out
+					// background noise ones.
+					return strings.Contains(r.Message, "acme/autocert") &&
+						!strings.HasSuffix(r.Message, "missing server name") &&
+						!strings.HasSuffix(r.Message, "not configured in HostWhitelist") &&
+						!strings.HasSuffix(r.Message, "server name contains invalid character") &&
+						!strings.HasSuffix(r.Message, "server name component count invalid")
+				}
+				return true
 			},
 		), slog.LevelWarn),
 	}
