@@ -242,7 +242,7 @@ type logInfo struct {
 	PublicKeyPEM string `json:"-"`
 	PublicKeyDER []byte `json:"key"`
 
-	// MMD is always 86400 seconds but note that Sunlight logs have zero MMD.
+	// MMD is always 60 seconds but note that Sunlight logs have zero MMD.
 	MMD int `json:"mmd"`
 }
 
@@ -504,7 +504,7 @@ func main() {
 			PoolSize:         lc.PoolSize,
 			PublicKeyPEM:     string(pemKey),
 			PublicKeyDER:     pkix,
-			MMD:              86400,
+			MMD:              60,
 		}
 		log.Interval.NotAfterStart = lc.NotAfterStart
 		log.Interval.NotAfterLimit = lc.NotAfterLimit
