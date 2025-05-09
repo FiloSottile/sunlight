@@ -230,6 +230,7 @@ type logInfo struct {
 	// Fields from LogConfig, we don't embed the whole struct to avoid
 	// accidentally exposing sensitive fields.
 	Name             string `json:"description"`
+	ShortName        string `json:"-"`
 	SubmissionPrefix string `json:"submission_url"`
 	MonitoringPrefix string `json:"monitoring_url"`
 	PoolSize         int    `json:"-"`
@@ -241,9 +242,11 @@ type logInfo struct {
 	// ID is the base64 encoded SHA-256 of the public key.
 	ID string `json:"log_id"`
 
-	// PublicKeyPEM and PublicKeyDER are the SubjectPublicKeyInfo.
-	PublicKeyPEM string `json:"-"`
-	PublicKeyDER []byte `json:"key"`
+	// PublicKeyPEM, PublicKeyDER, and PublicKeyBase64 are the
+	// SubjectPublicKeyInfo in various encodings.
+	PublicKeyPEM    string `json:"-"`
+	PublicKeyDER    []byte `json:"key"`
+	PublicKeyBase64 string `json:"-"`
 
 	// MMD is always 60 seconds but note that Sunlight logs have zero MMD.
 	MMD int `json:"mmd"`
@@ -534,12 +537,14 @@ func main() {
 		logID := sha256.Sum256(pkix)
 		log := logInfo{
 			Name:             lc.Name,
+			ShortName:        lc.ShortName,
 			ID:               base64.StdEncoding.EncodeToString(logID[:]),
 			SubmissionPrefix: lc.SubmissionPrefix + "/",
 			MonitoringPrefix: lc.MonitoringPrefix + "/",
 			PoolSize:         lc.PoolSize,
 			PublicKeyPEM:     string(pemKey),
 			PublicKeyDER:     pkix,
+			PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
 			MMD:              60,
 		}
 		log.Interval.NotAfterStart = lc.NotAfterStart

@@ -62,6 +62,8 @@
       Submission prefix: <code>{{ .SubmissionPrefix }}</code><br>
       Interval: {{ .Interval.NotAfterStart }} – {{ .Interval.NotAfterLimit }}<br>
       Links: <a href="{{ .MonitoringPrefix }}checkpoint">checkpoint</a>
+        <a href="data:application/octet-stream;base64,{{ .PublicKeyBase64 }}"
+            download="{{ .ShortName }}.der">key</a>
         <a href="{{ .SubmissionPrefix }}ct/v1/get-roots">get-roots</a>
         <a href="{{ .SubmissionPrefix }}log.v3.json">json</a><br>
       Ratelimit: {{ .PoolSize }} req/s
