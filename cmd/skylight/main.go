@@ -98,6 +98,9 @@ type LogConfig struct {
 	// LocalDirectory is the path to a local directory where the log will store
 	// its data. It must be dedicated to this specific log instance.
 	LocalDirectory string
+
+	// Staging indicates that this log should not make /health fail.
+	Staging bool
 }
 
 // TAT is the Theoretical Arrival Time of a Generic Cell Rate Algorithm (GCRA)
@@ -290,7 +293,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	roots := make(map[string]*os.Root)
+	roots := make(map[LogConfig]*os.Root)
 	for _, lc := range c.Logs {
 		if lc.ShortName == "" {
 			fatalError(logger, "missing name or short name for log")
@@ -303,7 +306,7 @@ func main() {
 		if err != nil {
 			fatalError(logger, "failed to open local directory", "err", err)
 		}
-		roots[lc.ShortName] = root
+		roots[lc] = root
 		handler := http.FileServerFS(root.FS())
 
 		// Wrap the file handler with duration and response size metrics.
@@ -402,10 +405,14 @@ func main() {
 		buf := &bytes.Buffer{}
 		for log, root := range roots {
 			if err := checkLog(root); err != nil {
-				status = http.StatusInternalServerError
-				fmt.Fprintf(buf, "%s: %v\n", log, err)
+				if log.Staging {
+					fmt.Fprintf(buf, "%s: %v (ignored)\n", log.ShortName, err)
+				} else {
+					status = http.StatusInternalServerError
+					fmt.Fprintf(buf, "%s: %v\n", log.ShortName, err)
+				}
 			} else {
-				fmt.Fprintf(buf, "%s: OK\n", log)
+				fmt.Fprintf(buf, "%s: OK\n", log.ShortName)
 			}
 		}
 
