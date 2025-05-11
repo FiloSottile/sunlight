@@ -12,7 +12,7 @@
 // A private HTTP debug server is also started on a random port on localhost. It
 // serves the net/http/pprof endpoints, as well as /debug/logson and
 // /debug/logsoff which enable and disable debug logging, respectively, and
-// /debug/keylogon and /debug/keylogoff which enable and disable SSLKEYLOGFILE.
+// /debug/keylog/on and /debug/keylog/off which enable and disable SSLKEYLOGFILE.
 package main
 
 import (
@@ -29,7 +29,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -38,12 +37,12 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"text/template"
 	"time"
 
 	"filippo.io/keygen"
 	"filippo.io/sunlight/internal/ctlog"
+	"filippo.io/sunlight/internal/keylog"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/slogx"
 	"github.com/google/certificate-transparency-go/x509util"
@@ -271,39 +270,6 @@ func main() {
 	})
 	logger := slog.New(logHandler)
 
-	var keyLogFileMutex sync.RWMutex
-	var keyLogFile *os.File
-	http.HandleFunc("/debug/keylogon", func(w http.ResponseWriter, r *http.Request) {
-		keyLogFileMutex.Lock()
-		defer keyLogFileMutex.Unlock()
-		if keyLogFile != nil {
-			http.Error(w, "key log file already open", http.StatusBadRequest)
-			return
-		}
-		f, err := os.CreateTemp("", "sunlight-keylog-")
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to create key log file: %v", err),
-				http.StatusInternalServerError)
-			return
-		}
-		fmt.Fprintf(w, "%s\n", f.Name())
-		keyLogFile = f
-	})
-	http.HandleFunc("/debug/keylogoff", func(w http.ResponseWriter, r *http.Request) {
-		keyLogFileMutex.Lock()
-		defer keyLogFileMutex.Unlock()
-		if keyLogFile == nil {
-			http.Error(w, "key log file not open", http.StatusBadRequest)
-			return
-		}
-		if err := keyLogFile.Close(); err != nil {
-			http.Error(w, fmt.Sprintf("failed to close key log file: %v", err),
-				http.StatusInternalServerError)
-			return
-		}
-		fmt.Fprintf(w, "%s\n", keyLogFile.Name())
-		keyLogFile = nil
-	})
 	http.HandleFunc("/debug/logson", func(w http.ResponseWriter, r *http.Request) {
 		logLevel.Set(slog.LevelDebug)
 		w.WriteHeader(http.StatusOK)
@@ -622,14 +588,7 @@ func main() {
 	}
 
 	if s.TLSConfig != nil {
-		s.TLSConfig.KeyLogWriter = WriterFunc(func(p []byte) (n int, err error) {
-			keyLogFileMutex.RLock()
-			defer keyLogFileMutex.RUnlock()
-			if keyLogFile == nil {
-				return 0, nil
-			}
-			return keyLogFile.Write(p)
-		})
+		s.TLSConfig.KeyLogWriter = keylog.Writer
 	}
 
 	for _, addr := range c.Listen {
@@ -682,12 +641,6 @@ func fetchCheckpoint(ctx context.Context, logger *slog.Logger, prefix string) []
 		fatalError(logger, "failed to read checkpoint body", "err", err)
 	}
 	return b
-}
-
-type WriterFunc func(p []byte) (n int, err error)
-
-func (f WriterFunc) Write(p []byte) (n int, err error) {
-	return f(p)
 }
 
 func fatalError(logger *slog.Logger, msg string, args ...any) {

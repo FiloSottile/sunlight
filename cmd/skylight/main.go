@@ -15,7 +15,8 @@
 //
 // A private HTTP debug server is also started on a random port on localhost. It
 // serves the net/http/pprof endpoints, as well as a list of the 100 most
-// frequently observed User-Agent headers and source IPs at /useragents and /ips.
+// frequently observed User-Agent headers and source IPs at /useragents and /ips,
+// and /debug/keylog/on and /debug/keylog/off which enable and disable SSLKEYLOGFILE.
 package main
 
 import (
@@ -42,6 +43,7 @@ import (
 
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/frequent"
+	"filippo.io/sunlight/internal/keylog"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/slogx"
 	"filippo.io/torchwood"
@@ -508,6 +510,10 @@ func main() {
 	} else {
 		s.Handler = h2c.NewHandler(s.Handler, &http2.Server{})
 		s.Handler = http.MaxBytesHandler(s.Handler, 128*1024)
+	}
+
+	if s.TLSConfig != nil {
+		s.TLSConfig.KeyLogWriter = keylog.Writer
 	}
 
 	serveGroup, ctx := errgroup.WithContext(ctx)
