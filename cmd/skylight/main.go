@@ -470,7 +470,6 @@ func main() {
 		s.TLSConfig = m.TLSConfig()
 	} else {
 		s.Handler = h2c.NewHandler(s.Handler, &http2.Server{})
-		s.Handler = http.MaxBytesHandler(s.Handler, 128*1024)
 	}
 
 	if s.TLSConfig != nil {
