@@ -11,12 +11,12 @@
 // rate-limited to 75 requests per second.
 //
 // Metrics are exposed publicly at /metrics, and logs are written to stderr in
-// human-readable format, and to stdout in JSON format.
+// human-readable format, and to stdout in JSON format. /health reports the
+// health of all logs, returning 500 if any non-staging log is stale.
 //
 // A private HTTP debug server is also started on a random port on localhost. It
-// serves the net/http/pprof endpoints, as well as a list of the 100 most
-// frequently observed User-Agent headers and source IPs at /useragents and /ips,
-// and /debug/keylog/on and /debug/keylog/off which enable and disable SSLKEYLOGFILE.
+// serves the net/http/pprof endpoints, the [heavyhitter] endpoints, the
+// [keylog] endpoints, and the [stdlog] endpoints.
 package main
 
 import (
@@ -45,7 +45,7 @@ import (
 	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/keylog"
 	"filippo.io/sunlight/internal/reused"
-	"filippo.io/sunlight/internal/slogx"
+	"filippo.io/sunlight/internal/stdlog"
 	"filippo.io/torchwood"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -204,14 +204,7 @@ func main() {
 	testCertFlag := fs.Bool("testcert", false, "use skylight.pem and skylight-key.pem instead of ACME")
 	fs.Parse(os.Args[1:])
 
-	logLevel := new(slog.LevelVar)
-	logHandler := slogx.MultiHandler([]slog.Handler{
-		slog.Handler(slog.NewJSONHandler(os.Stdout,
-			&slog.HandlerOptions{AddSource: true, Level: logLevel})),
-		slog.Handler(slog.NewTextHandler(os.Stderr,
-			&slog.HandlerOptions{Level: logLevel})),
-	})
-	logger := slog.New(logHandler)
+	logger := slog.New(stdlog.Handler)
 
 	yml, err := os.ReadFile(*configFlag)
 	if err != nil {
@@ -240,7 +233,7 @@ func main() {
 	metrics.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	mux.Handle("/metrics", promhttp.InstrumentMetricHandler(metrics,
 		promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
-			ErrorLog: slog.NewLogLogger(logHandler.WithAttrs(
+			ErrorLog: slog.NewLogLogger(stdlog.Handler.WithAttrs(
 				[]slog.Attr{slog.String("source", "metrics")},
 			), slog.LevelWarn),
 			Registry: metrics,
@@ -289,7 +282,7 @@ func main() {
 		if lc.ShortName == "" {
 			fatalError(logger, "missing name or short name for log")
 		}
-		logger := slog.New(logHandler.WithAttrs([]slog.Attr{
+		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("log", lc.ShortName),
 		}))
 
@@ -426,27 +419,7 @@ func main() {
 		ConnContext:  reused.ConnContext,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 15 * time.Second,
-		ErrorLog: slog.NewLogLogger(slogx.NewFilterHandler(
-			logHandler.WithAttrs(
-				[]slog.Attr{slog.String("source", "http.Server")},
-			),
-			func(r slog.Record) bool {
-				// Unless debug logging is enabled, hide Internet background radiation.
-				if logHandler.Enabled(context.Background(), slog.LevelDebug) {
-					return true
-				}
-				if strings.HasPrefix(r.Message, "http: TLS handshake error") {
-					// Only log TLS handshake errors from autocert, filtering out
-					// background noise ones.
-					return strings.Contains(r.Message, "acme/autocert") &&
-						!strings.HasSuffix(r.Message, "missing server name") &&
-						!strings.HasSuffix(r.Message, "not configured in HostWhitelist") &&
-						!strings.HasSuffix(r.Message, "server name contains invalid character") &&
-						!strings.HasSuffix(r.Message, "server name component count invalid")
-				}
-				return true
-			},
-		), slog.LevelWarn),
+		ErrorLog:     stdlog.HTTPErrorLog,
 	}
 	if *testCertFlag {
 		cert, err := tls.LoadX509KeyPair("skylight.pem", "skylight-key.pem")
