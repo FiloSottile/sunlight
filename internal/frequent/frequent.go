@@ -13,6 +13,7 @@ type Table struct {
 
 type Item struct {
 	Value    string
+	Latest   string
 	Count    int
 	MaxError int
 }
@@ -25,7 +26,9 @@ func New(size int) *Table {
 	}
 }
 
-func (t *Table) Count(value string) {
+// Count updates the count of the specified value in the table, and associates
+// the attr value as its [Item.Latest] attribute.
+func (t *Table) Count(value, attr string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	i, ok := t.index[value]
@@ -50,9 +53,11 @@ func (t *Table) Count(value string) {
 		t.index[t.items[i].Value] = i
 		i = k
 	}
+	t.items[i].Latest = attr
 	t.index[t.items[i].Value] = i
 }
 
+// Top returns up to n items with the highest counts.
 func (t *Table) Top(n int) []Item {
 	t.mu.Lock()
 	defer t.mu.Unlock()
