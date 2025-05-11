@@ -42,7 +42,7 @@ import (
 	"time"
 
 	"filippo.io/sunlight"
-	"filippo.io/sunlight/internal/frequent"
+	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/keylog"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/slogx"
@@ -185,31 +185,17 @@ func clientFromContext(ctx context.Context) string {
 	return c
 }
 
-type heavyHittersHandler struct {
-	next        http.Handler
-	userAgents  *frequent.Table
-	ipAddresses *frequent.Table
-	duration    prometheus.Summary
-}
-
-func (h *heavyHittersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	t := prometheus.NewTimer(h.duration)
-
-	userAgent := r.UserAgent()
-	source, _, _ := net.SplitHostPort(r.RemoteAddr)
-	h.userAgents.Count(userAgent, source)
-	h.ipAddresses.Count(source, userAgent)
-
-	if strings.Contains(userAgent, "@") {
-		r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-email"))
-	} else if strings.Contains(userAgent, "https://") {
-		r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-url"))
-	} else {
-		r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
-	}
-
-	t.ObserveDuration()
-	h.next.ServeHTTP(w, r)
+func newClientContextHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if userAgent := r.UserAgent(); strings.Contains(userAgent, "@") {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-email"))
+		} else if strings.Contains(userAgent, "https://") {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-url"))
+		} else {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
@@ -236,23 +222,6 @@ func main() {
 		fatalError(logger, "failed to parse config file", "err", err)
 	}
 
-	userAgents, ipAddresses := frequent.New(200), frequent.New(200)
-	http.HandleFunc("/useragents", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		for _, item := range userAgents.Top(100) {
-			halfError := item.MaxError / 2
-			fmt.Fprintf(w, "%d (± %d)\t%q [%s]\n", item.Count-halfError, halfError, item.Value, item.Latest)
-		}
-	})
-	http.HandleFunc("/ips", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		for _, item := range ipAddresses.Top(100) {
-			halfError := item.MaxError / 2
-			fmt.Fprintf(w, "%d (± %d)\t%s [%q]\n", item.Count-halfError, halfError, item.Value, item.Latest)
-		}
-	})
 	go func() {
 		ln, err := net.Listen("tcp", "localhost:")
 		if err != nil {
@@ -309,17 +278,8 @@ func main() {
 		},
 		[]string{"log", "kind"},
 	)
-	heavyHittersDuration := prometheus.NewSummary(
-		prometheus.SummaryOpts{
-			Name:       "http_heavy_hitters_duration_seconds",
-			Help:       "Duration of user agent / IP heavy hitter tracking.",
-			Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.025, 0.9: 0.01, 0.99: 0.001},
-			MaxAge:     1 * time.Minute,
-			AgeBuckets: 6,
-		},
-	)
 	skylightMetrics := prometheus.WrapRegistererWithPrefix("skylight_", metrics)
-	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize, heavyHittersDuration)
+	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -458,7 +418,8 @@ func main() {
 	})
 
 	handler := promhttp.InstrumentHandlerInFlight(reqInFlight, mux)
-	handler = &heavyHittersHandler{handler, userAgents, ipAddresses, heavyHittersDuration}
+	handler = heavyhitter.NewHandler(handler)
+	handler = newClientContextHandler(handler)
 	handler = reused.NewHandler(handler)
 	s := &http.Server{
 		Handler:      handler,

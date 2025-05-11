@@ -42,6 +42,7 @@ import (
 
 	"filippo.io/keygen"
 	"filippo.io/sunlight/internal/ctlog"
+	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/keylog"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/slogx"
@@ -535,8 +536,10 @@ func main() {
 		}
 	}
 
+	handler := reused.NewHandler(mux)
+	handler = heavyhitter.NewHandler(handler)
 	s := &http.Server{
-		Handler:      reused.NewHandler(mux),
+		Handler:      handler,
 		ConnContext:  reused.ConnContext,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 15 * time.Second,
