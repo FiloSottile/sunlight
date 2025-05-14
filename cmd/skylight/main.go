@@ -280,7 +280,7 @@ func main() {
 	roots := make(map[LogConfig]*os.Root)
 	for _, lc := range c.Logs {
 		if lc.ShortName == "" {
-			fatalError(logger, "missing name or short name for log")
+			fatalError(logger, "missing short name for log")
 		}
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("log", lc.ShortName),
@@ -485,38 +485,38 @@ type logInfo struct {
 func checkLog(root *os.Root) error {
 	logJSON, err := fs.ReadFile(root.FS(), "log.v3.json")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read log.v3.json: %w", err)
 	}
 	var log logInfo
 	if err := json.Unmarshal(logJSON, &log); err != nil {
-		return err
+		return fmt.Errorf("failed to parse log.v3.json: %w", err)
 	}
 	key, err := x509.ParsePKIXPublicKey(log.PublicKeyDER)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse public key: %w", err)
 	}
 	verifier, err := sunlight.NewRFC6962Verifier(log.Name, key)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create verifier: %w", err)
 	}
 	signedCheckpoint, err := fs.ReadFile(root.FS(), "checkpoint")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read checkpoint: %w", err)
 	}
 	n, err := note.Open(signedCheckpoint, note.VerifierList(verifier))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to verify checkpoint note: %w", err)
 	}
 	checkpoint, err := torchwood.ParseCheckpoint(n.Text)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse checkpoint: %w", err)
 	}
 	if checkpoint.Origin != log.Name {
 		return fmt.Errorf("origin mismatch: %q != %q", checkpoint.Origin, log.Name)
 	}
 	t, err := sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse signature timestamp: %w", err)
 	}
 	if ct := time.UnixMilli(t); time.Since(ct) > 5*time.Second {
 		return fmt.Errorf("checkpoint is too old: %v", ct)

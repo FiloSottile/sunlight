@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"filippo.io/sunlight/internal/durable"
+	"filippo.io/sunlight/internal/immutable"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -47,7 +48,7 @@ func NewLocalBackend(ctx context.Context, dir string, l *slog.Logger) (*LocalBac
 
 var _ Backend = &LocalBackend{}
 
-func (s *LocalBackend) Upload(ctx context.Context, key string, data []byte, opts *UploadOptions) error {
+func (s *LocalBackend) Upload(ctx context.Context, key string, data []byte, opts *UploadOptions) (err error) {
 	defer prometheus.NewTimer(s.duration.WithLabelValues("upload")).ObserveDuration()
 	name, err := filepath.Localize(key)
 	if err != nil {
@@ -70,7 +71,18 @@ func (s *LocalBackend) Upload(ctx context.Context, key string, data []byte, opts
 		}
 		// As a best effort, try to set the immutable flag if supported by the
 		// OS, and the process has the appropriate capabilities.
-		defer setImmutable(path)
+		defer func() {
+			if err != nil {
+				return
+			}
+			var f *os.File
+			f, err = os.Open(path)
+			if err != nil {
+				return
+			}
+			immutable.Set(f)
+			err = f.Close()
+		}()
 	}
 	s.log.DebugContext(ctx, "local file write", "key", key,
 		"size", len(data), "path", path, "perms", perms)
@@ -96,7 +108,14 @@ func (s *LocalBackend) Discard(ctx context.Context, key string) error {
 	}
 	path := filepath.Join(s.dir, name)
 	s.log.DebugContext(ctx, "local file delete", "key", key, "path", path)
-	unsetImmutable(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return fmtErrorf("failed to open file to be deleted %q: %w", path, err)
+	}
+	immutable.Unset(f)
+	if err := f.Close(); err != nil {
+		return fmtErrorf("failed to close file to be deleted %q: %w", path, err)
+	}
 	return os.Remove(path)
 }
 

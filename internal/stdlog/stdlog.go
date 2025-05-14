@@ -60,4 +60,7 @@ func init() {
 		logLevel.Set(slog.LevelInfo)
 		w.WriteHeader(http.StatusOK)
 	})
+	if os.Getenv("DEBUG") != "" {
+		logLevel.Set(slog.LevelDebug)
+	}
 }

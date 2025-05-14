@@ -1,6 +1,8 @@
 //go:build amd64 || arm64
 
-package ctlog
+// Package immutable provides best-effort support for setting and unsetting the
+// immutable flag on files.
+package immutable
 
 import (
 	"os"
@@ -11,21 +13,11 @@ import (
 const _FS_IOC_SETFLAGS = uintptr(0x40086602)
 const _FS_IMMUTABLE_FL = 0x00000010
 
-func setImmutable(name string) {
-	f, err := os.Open(name)
-	if err != nil {
-		return
-	}
-	defer f.Close()
+func Set(f *os.File) {
 	setFlags(f, _FS_IMMUTABLE_FL)
 }
 
-func unsetImmutable(name string) {
-	f, err := os.Open(name)
-	if err != nil {
-		return
-	}
-	defer f.Close()
+func Unset(f *os.File) {
 	setFlags(f, 0)
 }
 
