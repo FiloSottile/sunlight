@@ -208,6 +208,9 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		// Apply the staged tiles before continuing.
 		config.Log.WarnContext(ctx, "checkpoint in object storage is older than lock checkpoint",
 			"old_size", c1.N, "size", c.N)
+		if _, err := config.Backend.Fetch(ctx, legacyStagingPath(c.Tree)); err == nil {
+			return nil, fmt.Errorf("legacy staging path exists, terminate Sunlight cleanly before upgrading")
+		}
 		stagedUploads, err := fetchAndDecompress(ctx, config.Backend, stagingPath(c.Tree))
 		if err != nil {
 			return nil, fmt.Errorf("couldn't fetch staged uploads: %w", err)
@@ -987,6 +990,13 @@ func applyStagedUploads(ctx context.Context, config *Config, stagedUploads []byt
 }
 
 func stagingPath(tree tlog.Tree) string {
+	// We don't segment the path like in [sunlight.TilePath], because old
+	// staging bundles are deleted from the local backend (where it would be
+	// important not to make a directory listing too long).
+	return fmt.Sprintf("staging/%d-%s", tree.N, hex.EncodeToString(tree.Hash[:]))
+}
+
+func legacyStagingPath(tree tlog.Tree) string {
 	// Encode size in three digit chunks like [sunlight.TilePath].
 	n := tree.N
 	nStr := fmt.Sprintf("%03d", n%1000)
