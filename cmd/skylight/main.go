@@ -187,7 +187,9 @@ func clientFromContext(ctx context.Context) string {
 
 func newClientContextHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if userAgent := r.UserAgent(); strings.Contains(userAgent, "@") {
+		if userAgent := r.UserAgent(); strings.Contains(userAgent, "changeme@example.com") {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
+		} else if strings.Contains(userAgent, "@") {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-email"))
 		} else if strings.Contains(userAgent, "https://") {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-url"))
