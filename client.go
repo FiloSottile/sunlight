@@ -42,6 +42,10 @@ type ClientConfig struct {
 	// made by the Client. If zero, there is no limit.
 	ConcurrencyLimit int
 
+	// Cache, if set, is a directory where the client will cache verified
+	// non-partial tiles, following the same structure as the URLs.
+	Cache string
+
 	// Logger is the logger used to log errors and progress.
 	// If nil, log lines are discarded.
 	Logger *slog.Logger
@@ -63,6 +67,15 @@ func NewClient(prefix string, config *ClientConfig) (*Client, error) {
 		torchwood.WithTileFetcherLogger(config.Logger))
 	if err != nil {
 		return nil, err
+	}
+	var tileReader torchwood.TileReaderWithContext = fetcher
+	if config.Cache != "" {
+		tileReader, err = torchwood.NewPermanentCache(tileReader, config.Cache,
+			torchwood.WithPermanentCacheLogger(config.Logger),
+			torchwood.WithPermanentCacheTilePath(TilePath))
+		if err != nil {
+			return nil, err
+		}
 	}
 	client, err := torchwood.NewClient(fetcher, torchwood.WithCutEntry(cutEntry),
 		torchwood.WithTimeout(config.Timeout))
