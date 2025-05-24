@@ -52,11 +52,11 @@ var HTTPErrorLog = slog.NewLogLogger(newFilterHandler(
 ), slog.LevelWarn)
 
 func init() {
-	http.HandleFunc("/debug/logs/on", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("POST /debug/logs/on", func(w http.ResponseWriter, r *http.Request) {
 		logLevel.Set(slog.LevelDebug)
 		w.WriteHeader(http.StatusOK)
 	})
-	http.HandleFunc("/debug/logs/off", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("POST /debug/logs/off", func(w http.ResponseWriter, r *http.Request) {
 		logLevel.Set(slog.LevelInfo)
 		w.WriteHeader(http.StatusOK)
 	})
