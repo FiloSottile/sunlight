@@ -182,6 +182,11 @@ type LogConfig struct {
 	// The loaded private Key is required to match it.
 	PublicKey string
 
+	// PublicKeyFile is a path to a file containing a public key formatted in
+	// the same way as PublicKey above. If both config keys are present,
+	// PublicKey takes precedence.
+	PublicKeyFile string
+
 	// Cache is the path to the SQLite deduplication cache file.
 	Cache string
 
@@ -404,7 +409,15 @@ func main() {
 		}
 		wk := ed25519.NewKeyFromSeed(ed25519Secret)
 
-		cfgPubKey, err := base64.StdEncoding.DecodeString(lc.PublicKey)
+		b64PubKey := lc.PublicKey
+		if b64PubKey == "" {
+			pubKeyFile, err := os.ReadFile(lc.PublicKeyFile)
+			if err != nil {
+				fatalError(logger, "failed to read public key file", "err", err)
+			}
+			b64PubKey = string(pubKeyFile)
+		}
+		cfgPubKey, err := base64.StdEncoding.DecodeString(b64PubKey)
 		if err != nil {
 			fatalError(logger, "failed to parse public key base64", "err", err)
 		}

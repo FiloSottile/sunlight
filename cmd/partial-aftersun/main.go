@@ -35,6 +35,9 @@ type LogConfig struct {
 	// PublicKey is the SubjectPublicKeyInfo for this log, base64 encoded.
 	PublicKey string
 
+	// PublicKeyFile is a path to a file containing a pubkey as described above.
+	PublicKeyFile string
+
 	// LocalDirectory is the path to a local directory where the log will store
 	// its data. It must be dedicated to this specific log instance.
 	LocalDirectory string
@@ -223,7 +226,15 @@ func overrideImmutable(root *os.Root, name string) error {
 }
 
 func logSize(root *os.Root, log *LogConfig) (int64, error) {
-	cfgPubKey, err := base64.StdEncoding.DecodeString(log.PublicKey)
+	b64PubKey := log.PublicKey
+	if b64PubKey == "" {
+		pubKeyFile, err := os.ReadFile(log.PublicKeyFile)
+		if err != nil {
+			return 0, fmt.Errorf("failed to read public key file: %w", err)
+		}
+		b64PubKey = string(pubKeyFile)
+	}
+	cfgPubKey, err := base64.StdEncoding.DecodeString(b64PubKey)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse public key base64: %w", err)
 	}
