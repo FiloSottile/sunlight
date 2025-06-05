@@ -142,6 +142,14 @@ type LogConfig struct {
 	// due to misconfiguration, and prevents accidental forks.
 	Inception string
 
+	// Period is the time between sequence operations, as milliseconds.
+	//
+	// If a sequencing is still in progress when the next one is due, the next
+	// one will be skipped.
+	//
+	// Defaults to 1000 milliseconds (1 second).
+	Period int
+
 	// HTTPHost is the host name for the HTTP endpoint of this log instance.
 	HTTPHost string
 
@@ -470,8 +478,12 @@ func main() {
 		}
 		defer l.CloseCache()
 
+		period := 1 * time.Second
+		if lc.Period > 0 {
+			period = time.Duration(lc.Period) * time.Millisecond
+		}
 		sequencerGroup.Go(func() error {
-			return l.RunSequencer(sequencerContext, 1*time.Second)
+			return l.RunSequencer(sequencerContext, period)
 		})
 
 		mux.Handle(lc.HTTPHost+lc.HTTPPrefix+"/", http.StripPrefix(lc.HTTPPrefix, l.Handler()))
