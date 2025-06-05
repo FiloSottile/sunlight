@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -32,10 +34,14 @@ type LogConfig struct {
 	// ShortName is the short name for the log, used as a metrics and logs label.
 	ShortName string
 
-	// PublicKey is the SubjectPublicKeyInfo for this log, base64 encoded.
+	// PublicKey is the SubjectPublicKeyInfo for this log, base64 encoded. If
+	// both PublicKey and PublicKeyFile are provided, the PublicKeyFile config
+	// value takes precedence.
 	PublicKey string
 
-	// PublicKeyFile is a path to a file containing a pubkey as described above.
+	// PublicKeyFile is a path to a file containing the PEM-encoded Public Key
+	// for this log. If both PublicKey and PublicKeyFile are provided, this
+	// config value takes precedence.
 	PublicKeyFile string
 
 	// LocalDirectory is the path to a local directory where the log will store
@@ -226,19 +232,25 @@ func overrideImmutable(root *os.Root, name string) error {
 }
 
 func logSize(root *os.Root, log *LogConfig) (int64, error) {
-	b64PubKey := log.PublicKey
-	if b64PubKey == "" {
+	var pubKeyDER []byte
+	if log.PublicKeyFile != "" {
 		pubKeyFile, err := os.ReadFile(log.PublicKeyFile)
 		if err != nil {
 			return 0, fmt.Errorf("failed to read public key file: %w", err)
 		}
-		b64PubKey = string(pubKeyFile)
+		pubKeyPEM, _ := pem.Decode(pubKeyFile)
+		if pubKeyPEM == nil {
+			return 0, errors.New("failed to decode public key PEM")
+		}
+		pubKeyDER = pubKeyPEM.Bytes
+	} else {
+		cfgPubKey, err := base64.StdEncoding.DecodeString(b64PubKey)
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse public key base64: %w", err)
+		}
+		pubKeyDER = cfgPubKey
 	}
-	cfgPubKey, err := base64.StdEncoding.DecodeString(b64PubKey)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse public key base64: %w", err)
-	}
-	pubKey, err := x509.ParsePKIXPublicKey(cfgPubKey)
+	pubKey, err := x509.ParsePKIXPublicKey(pubKeyDER)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse public key: %w", err)
 	}
