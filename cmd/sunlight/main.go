@@ -189,7 +189,7 @@ type LogConfig struct {
 	//
 	// To generate this from a seed, run:
 	//
-	//   $ sunlight-keygen --pem log.example/logA seed.bin
+	//   $ sunlight-keygen -pem log.example/logA seed.bin
 	//
 	// The loaded private key is required to match it.
 	PublicKeyFile string
