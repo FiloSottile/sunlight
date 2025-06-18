@@ -171,21 +171,8 @@ type LogConfig struct {
 	//
 	Seed string
 
-	// PublicKey is the SubjectPublicKeyInfo for this log, base64 encoded; this
-	// is the same format as used in Google and Apple's log list JSON files. If
-	// both PublicKey and PublicKeyFile are provided, the PublicKeyFile config
-	// value takes precedence.
-	//
-	// To generate this from a seed, run:
-	//
-	//   $ sunlight-keygen log.example/logA seed.bin
-	//
-	// The loaded private Key is required to match it.
-	PublicKey string
-
 	// PublicKeyFile is a path to a file containing the PEM-encoded Public Key
-	// for this log. If both PublicKey and PublicKeyFile are provided, this
-	// config value takes precedence.
+	// for this log.
 	//
 	// To generate this from a seed, run:
 	//
@@ -416,25 +403,15 @@ func main() {
 		}
 		wk := ed25519.NewKeyFromSeed(ed25519Secret)
 
-		var pubKeyDER []byte
-		if lc.PublicKeyFile == "" {
-			pubKeyFile, err := os.ReadFile(lc.PublicKeyFile)
-			if err != nil {
-				fatalError(logger, "failed to read public key file", "err", err)
-			}
-			pubKeyPEM, _ := pem.Decode(pubKeyFile)
-			if pubKeyPEM == nil {
-				fatalError(logger, "failed to decode public key PEM", "err", err)
-			}
-			pubKeyDER = pubKeyPEM.Bytes
-		} else {
-			cfgPubKey, err := base64.StdEncoding.DecodeString(b64PubKey)
-			if err != nil {
-				fatalError(logger, "failed to parse public key base64", "err", err)
-			}
-			pubKeyDER = cfgPubKey
+		pubKeyPEM, err := os.ReadFile(lc.PublicKeyFile)
+		if err != nil {
+			fatalError(logger, "failed to read public key file", "err", err)
 		}
-		parsedPubKey, err := x509.ParsePKIXPublicKey(pubKeyDER)
+		pubKeyDER, _ := pem.Decode(pubKeyPEM)
+		if pubKeyDER == nil {
+			fatalError(logger, "failed to decode public key PEM", "err", err)
+		}
+		parsedPubKey, err := x509.ParsePKIXPublicKey(pubKeyDER.Bytes)
 		if err != nil {
 			fatalError(logger, "failed to parse public key", "err", err)
 		}
