@@ -20,7 +20,6 @@ import (
 
 func main() {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
-	pemOut := fs.Bool("pem", false, "output keys in PEM format")
 	fs.Parse(os.Args[1:])
 
 	if fs.NArg() != 2 {
@@ -48,10 +47,7 @@ func main() {
 
 	logID := sha256.Sum256(spki)
 
-	ecPubKey := base64.StdEncoding.EncodeToString(spki)
-	if *pemOut {
-		ecPubKey = "\n" + string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki}))
-	}
+	ecPubKey := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki}))
 
 	ed25519Secret := make([]byte, ed25519.SeedSize)
 	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight"), []byte("Ed25519 log key")), ed25519Secret); err != nil {
@@ -59,10 +55,7 @@ func main() {
 	}
 	wk := ed25519.NewKeyFromSeed(ed25519Secret).Public().(ed25519.PublicKey)
 
-	edPubKey := base64.StdEncoding.EncodeToString(wk)
-	if *pemOut {
-		edPubKey = "\n" + string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: wk}))
-	}
+	edPubKey := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: wk}))
 
 	v, err := note.NewEd25519VerifierKey(fs.Arg(0), wk)
 	if err != nil {
@@ -70,7 +63,7 @@ func main() {
 	}
 
 	fmt.Printf("Log ID: %s\n", base64.StdEncoding.EncodeToString(logID[:]))
-	fmt.Printf("ECDSA public key: %s\n", ecPubKey)
-	fmt.Printf("Ed25519 public key: %s\n", edPubKey)
+	fmt.Printf("ECDSA public key:\n%s\n", ecPubKey)
+	fmt.Printf("Ed25519 public key:\n%s\n", edPubKey)
 	fmt.Printf("Witness verifier key: %s\n", v)
 }
