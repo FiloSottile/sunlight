@@ -7,8 +7,7 @@
 // certificate will be loaded from skylight.pem and skylight-key.pem.
 //
 // Requests from clients that don't specify an email address in their
-// User-Agent, and requests for partial data tiles will each be globally
-// rate-limited to 75 requests per second.
+// User-Agent will be globally rate-limited to 75 requests per second.
 //
 // Metrics are exposed publicly at /metrics, and logs are written to stderr in
 // human-readable format, and to stdout in JSON format. /health reports the
@@ -140,27 +139,12 @@ const rateLimitBurst = 10
 // email address in their User-Agent.
 var anonymousClientLimit TAT
 
-// partialDataTileLimit is the rate-limit for partial data tiles, which should
-// be avoidable by just waiting for the tile to fill up.
-var partialDataTileLimit TAT
-
 func newRateLimitHandler(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if clientFromContext(r.Context()) == "anonymous" {
 			msg := "Please add an email address to your User-Agent."
 			r.Header.Add("Skylight-Rate-Limited", msg)
 			allow, retryAfter := anonymousClientLimit.Allow(rateLimitInterval, rateLimitBurst)
-			if !allow {
-				w.Header().Set("Retry-After", retryAfter.Format(time.RFC1123))
-				http.Error(w, msg, http.StatusTooManyRequests)
-				return
-			}
-		}
-		if kindFromContext(r.Context()) == "partial" {
-			msg := "Please avoid partial data tile fetches."
-			msg += " " + "See https://c2sp.org/static-ct-api#partial-tiles."
-			r.Header.Add("Skylight-Rate-Limited", msg)
-			allow, retryAfter := partialDataTileLimit.Allow(rateLimitInterval, rateLimitBurst)
 			if !allow {
 				w.Header().Set("Retry-After", retryAfter.Format(time.RFC1123))
 				http.Error(w, msg, http.StatusTooManyRequests)
