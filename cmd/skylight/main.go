@@ -347,21 +347,6 @@ func main() {
 			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "log.v3.json"))
 			handler.ServeHTTP(w, r)
 		})
-		mux.HandleFunc(patternPrefix+"/torrent/{torrent}", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			if r.PathValue("torrent") == "feed.xml" {
-				w.Header().Set("Content-Type", "application/rss+xml")
-				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "feed"))
-			} else if strings.HasSuffix(r.PathValue("torrent"), ".torrent") {
-				w.Header().Set("Content-Type", "application/x-bittorrent")
-				w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
-				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "torrent"))
-			} else {
-				httpError(w, r, "torrent", "invalid torrent path", http.StatusBadRequest)
-				return
-			}
-			handler.ServeHTTP(w, r)
-		})
 		mux.HandleFunc(patternPrefix+"/issuer/{issuer}", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Content-Type", "application/pkix-cert")
