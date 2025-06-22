@@ -177,6 +177,8 @@ func newClientContextHandler(next http.Handler) http.Handler {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-email"))
 		} else if strings.Contains(userAgent, "https://") {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-url"))
+		} else if strings.Contains(userAgent, "github.com/") {
+			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-github"))
 		} else {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
 		}
