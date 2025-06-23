@@ -244,7 +244,7 @@ func logSize(root *os.Root, log *LogConfig) (int64, error) {
 		}
 		pubKeyDER = pubKeyPEM.Bytes
 	} else {
-		cfgPubKey, err := base64.StdEncoding.DecodeString(b64PubKey)
+		cfgPubKey, err := base64.StdEncoding.DecodeString(log.PublicKey)
 		if err != nil {
 			return 0, fmt.Errorf("failed to parse public key base64: %w", err)
 		}

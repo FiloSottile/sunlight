@@ -417,7 +417,7 @@ func main() {
 		wk := ed25519.NewKeyFromSeed(ed25519Secret)
 
 		var pubKeyDER []byte
-		if lc.PublicKeyFile == "" {
+		if lc.PublicKeyFile != "" {
 			pubKeyFile, err := os.ReadFile(lc.PublicKeyFile)
 			if err != nil {
 				fatalError(logger, "failed to read public key file", "err", err)
@@ -428,7 +428,7 @@ func main() {
 			}
 			pubKeyDER = pubKeyPEM.Bytes
 		} else {
-			cfgPubKey, err := base64.StdEncoding.DecodeString(b64PubKey)
+			cfgPubKey, err := base64.StdEncoding.DecodeString(lc.PublicKey)
 			if err != nil {
 				fatalError(logger, "failed to parse public key base64", "err", err)
 			}
