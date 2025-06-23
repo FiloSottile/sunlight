@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -17,11 +19,14 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 3 {
-		log.Fatal("usage: sunlight-keygen <name> <seed file>")
+	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
+	fs.Parse(os.Args[1:])
+
+	if fs.NArg() != 2 {
+		log.Fatal("usage: sunlight-keygen [-pem] <name> <seed file>")
 	}
 
-	seed, err := os.ReadFile(os.Args[2])
+	seed, err := os.ReadFile(fs.Arg(1))
 	if err != nil {
 		log.Fatal("failed to load seed:", err)
 	}
@@ -42,7 +47,7 @@ func main() {
 
 	logID := sha256.Sum256(spki)
 
-	publicKey := base64.StdEncoding.EncodeToString(spki)
+	ecPubKey := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki}))
 
 	ed25519Secret := make([]byte, ed25519.SeedSize)
 	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight"), []byte("Ed25519 log key")), ed25519Secret); err != nil {
@@ -50,13 +55,15 @@ func main() {
 	}
 	wk := ed25519.NewKeyFromSeed(ed25519Secret).Public().(ed25519.PublicKey)
 
-	v, err := note.NewEd25519VerifierKey(os.Args[1], wk)
+	edPubKey := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: wk}))
+
+	v, err := note.NewEd25519VerifierKey(fs.Arg(0), wk)
 	if err != nil {
 		log.Fatal("failed to create verifier key:", err)
 	}
 
 	fmt.Printf("Log ID: %s\n", base64.StdEncoding.EncodeToString(logID[:]))
-	fmt.Printf("ECDSA public key: %s\n", publicKey)
-	fmt.Printf("Ed25519 public key: %s\n", base64.StdEncoding.EncodeToString(wk))
+	fmt.Printf("ECDSA public key:\n%s\n", ecPubKey)
+	fmt.Printf("Ed25519 public key:\n%s\n", edPubKey)
 	fmt.Printf("Witness verifier key: %s\n", v)
 }
