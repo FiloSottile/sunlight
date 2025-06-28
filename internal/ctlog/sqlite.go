@@ -77,7 +77,7 @@ func (b *SQLiteBackend) Fetch(ctx context.Context, logID [sha256.Size]byte) (Loc
 		return nil, err
 	}
 	if body == nil {
-		return nil, errors.New("checkpoint not found")
+		return nil, ErrLogNotFound
 	}
 	return &sqliteCheckpoint{logID: logID, body: body}, nil
 }

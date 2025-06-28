@@ -44,6 +44,7 @@ import (
 	"filippo.io/sunlight/internal/keylog"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/stdlog"
+	"filippo.io/sunlight/internal/witness"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -121,6 +122,38 @@ type Config struct {
 
 		// Endpoint is the base URL the AWS SDK will use to connect to DynamoDB. Optional.
 		Endpoint string
+	}
+
+	// Witness is the configuration for the optional witness server, which uses
+	// the compare-and-swap backend.
+	Witness struct {
+		// Name is the cosigner name.
+		Name string
+
+		// SubmissionPrefix is the full URL of the c2sp.org/tlog-witness submission
+		// prefix of the witness, without trailing slash.
+		SubmissionPrefix string
+
+		// Seed is the path to a file containing a secret seed from which the
+		// witness's private key is derived. The whole file is used as HKDF
+		// input and mixed with the Name. It must be at least 32 bytes long.
+		//
+		// To generate a new seed, run:
+		//
+		//   $ head -c 32 /dev/urandom > seed.bin
+		//
+		Seed string
+
+		// HTTPHost is the host name for the HTTP endpoint of the witness server.
+		HTTPHost string
+
+		// HTTPPrefix is the prefix for the HTTP endpoint of the witness server,
+		// without trailing slash, but with a leading slash if not empty.
+		HTTPPrefix string
+
+		// KnownLogs is a list of known logs that the witness will accept and
+		// cosign checkpoints for, along with their vkeys.
+		KnownLogs []witness.LogConfig
 	}
 
 	Logs []LogConfig
@@ -362,10 +395,18 @@ func main() {
 
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 
-	var logList []logInfo
+	var homeData struct {
+		Logs    []logInfo
+		Witness struct {
+			Name             string
+			SubmissionPrefix string
+			VerifierKey      string
+			Logs             []string
+		}
+	}
 	serveHome := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		if err := homeTmpl.Execute(w, logList); err != nil {
+		if err := homeTmpl.Execute(w, homeData); err != nil {
 			logger.Error("failed to execute homepage template", "err", err)
 		}
 	}
@@ -537,7 +578,7 @@ func main() {
 		}
 		log.Interval.NotAfterStart = lc.NotAfterStart
 		log.Interval.NotAfterLimit = lc.NotAfterLimit
-		logList = append(logList, log)
+		homeData.Logs = append(homeData.Logs, log)
 
 		j, err := json.MarshalIndent(log, "", "    ")
 		if err != nil {
@@ -554,6 +595,55 @@ func main() {
 
 		if lc.HTTPHost != "" {
 			mux.HandleFunc(lc.HTTPHost+"/{$}", serveHome)
+		}
+	}
+
+	if c.Witness.Name != "" {
+		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
+			slog.String("witness", c.Witness.Name),
+		}))
+
+		seed, err := os.ReadFile(c.Witness.Seed)
+		if err != nil {
+			fatalError(logger, "failed to load witness seed", "err", err)
+		}
+		if len(seed) < 32 {
+			fatalError(logger, "witness seed file too short, must be at least 32 bytes")
+		}
+
+		ed25519Secret := make([]byte, ed25519.SeedSize)
+		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight Ed25519 witness key"),
+			[]byte(c.Witness.Name)), ed25519Secret); err != nil {
+			fatalError(logger, "failed to derive Ed25519 key", "err", err)
+		}
+		wk := ed25519.NewKeyFromSeed(ed25519Secret)
+
+		w, err := witness.NewWitness(ctx, &witness.Config{
+			Name:    c.Witness.Name,
+			Key:     wk,
+			Backend: db,
+			Log:     logger,
+			Logs:    c.Witness.KnownLogs,
+		})
+		if err != nil {
+			fatalError(logger, "failed to create witness", "err", err)
+		}
+
+		mux.Handle(c.Witness.HTTPHost+c.Witness.HTTPPrefix+"/",
+			http.StripPrefix(c.Witness.HTTPPrefix, w.Handler()))
+
+		witnessMetrics := prometheus.WrapRegistererWithPrefix("witness_", sunlightMetrics)
+		witnessMetrics.MustRegister(w.Metrics()...)
+
+		homeData.Witness.Name = c.Witness.Name
+		homeData.Witness.SubmissionPrefix = c.Witness.SubmissionPrefix
+		homeData.Witness.VerifierKey = w.VerifierKey()
+		for _, log := range c.Witness.KnownLogs {
+			homeData.Witness.Logs = append(homeData.Witness.Logs, log.Origin)
+		}
+
+		if c.Witness.HTTPHost != "" {
+			mux.HandleFunc(c.Witness.HTTPHost+"/{$}", serveHome)
 		}
 	}
 

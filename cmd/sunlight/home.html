@@ -47,12 +47,38 @@
     </p>
 
     <p>
-      This is a <a href="https://sunlight.dev">Sunlight</a> Certificate Transparency log instance.
+      This is a <a href="https://sunlight.dev">Sunlight</a> Certificate Transparency log instance
+      {{- if .Witness.Name }} and a <a href="https://c2sp.org/tlog-witness@v0.1.0">witness</a>{{ end }}.
     
     <p>
-      <a href="metrics">Metrics</a> are available. The following logs are active.
+      <a href="metrics">Metrics</a> are available.
     
-    {{ range . }}
+    {{ if .Witness.Name }}
+    <hr>
+
+    <p>
+      The following witness is active.
+
+    <h2>{{ .Witness.Name }}</h2>
+
+    <p>
+      Submission prefix: <code>{{ .Witness.SubmissionPrefix }}</code><br>
+      Known logs:
+      <ul>
+        {{ range .Witness.Logs }}
+        <li><code>{{ . }}</code></li>
+        {{ end }}
+      </ul>
+
+    <pre><code>{{ .Witness.VerifierKey }}</code></pre>
+    {{ end }}
+
+    <hr>
+
+    <p>
+      The following logs are active.
+
+    {{ range .Logs }}
 
     <h2>{{ .Name }}</h2>
 
@@ -68,12 +94,12 @@
         <a href="{{ .SubmissionPrefix }}log.v3.json">json</a><br>
       Ratelimit: {{ .PoolSize }} req/s
     
-    <code><pre>{{ .PublicKeyPEM }}</pre></code>
+    <pre><code>{{ .PublicKeyPEM }}</code></pre>
     
     <h3>Submit a certificate chain (PEM or JSON)</h3>
       
     <input type="file" class="chain" data-prefix="{{ .SubmissionPrefix }}">
-    <code><pre class="response"></pre></code>
+    <pre><code class="response"></code></pre>
 
     {{ end }}
 

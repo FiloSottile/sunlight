@@ -417,7 +417,7 @@ type LockBackend interface {
 	// Fetch obtains the current checkpoint for a given log, as well as the data
 	// necessary to perform a compare-and-swap operation.
 	//
-	// It must return ErrLogNotFound if the log doesn't exist.
+	// It must return [ErrLogNotFound] if the log doesn't exist.
 	Fetch(ctx context.Context, logID [sha256.Size]byte) (LockedCheckpoint, error)
 
 	// Replace uploads a new checkpoint, atomically checking that the old
