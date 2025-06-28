@@ -721,6 +721,7 @@ func fetchCheckpoint(ctx context.Context, logger *slog.Logger, prefix string) []
 	if err != nil {
 		fatalError(logger, "failed to create request", "err", err)
 	}
+	req.Header.Set("User-Agent", "+https://filippo.io/sunlight")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fatalError(logger, "failed to fetch checkpoint from MonitoringPrefix", "err", err)
