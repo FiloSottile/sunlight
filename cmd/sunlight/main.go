@@ -79,8 +79,8 @@ type Config struct {
 		Directory string
 	}
 
-	// Checkpoints, ETagS3, or DynamoDB store the latest checkpoint for each
-	// log, with compare-and-swap semantics.
+	// Checkpoints, ETagS3, or DynamoDB configure the global lock backend, which
+	// stores the latest checkpoint for each log, with compare-and-swap semantics.
 	//
 	// Note that these are global as an extra safety measure: entries are keyed
 	// by log ID (the hash of the public key), so even in case of
