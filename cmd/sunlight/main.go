@@ -235,7 +235,8 @@ type LogConfig struct {
 	// The loaded private key is required to match it.
 	PublicKeyFile string
 
-	// Cache is the path to the SQLite deduplication cache file.
+	// Cache is the path to the SQLite deduplication cache file. It will be
+	// created if it doesn't already exist.
 	Cache string
 
 	// PoolSize is the maximum number of chains pending in the sequencing pool.
@@ -261,7 +262,8 @@ type LogConfig struct {
 	S3KeyPrefix string
 
 	// LocalDirectory is the path to a local directory where the log will store
-	// its data. It must be dedicated to this specific log instance.
+	// its data. It must be dedicated to this specific log instance. The directory
+	// must already exist.
 	//
 	// Only one of S3Bucket or LocalDirectory can be set at the same time.
 	LocalDirectory string
