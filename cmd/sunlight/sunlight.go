@@ -138,15 +138,15 @@ type Config struct {
 		// server will serve the witness at this URL.
 		SubmissionPrefix string
 
-		// Seed is the path to a file containing a secret seed from which the
-		// witness's private key is derived. The whole file is used as HKDF
-		// input and mixed with the Name. It must be at least 32 bytes long.
+		// Secret is the path to a file containing a secret seed from which the
+		// witness's private key is derived. The file contents are used as HKDF
+		// input and mixed with the Name. It must be exactly 32 bytes long.
 		//
 		// To generate a new seed, run:
 		//
 		//   $ head -c 32 /dev/urandom > seed.bin
 		//
-		Seed string
+		Secret string
 
 		// KnownLogs is a list of known logs that the witness will accept and
 		// cosign checkpoints for, along with their vkeys.
@@ -207,14 +207,19 @@ type LogConfig struct {
 	// Roots is the path to the accepted roots as a PEM file.
 	Roots string
 
-	// Seed is the path to a file containing a secret seed from which the log's
-	// private keys are derived. The whole file is used as HKDF input. It must
-	// be at least 32 bytes long.
+	// Secret is the path to a file containing a secret seed from which the
+	// log's private keys are derived. The file contents are used as HKDF input.
+	// It must be exactly 32 bytes long.
 	//
 	// To generate a new seed, run:
 	//
 	//   $ head -c 32 /dev/urandom > seed.bin
 	//
+	Secret string
+
+	// Seed is a legacy name for the Secret field.
+	//
+	// Deprecated: use Secret instead.
 	Seed string
 
 	// Cache is the path to the SQLite deduplication cache file. It will be
@@ -427,12 +432,16 @@ func main() {
 			fatalError(logger, "failed to load roots", "err", err)
 		}
 
-		seed, err := os.ReadFile(lc.Seed)
+		if lc.Secret == "" && lc.Seed != "" {
+			logger.Warn("using deprecated Seed field, use Secret instead")
+			lc.Secret = lc.Seed
+		}
+		seed, err := os.ReadFile(lc.Secret)
 		if err != nil {
 			fatalError(logger, "failed to load seed", "err", err)
 		}
-		if len(seed) < 32 {
-			fatalError(logger, "seed file too short, must be at least 32 bytes")
+		if len(seed) != 32 {
+			fatalError(logger, "seed file must be exactly 32 bytes")
 		}
 
 		ecdsaSecret := make([]byte, 32)
@@ -579,12 +588,12 @@ func main() {
 			slog.String("witness", c.Witness.Name),
 		}))
 
-		seed, err := os.ReadFile(c.Witness.Seed)
+		seed, err := os.ReadFile(c.Witness.Secret)
 		if err != nil {
 			fatalError(logger, "failed to load witness seed", "err", err)
 		}
-		if len(seed) < 32 {
-			fatalError(logger, "witness seed file too short, must be at least 32 bytes")
+		if len(seed) != 32 {
+			fatalError(logger, "witness seed file must be exactly 32 bytes")
 		}
 
 		ed25519Secret := make([]byte, ed25519.SeedSize)
