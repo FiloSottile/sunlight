@@ -33,9 +33,9 @@ func NewLocalBackend(ctx context.Context, dir string, l *slog.Logger) (*LocalBac
 		},
 		[]string{"method"},
 	)
-	if fi, err := os.Stat(dir); err != nil {
+	if fi, err := os.Stat(dir); err != nil && !os.IsNotExist(err) {
 		return nil, fmtErrorf("failed to stat local backend directory %q: %w", dir, err)
-	} else if !fi.IsDir() {
+	} else if err == nil && !fi.IsDir() {
 		return nil, fmtErrorf("local backend path %q is not a directory", dir)
 	}
 	return &LocalBackend{

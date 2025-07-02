@@ -237,6 +237,8 @@ type LogConfig struct {
 
 	// S3Bucket is the name of the S3 bucket. This bucket must be dedicated to
 	// this specific log instance.
+	//
+	// Only one of S3Bucket or LocalDirectory can be set at the same time.
 	S3Bucket string
 
 	// S3Endpoint is the base URL the AWS SDK will use to connect to S3. Optional.
@@ -249,8 +251,8 @@ type LogConfig struct {
 	S3KeyPrefix string
 
 	// LocalDirectory is the path to a local directory where the log will store
-	// its data. It must be dedicated to this specific log instance. The directory
-	// must already exist.
+	// its data. It must be dedicated to this specific log instance. It will
+	// be created if it doesn't already exist.
 	//
 	// Only one of S3Bucket or LocalDirectory can be set at the same time.
 	LocalDirectory string
