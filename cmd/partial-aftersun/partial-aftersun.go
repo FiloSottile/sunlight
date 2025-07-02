@@ -5,9 +5,7 @@ package main
 import (
 	"context"
 	"crypto/x509"
-	"encoding/base64"
-	"encoding/pem"
-	"errors"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -17,7 +15,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/immutable"
@@ -28,21 +25,8 @@ import (
 )
 
 type LogConfig struct {
-	// Name is the fully qualified log name for the checkpoint origin line.
-	Name string
-
 	// ShortName is the short name for the log, used as a metrics and logs label.
 	ShortName string
-
-	// PublicKey is the SubjectPublicKeyInfo for this log, base64 encoded. If
-	// both PublicKey and PublicKeyFile are provided, the PublicKeyFile config
-	// value takes precedence.
-	PublicKey string
-
-	// PublicKeyFile is a path to a file containing the PEM-encoded Public Key
-	// for this log. If both PublicKey and PublicKeyFile are provided, this
-	// config value takes precedence.
-	PublicKeyFile string
 
 	// LocalDirectory is the path to a local directory where the log will store
 	// its data. It must be dedicated to this specific log instance.
@@ -87,7 +71,7 @@ func main() {
 			fatalError(logger, "failed to open local directory", "err", err)
 		}
 
-		size, err := logSize(root, &lc)
+		size, err := logSize(root)
 		if err != nil {
 			fatalError(logger, "failed to get log size", "err", err)
 		}
@@ -231,26 +215,21 @@ func overrideImmutable(root *os.Root, name string) error {
 	return f.Close()
 }
 
-func logSize(root *os.Root, log *LogConfig) (int64, error) {
-	var pubKeyDER []byte
-	if log.PublicKeyFile != "" {
-		pubKeyFile, err := os.ReadFile(log.PublicKeyFile)
-		if err != nil {
-			return 0, fmt.Errorf("failed to read public key file: %w", err)
-		}
-		pubKeyPEM, _ := pem.Decode(pubKeyFile)
-		if pubKeyPEM == nil {
-			return 0, errors.New("failed to decode public key PEM")
-		}
-		pubKeyDER = pubKeyPEM.Bytes
-	} else {
-		cfgPubKey, err := base64.StdEncoding.DecodeString(log.PublicKey)
-		if err != nil {
-			return 0, fmt.Errorf("failed to parse public key base64: %w", err)
-		}
-		pubKeyDER = cfgPubKey
+type logInfo struct {
+	Name         string `json:"description"`
+	PublicKeyDER []byte `json:"key"`
+}
+
+func logSize(root *os.Root) (int64, error) {
+	logJSON, err := fs.ReadFile(root.FS(), "log.v3.json")
+	if err != nil {
+		return 0, fmt.Errorf("failed to read log.v3.json: %w", err)
 	}
-	pubKey, err := x509.ParsePKIXPublicKey(pubKeyDER)
+	var log logInfo
+	if err := json.Unmarshal(logJSON, &log); err != nil {
+		return 0, fmt.Errorf("failed to parse log.v3.json: %w", err)
+	}
+	pubKey, err := x509.ParsePKIXPublicKey(log.PublicKeyDER)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse public key: %w", err)
 	}
@@ -271,14 +250,7 @@ func logSize(root *os.Root, log *LogConfig) (int64, error) {
 		return 0, fmt.Errorf("failed to parse checkpoint: %w", err)
 	}
 	if checkpoint.Origin != log.Name {
-		return 0, fmt.Errorf("origin mismatch: %s != %s", checkpoint.Origin, log.Name)
-	}
-	t, err := sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse signature timestamp: %w", err)
-	}
-	if ct := time.UnixMilli(t); time.Since(ct) > 5*time.Second {
-		return 0, fmt.Errorf("checkpoint is too old: %v", ct)
+		return 0, fmt.Errorf("origin mismatch: %q != %q", checkpoint.Origin, log.Name)
 	}
 	return checkpoint.N, nil
 }

@@ -212,29 +212,6 @@ type LogConfig struct {
 	//
 	Seed string
 
-	// PublicKey is the SubjectPublicKeyInfo for this log, base64 encoded; this
-	// is the same format as used in Google and Apple's log list JSON files. If
-	// both PublicKey and PublicKeyFile are provided, the PublicKeyFile config
-	// value takes precedence.
-	//
-	// To generate this from a seed, run:
-	//
-	//   $ sunlight-keygen log.example/logA seed.bin
-	//
-	// The loaded private Key is required to match it.
-	PublicKey string
-
-	// PublicKeyFile is a path to a file containing the PEM-encoded Public Key
-	// for this log. If both PublicKey and PublicKeyFile are provided, this
-	// config value takes precedence.
-	//
-	// To generate this from a seed, run:
-	//
-	//   $ sunlight-keygen log.example/logA seed.bin
-	//
-	// The loaded private key is required to match it.
-	PublicKeyFile string
-
 	// Cache is the path to the SQLite deduplication cache file. It will be
 	// created if it doesn't already exist.
 	Cache string
@@ -466,37 +443,6 @@ func main() {
 			fatalError(logger, "failed to derive Ed25519 key", "err", err)
 		}
 		wk := ed25519.NewKeyFromSeed(ed25519Secret)
-
-		var pubKeyDER []byte
-		if lc.PublicKeyFile != "" {
-			pubKeyFile, err := os.ReadFile(lc.PublicKeyFile)
-			if err != nil {
-				fatalError(logger, "failed to read public key file", "err", err)
-			}
-			pubKeyPEM, _ := pem.Decode(pubKeyFile)
-			if pubKeyPEM == nil {
-				fatalError(logger, "failed to decode public key PEM", "err", err)
-			}
-			pubKeyDER = pubKeyPEM.Bytes
-		} else {
-			cfgPubKey, err := base64.StdEncoding.DecodeString(lc.PublicKey)
-			if err != nil {
-				fatalError(logger, "failed to parse public key base64", "err", err)
-			}
-			pubKeyDER = cfgPubKey
-		}
-		parsedPubKey, err := x509.ParsePKIXPublicKey(pubKeyDER)
-		if err != nil {
-			fatalError(logger, "failed to parse public key", "err", err)
-		}
-		if !k.PublicKey.Equal(parsedPubKey) {
-			spki, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
-			if err != nil {
-				fatalError(logger, "failed to marshal public key from private key for display", "err", err)
-			}
-			publicFromPrivate := base64.StdEncoding.EncodeToString(spki)
-			fatalError(logger, "configured private and public keys do not match", "configured", lc.PublicKey, "publicFromPrivate", publicFromPrivate)
-		}
 
 		// Compare the checkpoint from the Backend with the one accessible over
 		// the MonitoringPrefix, to catch misconfigurations. We ignore failures
