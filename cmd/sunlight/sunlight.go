@@ -64,13 +64,14 @@ type Config struct {
 	// Listen are the addresses to listen on, e.g. ":443".
 	Listen []string
 
-	// ACME is the configuration for the ACME client. Optional. If missing,
-	// Sunlight will listen for plain HTTP or h2c.
+	// ACME configures how Sunlight automatically obtains certificates for its HTTPS
+	// endpoints. Optional. If missing, Sunlight will listen for plain HTTP or h2c.
 	ACME struct {
-		// Cache is the path to the autocert cache directory.
+		// Cache is the path to the directory where keys and certificates will
+		// be stored. It will be created if it doesn't already exist.
 		Cache string
 
-		// Hosts are extra names for which autocert will obtain a certificate,
+		// Hosts are extra names for which Sunlight will obtain a certificate,
 		// beyond those configured as part of the SubmissionPrefix of logs and
 		// witness. Optional.
 		Hosts []string
@@ -134,8 +135,8 @@ type Config struct {
 		// SubmissionPrefix is the full URL of the c2sp.org/tlog-witness
 		// submission prefix of the witness.
 		//
-		// autocert will be configured with the host of this URL, and the HTTP
-		// server will serve the witness at this URL.
+		// The HTTP server will serve the witness at this URL, and if ACME is
+		// enabled, Sunlight will obtain a certificate for the host of this URL.
 		SubmissionPrefix string
 
 		// Secret is the path to a file containing a secret seed from which the
@@ -160,7 +161,7 @@ type LogConfig struct {
 	// Name is the fully qualified log name for the checkpoint origin line, as a
 	// schema-less URL.
 	//
-	// Deprectaed: this should be omitted and must match SubmissionPrefix.
+	// Deprecated: this should be omitted and must match SubmissionPrefix.
 	Name string
 
 	// ShortName is the short name for the log, used as a metrics and logs label.
@@ -196,8 +197,8 @@ type LogConfig struct {
 	// SubmissionPrefix is the full URL of the c2sp.org/static-ct-api submission
 	// prefix of the log.
 	//
-	// autocert will be configured with the host of this URL, and the HTTP
-	// server will serve the log at this URL.
+	// The HTTP server will serve the log at this URL, and if ACME is enabled,
+	// Sunlight will obtain a certificate for the host of this URL.
 	SubmissionPrefix string
 
 	// MonitoringPrefix is the full URL of the c2sp.org/static-ct-api monitoring
