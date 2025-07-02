@@ -33,8 +33,10 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"text/template"
 	"time"
 
@@ -65,14 +67,13 @@ type Config struct {
 	// ACME is the configuration for the ACME client. Optional. If missing,
 	// Sunlight will listen for plain HTTP or h2c.
 	ACME struct {
-		// Email is the email address to use for ACME account registration.
-		Email string
-
-		// Hosts are the names for which autocert will obtain a certificate.
-		Hosts []string
-
 		// Cache is the path to the autocert cache directory.
 		Cache string
+
+		// Hosts are extra names for which autocert will obtain a certificate,
+		// beyond those configured as part of the SubmissionPrefix of logs and
+		// witness. Optional.
+		Hosts []string
 
 		// Directory is an ACME directory URL to request a certificate from.
 		// Defaults to Let's Encrypt Production. Optional.
@@ -130,8 +131,11 @@ type Config struct {
 		// Name is the cosigner name.
 		Name string
 
-		// SubmissionPrefix is the full URL of the c2sp.org/tlog-witness submission
-		// prefix of the witness, without trailing slash.
+		// SubmissionPrefix is the full URL of the c2sp.org/tlog-witness
+		// submission prefix of the witness.
+		//
+		// autocert will be configured with the host of this URL, and the HTTP
+		// server will serve the witness at this URL.
 		SubmissionPrefix string
 
 		// Seed is the path to a file containing a secret seed from which the
@@ -144,13 +148,6 @@ type Config struct {
 		//
 		Seed string
 
-		// HTTPHost is the host name for the HTTP endpoint of the witness server.
-		HTTPHost string
-
-		// HTTPPrefix is the prefix for the HTTP endpoint of the witness server,
-		// without trailing slash, but with a leading slash if not empty.
-		HTTPPrefix string
-
 		// KnownLogs is a list of known logs that the witness will accept and
 		// cosign checkpoints for, along with their vkeys.
 		KnownLogs []witness.LogConfig
@@ -161,8 +158,9 @@ type Config struct {
 
 type LogConfig struct {
 	// Name is the fully qualified log name for the checkpoint origin line, as a
-	// schema-less URL. It doesn't need to be where the log is actually hosted,
-	// but that's advisable.
+	// schema-less URL.
+	//
+	// Deprectaed: this should be omitted and must match SubmissionPrefix.
 	Name string
 
 	// ShortName is the short name for the log, used as a metrics and logs label.
@@ -184,19 +182,26 @@ type LogConfig struct {
 	Period int
 
 	// HTTPHost is the host name for the HTTP endpoint of this log instance.
+	//
+	// Deprecated: this should be omitted and must match SubmissionPrefix.
 	HTTPHost string
 
 	// HTTPPrefix is the prefix for the HTTP endpoint of this log instance,
 	// without trailing slash, but with a leading slash if not empty, and
 	// without "/ct/v1" suffix.
+	//
+	// Deprecated: this should be omitted and must match SubmissionPrefix.
 	HTTPPrefix string
 
 	// SubmissionPrefix is the full URL of the c2sp.org/static-ct-api submission
-	// prefix of the log, without trailing slash.
+	// prefix of the log.
+	//
+	// autocert will be configured with the host of this URL, and the HTTP
+	// server will serve the log at this URL.
 	SubmissionPrefix string
 
 	// MonitoringPrefix is the full URL of the c2sp.org/static-ct-api monitoring
-	// prefix of the log, without trailing slash.
+	// prefix of the log.
 	MonitoringPrefix string
 
 	// Roots is the path to the accepted roots as a PEM file.
@@ -261,8 +266,8 @@ type logInfo struct {
 	// accidentally exposing sensitive fields.
 	Name             string `json:"description"`
 	ShortName        string `json:"-"`
-	SubmissionPrefix string `json:"submission_url"`
-	MonitoringPrefix string `json:"monitoring_url"`
+	SubmissionPrefix string `json:"submission_url"` // with trailing slash
+	MonitoringPrefix string `json:"monitoring_url"` // with trailing slash
 	PoolSize         int    `json:"-"`
 	Interval         struct {
 		NotAfterStart string `json:"start_inclusive"`
@@ -383,16 +388,17 @@ func main() {
 			Logs             []string
 		}
 	}
-	serveHome := func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		if err := homeTmpl.Execute(w, homeData); err != nil {
 			logger.Error("failed to execute homepage template", "err", err)
 		}
-	}
-	mux.HandleFunc("/{$}", serveHome)
+	})
+
+	var acmeHosts []string
 	for _, lc := range c.Logs {
-		if lc.Name == "" || lc.ShortName == "" {
-			fatalError(logger, "missing name or short name for log")
+		if lc.ShortName == "" {
+			fatalError(logger, "missing short name for log")
 		}
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("log", lc.ShortName),
@@ -461,8 +467,33 @@ func main() {
 			fatalError(logger, "failed to parse NotAfterLimit", "err", err)
 		}
 
+		lc.SubmissionPrefix = strings.TrimSuffix(lc.SubmissionPrefix, "/")
+		lc.MonitoringPrefix = strings.TrimSuffix(lc.MonitoringPrefix, "/")
+		prefix, err := url.Parse(lc.SubmissionPrefix)
+		if err != nil {
+			fatalError(logger, "failed to parse SubmissionPrefix", "err", err)
+		}
+		if prefix.Scheme != "https" {
+			fatalError(logger, "SubmissionPrefix must be an https URL", "prefix", lc.SubmissionPrefix)
+		}
+		if prefix.Host == "" {
+			fatalError(logger, "SubmissionPrefix must have a host", "prefix", lc.SubmissionPrefix)
+		}
+		if lc.HTTPHost != "" && lc.HTTPHost != prefix.Host {
+			fatalError(logger, "HTTPHost must match SubmissionPrefix host",
+				"httpHost", lc.HTTPHost, "submissionPrefix", lc.SubmissionPrefix)
+		}
+		if lc.HTTPPrefix != "" && lc.HTTPPrefix != prefix.Path {
+			fatalError(logger, "HTTPPrefix must match SubmissionPrefix path",
+				"httpPrefix", lc.HTTPPrefix, "submissionPrefix", lc.SubmissionPrefix)
+		}
+		if lc.Name != "" && lc.Name != prefix.Host+prefix.Path {
+			fatalError(logger, "Name must match SubmissionPrefix host and path",
+				"name", lc.Name, "submissionPrefix", lc.SubmissionPrefix)
+		}
+
 		cc := &ctlog.Config{
-			Name:          lc.Name,
+			Name:          prefix.Host + prefix.Path,
 			Key:           k,
 			WitnessKey:    wk,
 			Cache:         lc.Cache,
@@ -500,8 +531,9 @@ func main() {
 		sequencerGroup.Go(func() error {
 			return l.RunSequencer(sequencerContext, period)
 		})
+		mux.Handle(prefix.Host+prefix.Path+"/ct/v1/", http.StripPrefix(prefix.Path, l.Handler()))
 
-		mux.Handle(lc.HTTPHost+lc.HTTPPrefix+"/", http.StripPrefix(lc.HTTPPrefix, l.Handler()))
+		acmeHosts = append(acmeHosts, prefix.Hostname())
 
 		prometheus.WrapRegistererWith(prometheus.Labels{"log": lc.ShortName}, sunlightMetrics).
 			MustRegister(l.Metrics()...)
@@ -513,7 +545,7 @@ func main() {
 		pemKey := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pkix})
 		logID := sha256.Sum256(pkix)
 		log := logInfo{
-			Name:             lc.Name,
+			Name:             prefix.Host + prefix.Path,
 			ShortName:        lc.ShortName,
 			ID:               base64.StdEncoding.EncodeToString(logID[:]),
 			SubmissionPrefix: lc.SubmissionPrefix + "/",
@@ -536,14 +568,10 @@ func main() {
 		if err != nil {
 			fatalError(logger, "failed to upload log info", "err", err)
 		}
-		mux.HandleFunc(lc.HTTPHost+lc.HTTPPrefix+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc(prefix.Host+prefix.Path+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(j)
 		})
-
-		if lc.HTTPHost != "" {
-			mux.HandleFunc(lc.HTTPHost+"/{$}", serveHome)
-		}
 	}
 
 	if c.Witness.Name != "" {
@@ -577,8 +605,22 @@ func main() {
 			fatalError(logger, "failed to create witness", "err", err)
 		}
 
-		mux.Handle(c.Witness.HTTPHost+c.Witness.HTTPPrefix+"/",
-			http.StripPrefix(c.Witness.HTTPPrefix, w.Handler()))
+		c.Witness.SubmissionPrefix = strings.TrimSuffix(c.Witness.SubmissionPrefix, "/")
+		prefix, err := url.Parse(c.Witness.SubmissionPrefix)
+		if err != nil {
+			fatalError(logger, "failed to parse SubmissionPrefix", "err", err)
+		}
+		if prefix.Scheme != "https" {
+			fatalError(logger, "SubmissionPrefix must be an https URL",
+				"prefix", c.Witness.SubmissionPrefix)
+		}
+		if prefix.Host == "" {
+			fatalError(logger, "SubmissionPrefix must have a host",
+				"prefix", c.Witness.SubmissionPrefix)
+		}
+		mux.Handle(prefix.Host+prefix.Path+"/", http.StripPrefix(prefix.Path, w.Handler()))
+
+		acmeHosts = append(acmeHosts, prefix.Host)
 
 		witnessMetrics := prometheus.WrapRegistererWithPrefix("witness_", sunlightMetrics)
 		witnessMetrics.MustRegister(w.Metrics()...)
@@ -588,10 +630,6 @@ func main() {
 		homeData.Witness.VerifierKey = w.VerifierKey()
 		for _, log := range c.Witness.KnownLogs {
 			homeData.Witness.Logs = append(homeData.Witness.Logs, log.Origin)
-		}
-
-		if c.Witness.HTTPHost != "" {
-			mux.HandleFunc(c.Witness.HTTPHost+"/{$}", serveHome)
 		}
 	}
 
@@ -612,12 +650,12 @@ func main() {
 		s.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
-	} else if len(c.ACME.Hosts) > 0 {
+	} else if c.ACME.Cache != "" {
+		acmeHosts = append(acmeHosts, c.ACME.Hosts...)
 		m := &autocert.Manager{
 			Cache:      autocert.DirCache(c.ACME.Cache),
 			Prompt:     autocert.AcceptTOS,
-			Email:      c.ACME.Email,
-			HostPolicy: autocert.HostWhitelist(c.ACME.Hosts...),
+			HostPolicy: autocert.HostWhitelist(acmeHosts...),
 			Client: &acme.Client{
 				DirectoryURL: c.ACME.Directory,
 				UserAgent:    "filippo.io/sunlight",

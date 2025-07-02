@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -65,19 +66,21 @@ type Config struct {
 	// ACME is the configuration for the ACME client. Optional. If missing,
 	// Skylight will listen for plain HTTP or h2c.
 	ACME struct {
-		// Email is the email address to use for ACME account registration.
-		Email string
-
-		// Hosts are the names for which autocert will obtain a certificate.
-		Hosts []string
-
 		// Cache is the path to the autocert cache directory.
 		Cache string
+
+		// Hosts are extra names for which autocert will obtain a certificate,
+		// beyond those configured as part of the SubmissionPrefix of logs and
+		// witness. Optional.
+		Hosts []string
 
 		// Directory is an ACME directory URL to request a certificate from.
 		// Defaults to Let's Encrypt Production. Optional.
 		Directory string
 	}
+
+	// HomeRedirect is the 302 destination of the root.
+	HomeRedirect string
 
 	Logs []LogConfig
 }
@@ -86,15 +89,12 @@ type LogConfig struct {
 	// ShortName is the short name for the log, used as a metrics and logs label.
 	ShortName string
 
-	// HTTPHost is the host name for the HTTP endpoint of this log instance.
-	HTTPHost string
-
-	// HTTPPrefix is the prefix for the HTTP endpoint of this log instance,
-	// without trailing slash, but with a leading slash if not empty.
-	HTTPPrefix string
-
-	// HomeRedirect is the 302 destination of the root.
-	HomeRedirect string
+	// MonitoringPrefix is the full URL of the c2sp.org/static-ct-api monitoring
+	// prefix of the log.
+	//
+	// autocert will be configured with the host of this URL, and the HTTP
+	// server will serve the log at this URL.
+	MonitoringPrefix string
 
 	// LocalDirectory is the path to a local directory where the log will store
 	// its data. It must be dedicated to this specific log instance.
@@ -265,6 +265,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	var acmeHosts []string
 	roots := make(map[LogConfig]*os.Root)
 	for _, lc := range c.Logs {
 		if lc.ShortName == "" {
@@ -273,6 +274,22 @@ func main() {
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("log", lc.ShortName),
 		}))
+
+		lc.MonitoringPrefix = strings.TrimSuffix(lc.MonitoringPrefix, "/")
+		prefix, err := url.Parse(lc.MonitoringPrefix)
+		if err != nil {
+			fatalError(logger, "failed to parse MonitoringPrefix", "err", err)
+		}
+		if prefix.Scheme != "https" {
+			fatalError(logger, "MonitoringPrefix must use https scheme",
+				"prefix", lc.MonitoringPrefix)
+		}
+		if prefix.Host == "" {
+			fatalError(logger, "MonitoringPrefix must have a host",
+				"prefix", lc.MonitoringPrefix)
+		}
+
+		acmeHosts = append(acmeHosts, prefix.Hostname())
 
 		root, err := os.OpenRoot(lc.LocalDirectory)
 		if err != nil {
@@ -310,16 +327,10 @@ func main() {
 			w.Header().Del("Cache-Control")
 			http.Error(w, error, code)
 		}
-		httpRedirect := func(w http.ResponseWriter, r *http.Request, kind, url string, code int) {
-			reused := reused.LabelFromContext(r.Context())
-			client := clientFromContext(r.Context())
-			reqCount.WithLabelValues(lc.ShortName, kind, client, reused, strconv.Itoa(code)).Inc()
-			http.Redirect(w, r, url, code)
-		}
 
 		// Finally, the per-path mux handler that specialize the request,
 		// setting headers and context keys.
-		patternPrefix := "GET " + lc.HTTPHost + lc.HTTPPrefix
+		patternPrefix := "GET " + prefix.Host + prefix.Path
 		mux.HandleFunc(patternPrefix+"/checkpoint", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -366,11 +377,15 @@ func main() {
 			}
 			handler.ServeHTTP(w, r)
 		})
-		mux.HandleFunc(patternPrefix+"/{$}", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			httpRedirect(w, r, "index", lc.HomeRedirect, http.StatusFound)
-		})
 	}
+
+	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+		reused := reused.LabelFromContext(r.Context())
+		client := clientFromContext(r.Context())
+		reqCount.WithLabelValues("", "index", client, reused, "302").Inc()
+
+		http.Redirect(w, r, c.HomeRedirect, http.StatusFound)
+	})
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusOK
@@ -417,12 +432,12 @@ func main() {
 		s.TLSConfig = &tls.Config{
 			Certificates: []tls.Certificate{cert},
 		}
-	} else if len(c.ACME.Hosts) > 0 {
+	} else if c.ACME.Cache != "" {
+		acmeHosts = append(acmeHosts, c.ACME.Hosts...)
 		m := &autocert.Manager{
 			Cache:      autocert.DirCache(c.ACME.Cache),
 			Prompt:     autocert.AcceptTOS,
-			Email:      c.ACME.Email,
-			HostPolicy: autocert.HostWhitelist(c.ACME.Hosts...),
+			HostPolicy: autocert.HostWhitelist(acmeHosts...),
 			Client: &acme.Client{
 				DirectoryURL: c.ACME.Directory,
 				UserAgent:    "filippo.io/sunlight",
