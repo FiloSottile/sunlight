@@ -63,13 +63,14 @@ type Config struct {
 	// Listen are the addresses to listen on, e.g. ":443".
 	Listen []string
 
-	// ACME is the configuration for the ACME client. Optional. If missing,
-	// Skylight will listen for plain HTTP or h2c.
+	// ACME configures how Skylight automatically obtains certificates for its HTTPS
+	// endpoints. Optional. If missing, Skylight will listen for plain HTTP or h2c.
 	ACME struct {
-		// Cache is the path to the autocert cache directory.
+		// Cache is the path to the directory where keys and certificates will
+		// be stored. It will be created if it doesn't already exist.
 		Cache string
 
-		// Hosts are extra names for which autocert will obtain a certificate,
+		// Hosts are extra names for which Skylight will obtain a certificate,
 		// beyond those configured as part of the SubmissionPrefix of logs and
 		// witness. Optional.
 		Hosts []string
@@ -92,8 +93,8 @@ type LogConfig struct {
 	// MonitoringPrefix is the full URL of the c2sp.org/static-ct-api monitoring
 	// prefix of the log.
 	//
-	// autocert will be configured with the host of this URL, and the HTTP
-	// server will serve the log at this URL.
+	// The HTTP server will serve the log at this URL, and if ACME is enabled,
+	// Skylight will obtain a certificate for the host of this URL.
 	MonitoringPrefix string
 
 	// LocalDirectory is the path to a local directory where the log will store
