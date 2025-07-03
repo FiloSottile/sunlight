@@ -183,6 +183,7 @@ func TestSequenceUploadPaths(t *testing.T) {
 	slices.Sort(keys)
 
 	expected := []string{
+		"_roots.pem",
 		"checkpoint",
 		"issuer/1b48a2acbba79932d3852ccde41197f678256f3c2a280e9edf9aad272d6e9c92",
 		"issuer/559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
@@ -209,7 +210,7 @@ func TestSequenceUploadPaths(t *testing.T) {
 	for _, key := range keys {
 		expectedImmutable := false
 		expectedDeleted := false
-		if key != "checkpoint" {
+		if key != "checkpoint" && key != "_roots.pem" {
 			expectedImmutable = true
 		}
 		if strings.HasPrefix(key, "staging/") {
