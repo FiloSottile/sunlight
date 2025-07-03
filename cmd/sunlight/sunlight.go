@@ -207,8 +207,32 @@ type LogConfig struct {
 
 	// Roots is the path to the accepted roots as a PEM file. They are reloaded
 	// on SIGHUP from the same path (i.e. the config file itself is not
-	// reloaded).
+	// reloaded). Optional. Only one of CCADBRoots and Roots can be set.
+	//
+	// Note that the contents of this file are uploaded to Backend as-is.
 	Roots string
+
+	// CCADBRoots can be "trusted" or "testing". Optional. It defaults to
+	// "trusted" if Roots is not set.
+	//
+	// If "trusted", the log will fetch accepted roots from the CCADB list of
+	// CAs trusted by at least one of the CCADB root stores. If "testing", the
+	// log will fetch CAs that have applied to at least one of the CCADB root
+	// stores and are not part of the "trusted" list.
+	//
+	// The list is refreshed periodically and on SIGHUP, but roots are never
+	// removed for the lifespan of a log.
+	//
+	// Any roots in the ExtraRoots file will be merged with the CCADB roots, and
+	// the Google Merge Delay Monitor Root will be added automatically.
+	CCADBRoots string
+
+	// ExtraRoots is the path to a PEM file containing extra roots that are
+	// merged with those fetched from CCADB. It is reloaded from the same path
+	// when loading roots from CCADB (periodically and on SIGHUP). Optional.
+	//
+	// Once added, roots are never removed for the lifespan of a log.
+	ExtraRoots string
 
 	// Secret is the path to a file containing a secret seed from which the
 	// log's private keys are derived. The file contents are used as HKDF input.
@@ -532,30 +556,59 @@ func main() {
 		}
 		defer l.CloseCache()
 
-		reloadRoots := func() error {
-			rootsPEM, err := os.ReadFile(lc.Roots)
-			if err != nil {
-				return err
+		reloadChan := make(chan os.Signal, 1)
+		signal.Notify(reloadChan, syscall.SIGHUP)
+		if lc.Roots != "" {
+			if lc.CCADBRoots != "" || lc.ExtraRoots != "" {
+				fatalError(logger, "can't set both Roots and CCADBRoots or ExtraRoots")
 			}
-			if err := l.SetRootsFromPEM(ctx, rootsPEM); err != nil {
-				return err
+			if err := loadRoots(ctx, lc, l); err != nil {
+				fatalError(logger, "failed to load Roots", "file", lc.Roots, "err", err)
 			}
-			return nil
-		}
-		if err := reloadRoots(); err != nil {
-			fatalError(logger, "failed to load Roots", "file", lc.Roots, "err", err)
-		}
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, syscall.SIGHUP)
-		go func() {
-			for range c {
-				if err := reloadRoots(); err != nil {
-					logger.Error("failed to reload Roots on SIGHUP", "file", lc.Roots, "err", err)
-					continue
+			serveGroup.Go(func() error {
+				for {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-reloadChan:
+					}
+					if err := loadRoots(ctx, lc, l); err != nil {
+						logger.Error("failed to reload Roots on SIGHUP", "file", lc.Roots, "err", err)
+						continue
+					}
+					logger.Info("successfully reloaded roots on SIGHUP", "file", lc.Roots)
 				}
-				logger.Info("reloaded roots on SIGHUP", "file", lc.Roots)
+			})
+		} else {
+			switch lc.CCADBRoots {
+			case "trusted", "testing", "":
+			default:
+				fatalError(logger, "CCADBRoots must be 'trusted', 'testing', or empty",
+					"CCADBRoots", lc.CCADBRoots)
 			}
-		}()
+			// We don't run loadCCADBRoots at start, because CCADB is very
+			// flakey, so we don't want to prevent the log from starting if it's
+			// down. The previous roots will be loaded by LoadLog anyway.
+			serveGroup.Go(func() error {
+				ticker := time.NewTicker(15 * time.Minute)
+				for {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-reloadChan:
+					case <-ticker.C:
+					}
+					newRoots, err := loadCCADBRoots(ctx, lc, l)
+					if err != nil {
+						logger.Error("failed to reload CCADB roots", "err", err)
+						continue
+					}
+					if newRoots {
+						logger.Info("successfully loaded new roots from CCADB/ExtraRoots on SIGHUP or timer")
+					}
+				}
+			})
+		}
 
 		period := 1 * time.Second
 		if lc.Period > 0 {

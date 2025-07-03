@@ -152,6 +152,10 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return fmt.Errorf("couldn't upload checkpoint: %w", err)
 	}
 
+	if err := config.Backend.Upload(ctx, "_roots.pem", []byte(""), optsRoots); err != nil {
+		return fmt.Errorf("couldn't upload roots: %w", err)
+	}
+
 	config.Log.InfoContext(ctx, "created log", "timestamp", timestamp,
 		"logID", base64.StdEncoding.EncodeToString(logID[:]))
 	return nil
@@ -284,7 +288,15 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	}
 
 	roots := x509util.NewPEMCertPool()
-	rootsPEM := []byte("")
+	rootsPEM, err := config.Backend.Fetch(ctx, "_roots.pem")
+	if err != nil {
+		config.Log.WarnContext(ctx, "failed to fetch previously trusted roots", "err", err)
+	} else {
+		if !roots.AppendCertsFromPEM(rootsPEM) {
+			config.Log.WarnContext(ctx, "failed to parse previously trusted roots",
+				"roots", string(rootsPEM))
+		}
+	}
 
 	config.Log.InfoContext(ctx, "loaded log", "logID", base64.StdEncoding.EncodeToString(logID[:]),
 		"size", c.N, "timestamp", timestamp)
@@ -388,6 +400,9 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	}
 	l.rootsMu.Lock()
 	defer l.rootsMu.Unlock()
+	if err := l.c.Backend.Upload(ctx, "_roots.pem", pemBytes, optsRoots); err != nil {
+		return fmt.Errorf("couldn't upload roots: %w", err)
+	}
 	l.m.ConfigRoots.Set(float64(len(roots.RawCertificates())))
 	l.roots = roots
 	l.rootsPEM = bytes.Clone(pemBytes)
@@ -437,6 +452,7 @@ var optsDataTile = &UploadOptions{Compressed: true, Immutable: true}
 var optsStaging = &UploadOptions{Compressed: true, Immutable: true}
 var optsIssuer = &UploadOptions{ContentType: "application/pkix-cert", Immutable: true}
 var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
+var optsRoots = &UploadOptions{ContentType: "application/x-pem-file"}
 
 var ErrLogNotFound = errors.New("log not found")
 
