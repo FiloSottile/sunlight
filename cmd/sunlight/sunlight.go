@@ -37,6 +37,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -47,7 +48,6 @@ import (
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/stdlog"
 	"filippo.io/sunlight/internal/witness"
-	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -145,7 +145,7 @@ type Config struct {
 		//
 		// To generate a new seed, run:
 		//
-		//   $ head -c 32 /dev/urandom > seed.bin
+		//   $ sunlight-keygen -f seed.bin
 		//
 		Secret string
 
@@ -205,7 +205,9 @@ type LogConfig struct {
 	// prefix of the log.
 	MonitoringPrefix string
 
-	// Roots is the path to the accepted roots as a PEM file.
+	// Roots is the path to the accepted roots as a PEM file. They are reloaded
+	// on SIGHUP from the same path (i.e. the config file itself is not
+	// reloaded).
 	Roots string
 
 	// Secret is the path to a file containing a secret seed from which the
@@ -214,7 +216,7 @@ type LogConfig struct {
 	//
 	// To generate a new seed, run:
 	//
-	//   $ head -c 32 /dev/urandom > seed.bin
+	//   $ sunlight-keygen -f seed.bin
 	//
 	Secret string
 
@@ -430,11 +432,6 @@ func main() {
 			fatalError(logger, "neither S3Bucket nor LocalDirectory are set, one must be used")
 		}
 
-		r := x509util.NewPEMCertPool()
-		if err := r.AppendCertsFromPEMFile(lc.Roots); err != nil {
-			fatalError(logger, "failed to load roots", "err", err)
-		}
-
 		if lc.Secret == "" && lc.Seed != "" {
 			logger.Warn("using deprecated Seed field, use Secret instead")
 			lc.Secret = lc.Seed
@@ -513,7 +510,6 @@ func main() {
 			Backend:       b,
 			Lock:          db,
 			Log:           logger,
-			Roots:         r,
 			NotAfterStart: notAfterStart,
 			NotAfterLimit: notAfterLimit,
 		}
@@ -535,6 +531,31 @@ func main() {
 			fatalError(logger, "failed to load log", "err", err)
 		}
 		defer l.CloseCache()
+
+		reloadRoots := func() error {
+			rootsPEM, err := os.ReadFile(lc.Roots)
+			if err != nil {
+				return err
+			}
+			if err := l.SetRootsFromPEM(ctx, rootsPEM); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := reloadRoots(); err != nil {
+			fatalError(logger, "failed to load Roots", "file", lc.Roots, "err", err)
+		}
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGHUP)
+		go func() {
+			for range c {
+				if err := reloadRoots(); err != nil {
+					logger.Error("failed to reload Roots on SIGHUP", "file", lc.Roots, "err", err)
+					continue
+				}
+				logger.Info("reloaded roots on SIGHUP", "file", lc.Roots)
+			}
+		}()
 
 		period := 1 * time.Second
 		if lc.Period > 0 {
