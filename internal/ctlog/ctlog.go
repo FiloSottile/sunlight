@@ -68,6 +68,12 @@ type Log struct {
 	// the log started. There might be more in the backend.
 	issuersMu sync.RWMutex
 	issuers   map[[32]byte]bool
+
+	// roots are the trusted roots, and are always modified by swapping, so the
+	// pointer can be used without holding rootsMu after being obtained.
+	rootsMu  sync.RWMutex
+	roots    *x509util.PEMCertPool
+	rootsPEM []byte
 }
 
 type treeWithTimestamp struct {
@@ -99,7 +105,6 @@ type Config struct {
 	Lock    LockBackend
 	Log     *slog.Logger
 
-	Roots         *x509util.PEMCertPool
 	NotAfterStart time.Time
 	NotAfterLimit time.Time
 }
@@ -278,13 +283,16 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		config.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
 
+	roots := x509util.NewPEMCertPool()
+	rootsPEM := []byte("")
+
 	config.Log.InfoContext(ctx, "loaded log", "logID", base64.StdEncoding.EncodeToString(logID[:]),
 		"size", c.N, "timestamp", timestamp)
 
 	m := initMetrics()
 	m.TreeSize.Set(float64(c.N))
 	m.TreeTime.Set(float64(timestamp))
-	m.ConfigRoots.Set(float64(len(config.Roots.RawCertificates())))
+	m.ConfigRoots.Set(float64(len(roots.RawCertificates())))
 	m.ConfigStart.Set(float64(config.NotAfterStart.Unix()))
 	m.ConfigEnd.Set(float64(config.NotAfterLimit.Unix()))
 
@@ -299,6 +307,8 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		currentPool:    newPool(),
 		cacheWrite:     cacheWrite,
 		issuers:        make(map[[32]byte]bool),
+		roots:          roots,
+		rootsPEM:       rootsPEM,
 	}, nil
 }
 
@@ -355,6 +365,34 @@ func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error
 }
 
 var timeNowUnixMilli = func() int64 { return time.Now().UnixMilli() }
+
+func (l *Log) rootPool() *x509util.PEMCertPool {
+	l.rootsMu.RLock()
+	defer l.rootsMu.RUnlock()
+	return l.roots
+}
+
+func (l *Log) RootsPEM() []byte {
+	l.rootsMu.RLock()
+	defer l.rootsMu.RUnlock()
+	return l.rootsPEM
+}
+
+func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
+	if bytes.Equal(pemBytes, l.RootsPEM()) {
+		return nil
+	}
+	roots := x509util.NewPEMCertPool()
+	if !roots.AppendCertsFromPEM(pemBytes) {
+		return errors.New("failed to parse the PEM root certificates")
+	}
+	l.rootsMu.Lock()
+	defer l.rootsMu.Unlock()
+	l.m.ConfigRoots.Set(float64(len(roots.RawCertificates())))
+	l.roots = roots
+	l.rootsPEM = bytes.Clone(pemBytes)
+	return nil
+}
 
 // Backend is an object storage. It is dedicated to a single log instance.
 //

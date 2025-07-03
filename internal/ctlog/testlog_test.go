@@ -30,7 +30,6 @@ import (
 	"github.com/google/certificate-transparency-go/client"
 	"github.com/google/certificate-transparency-go/jsonclient"
 	"github.com/google/certificate-transparency-go/x509"
-	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
@@ -63,18 +62,17 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 		Backend:       NewMemoryBackend(t),
 		Lock:          NewMemoryLockBackend(t),
 		Log:           slog.New(logHandler),
-		Roots:         x509util.NewPEMCertPool(),
 		NotAfterStart: time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
 		NotAfterLimit: time.Date(2024, time.July, 1, 0, 0, 0, 0, time.UTC),
 	}
-	root, err := x509.ParseCertificate(testRoot)
-	fatalIfErr(t, err)
-	config.Roots.AddCert(root)
-	err = ctlog.CreateLog(context.Background(), config)
+	err = ctlog.CreateLog(t.Context(), config)
 	fatalIfErr(t, err)
 	(&TestLog{t: t, Config: config, l: logLevel}).CheckLog(0)
 	log, err := ctlog.LoadLog(context.Background(), config)
 	fatalIfErr(t, err)
+	fatalIfErr(t, log.SetRootsFromPEM(t.Context(), pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: testRoot,
+	})))
 	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
 	tl := &TestLog{t: t,
 		Log:    log,

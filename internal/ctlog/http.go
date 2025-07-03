@@ -142,7 +142,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		return nil, http.StatusBadRequest, fmtErrorf("empty chain")
 	}
 
-	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.c.Roots, time.Time{}, false, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
+	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.rootPool(), time.Time{}, false, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
 	if err != nil {
 		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: %w", err)
 	}
@@ -238,7 +238,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {
-	roots := l.c.Roots.RawCertificates()
+	roots := l.rootPool().RawCertificates()
 	var res struct {
 		Certificates [][]byte `json:"certificates"`
 	}
