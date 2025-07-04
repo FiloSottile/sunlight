@@ -756,6 +756,9 @@ func main() {
 		s.TLSConfig.KeyLogWriter = keylog.Writer
 	}
 
+	if len(c.Listen) == 0 {
+		fatalError(logger, "no Listen addresses specified in config")
+	}
 	for _, addr := range c.Listen {
 		l, err := net.Listen("tcp", addr)
 		if err != nil {
