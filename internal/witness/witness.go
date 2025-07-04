@@ -42,10 +42,20 @@ type LogConfig struct {
 	VerifierKeys []string
 }
 
-func logIDFromOrigin(origin string) [sha256.Size]byte {
+func logIDFromOrigin(config *Config, origin string) [sha256.Size]byte {
 	h := sha256.New()
-	h.Write(asn1.NullBytes) // Domain separation from [ctlog.logIDFromKey].
+
+	// Domain separation from [ctlog.logIDFromKey].
+	h.Write(asn1.NullBytes)
 	h.Write([]byte("Sunlight witness\n"))
+
+	// Let multiple witnesses share the same LockBackend without affecting each
+	// other's state. This is undesirable for logs we operate, where we are in
+	// charge of preventing split-views, but for witnesses it would mostly cause
+	// conflicts as it would invalidate the client's view of the witness state.
+	h.Write([]byte(config.Name))
+	h.Write([]byte("\n"))
+
 	h.Write([]byte(origin))
 	return [32]byte(h.Sum(nil))
 }
@@ -85,7 +95,7 @@ func NewWitness(ctx context.Context, config *Config) (*Witness, error) {
 			verifiers = append(verifiers, v)
 		}
 		l[log.Origin] = note.VerifierList(verifiers...)
-		c, err := config.Backend.Fetch(ctx, logIDFromOrigin(log.Origin))
+		c, err := config.Backend.Fetch(ctx, logIDFromOrigin(config, log.Origin))
 		if err != nil && !errors.Is(err, ctlog.ErrLogNotFound) {
 			return nil, fmt.Errorf("couldn't fetch checkpoint for log %q: %w", log.Origin, err)
 		}
@@ -279,13 +289,13 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 	new := append(noteBytes[:len(noteBytes):len(noteBytes)], sigs...)
 
 	if lock.LockedCheckpoint == nil {
-		err := w.c.Backend.Create(ctx, logIDFromOrigin(origin), new)
+		err := w.c.Backend.Create(ctx, logIDFromOrigin(w.c, origin), new)
 		if err != nil {
 			return nil, errors.New("internal error: failed to create new checkpoint")
 		}
 		// Kinda unclear why [ctlog.LockBackend.Create] doesn't return the
 		// [ctlog.LockedCheckpoint], but a race here would be harmless anyway.
-		newLock, err := w.c.Backend.Fetch(ctx, logIDFromOrigin(origin))
+		newLock, err := w.c.Backend.Fetch(ctx, logIDFromOrigin(w.c, origin))
 		if err != nil {
 			return nil, errors.New("internal error: failed to fetch new checkpoint")
 		}
