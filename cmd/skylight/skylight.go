@@ -80,7 +80,7 @@ type Config struct {
 		Directory string
 	}
 
-	// HomeRedirect is the 302 destination of the root.
+	// HomeRedirect is the 302 destination of the root. Optional.
 	HomeRedirect string
 
 	Logs []LogConfig
@@ -380,13 +380,15 @@ func main() {
 		})
 	}
 
-	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
-		reused := reused.LabelFromContext(r.Context())
-		client := clientFromContext(r.Context())
-		reqCount.WithLabelValues("", "index", client, reused, "302").Inc()
+	if c.HomeRedirect != "" {
+		mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+			reused := reused.LabelFromContext(r.Context())
+			client := clientFromContext(r.Context())
+			reqCount.WithLabelValues("", "index", client, reused, "302").Inc()
 
-		http.Redirect(w, r, c.HomeRedirect, http.StatusFound)
-	})
+			http.Redirect(w, r, c.HomeRedirect, http.StatusFound)
+		})
+	}
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusOK
