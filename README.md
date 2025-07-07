@@ -112,7 +112,7 @@ The pool size effectively acts as a rate limit: Sunlight will accept at most `po
     cache: /tank/logs/example2025h2/cache.db
 ```
 
-Cache is the path to an SQLite database that keeps track of submitted certificates to avoid duplicate entries. This is the one part of Sunlight that can tolerate data loss: it's ok to rollback a few entries on a regular basis, or even lose the cache in an emergency. The only consequence is that existing entries might be resubmitted, growing the size of the log.
+Cache is the path to an SQLite database that keeps track of submitted certificates to avoid duplicate entries. This part of Sunlight can tolerate data loss: it's ok to rollback a few entries on a regular basis, or even lose the cache in an emergency. The only consequence is that existing entries might be resubmitted, growing the size of the log. If the actual log data is hosted on object storage (see below) and the secret is backed up, a log can recover from the complete loss of the Sunlight server.
 
 This generally doesn’t grow beyond 100 GB.
 
@@ -128,11 +128,11 @@ or
     s3endpoint: https://data.example/s3/
 ```
 
-There are two options for storing the actual Static CT assets: a regular POSIX filesystem (to which Sunlight issues fsync syscalls to ensure durability), or an S3-compatible object storage (which can be eventually consistent but must guarantee durability after a successful PUT).
+There are two options for storing the actual Static CT assets: a regular POSIX filesystem (to which Sunlight issues fsync syscalls to ensure durability), or an S3-compatible object storage (which can be eventually consistent but must guarantee durability after a successful PUT). Remember that this storage backend must never lose writes or be rolled back.
 
 Each six-months shard will reach approximately 1.5 TB at current rates. It starts growing sharply 90 days *before* its `notafterstart` date, and slows down 90 days before its `notafterlimit` date. It can be deleted [a couple months after](https://groups.google.com/a/chromium.org/g/ct-policy/c/rWNwrxokqZ8/m/6I_Be8x6AQAJ) its `notafterlimit` date.
 
-It’s recommended to create a ZFS dataset or S3 bucket for each log, to make it easier to delete it once the log is retired. You can see, for example, [the Tuscolo ZFS configuration](https://gist.github.com/FiloSottile/989338e6ba8e03f2c699590ce83f537b).
+You should consider a separate ZFS dataset or object storage bucket for each log, to make it easier to delete it once the log is retired. See, for example, [the Tuscolo ZFS configuration](https://gist.github.com/FiloSottile/989338e6ba8e03f2c699590ce83f537b). However, note that using separate AWS S3 buckets can cause [dynamic scaling issues when traffic moves naturally from one to another](https://groups.google.com/a/chromium.org/g/ct-policy/c/0R43Z58JuzA/m/raeusYYqAAAJ), so you should use a single bucket and delete logs with lifecycle rules if hosting on AWS S3.
 
 ### Monitoring and logging
 
