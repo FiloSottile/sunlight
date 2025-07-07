@@ -134,6 +134,25 @@ Each six-months shard will reach approximately 1.5 TB at current rates. It start
 
 You should consider a separate ZFS dataset or object storage bucket for each log, to make it easier to delete it once the log is retired. See, for example, [the Tuscolo ZFS configuration](https://gist.github.com/FiloSottile/989338e6ba8e03f2c699590ce83f537b). However, note that using separate AWS S3 buckets can cause [dynamic scaling issues when traffic moves naturally from one to another](https://groups.google.com/a/chromium.org/g/ct-policy/c/0R43Z58JuzA/m/raeusYYqAAAJ), so you should use a single bucket and delete logs with lifecycle rules if hosting on AWS S3.
 
+### Hosting the read path
+
+The [Static CT monitoring API](https://github.com/C2SP/C2SP/blob/static-ct-api/v1.0.0/static-ct-api.md#monitoring-apis) can be implemented by simply serving the files uploaded to or stored in the storage backend by Sunlight.
+
+If you’re using the S3 backend, that probably means simply placing a CDN in front of it, or making the bucket public. The monitoring prefix of the log can be completely different from the submission prefix, so you can point the read path directly at your static file serving infrastructure.
+
+If you’re using the local filesystem backend, you could use any HTTP server, like nginx or Caddy. However, Sunlight provides a specialized HTTP file server with a number of Static CT friendly features.
+
+- [Its configuration](https://github.com/search?q=repo%3AFiloSottile%2Fsunlight+symbol%3AConfig+path%3Acmd%2Fskylight&type=code) is nearly a subset of Sunlight’s.
+- It automatically rate-limits clients that don’t provide a contact through the User-Agent, to make it easier to report client issues and to reduce the impact of non-malicious misbehaving clients.
+- It provides the same monitoring and logging capabilities as Sunlight (see below), including the same debug endpoints and copious public metrics.
+- It exposes a `/health` endpoint which only returns 200 OK if all logs have produced validly-signed checkpoints in the last five seconds. This is what powers the Tuscolo [status page](https://status.sunlight.geomys.org/).
+
+If using a different HTTP server, you should take care of setting the right `Content-Type`, `Content-Encoding`, `Cache-Control`, and ideally `Access-Control-Allow-Origin` headers. Feel free to inquire on the \#sunlight channel of the [transparency.dev Slack][] for help configuring other Static CT read path servers.
+
+[transparency.dev Slack]: https://join.slack.com/t/transparency-dev/shared_invite/zt-27pkqo21d-okUFhur7YZ0rFoJVIOPznQ
+
+You should expect more load on the read path than on the write path, as each certificate is generally only submitted once (or twice counting pre-certificates) but is fetched by many monitors. Be mindful of traffic charges if you run in the cloud! All assets except `/checkpoint` are immutable, so they are highly cacheable.
+
 ### Monitoring and logging
 
 JSON structured logs are produced on standard output, and human-readable logs are produced to standard error.
@@ -176,22 +195,3 @@ Static CT chunks the log into “tiles” of 256 entries. If the pool is flushed
 partial-aftersun is a command designed to run as a cronjob which deletes superfluous partial tiles from a local storage backend, freeing up space. It reads the Sunlight config file directly, and has a number of safety measures to avoid deleting the wrong tiles.
 
 The Tuscolo public configs include [an example of how to schedule it with systemd timers](https://config.sunlight.geomys.org/#%2fetc%2fsystemd%2fsystem%2fpartial-aftersun.service).
-
-### Hosting the read path
-
-The [Static CT monitoring API](https://github.com/C2SP/C2SP/blob/static-ct-api/v1.0.0/static-ct-api.md#monitoring-apis) can be implemented by simply serving the files uploaded to or stored in the storage backend by Sunlight.
-
-If you’re using the S3 backend, that probably means simply placing a CDN in front of it, or making the bucket public. The monitoring prefix of the log can be completely different from the submission prefix, so you can point the read path directly at your static file serving infrastructure.
-
-If you’re using the local filesystem backend, you could use any HTTP server, like nginx or Caddy. However, Sunlight provides a specialized HTTP file server with a number of Static CT friendly features.
-
-- [Its configuration](https://github.com/search?q=repo%3AFiloSottile%2Fsunlight+symbol%3AConfig+path%3Acmd%2Fskylight&type=code) is nearly a subset of Sunlight’s.
-- It automatically rate-limits clients that don’t provide a contact through the User-Agent, to make it easier to report client issues and to reduce the impact of non-malicious misbehaving clients.
-- It provides the same monitoring and logging capabilities as Sunlight, including the same debug endpoints and copious public metrics.
-- It exposes a `/health` endpoint which only returns 200 OK if all logs have produced validly-signed checkpoints in the last five seconds. This is what powers the Tuscolo [status page](https://status.sunlight.geomys.org/).
-
-If using a different HTTP server, you should take care of setting the right `Content-Type`, `Content-Encoding`, `Cache-Control`, and ideally `Access-Control-Allow-Origin` headers. Feel free to inquire on the \#sunlight channel of the [transparency.dev Slack][] for help configuring other Static CT read path servers.
-
-[transparency.dev Slack]: https://join.slack.com/t/transparency-dev/shared_invite/zt-27pkqo21d-okUFhur7YZ0rFoJVIOPznQ
-
-You should expect more load on the read path than on the write path, as each certificate is generally only submitted once (or twice counting pre-certificates) but is fetched by many monitors. Be mindful of traffic charges if you run in the cloud! All assets except `/checkpoint` are immutable, so they are highly cacheable.
