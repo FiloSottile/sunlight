@@ -55,7 +55,7 @@ The database must already exist, to prevent misconfigurations. Create it with
 sqlite3 checkpoints.db "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body TEXT)"
 ```
 
-Sunlight can also use DynamoDB or S3-compatible object storage with `ETag` and `If-Match` support (such as Tigris) as global lock backends.
+Sunlight can alternatively use DynamoDB or S3-compatible object storage with `ETag` and `If-Match` support (such as Tigris) as global lock backends.
 
 ### Per-log configuration
 
@@ -83,7 +83,7 @@ The inception date is the only date on which Sunlight will create the log if it 
 
 The submission prefix is the path at which Sunlight will serve this log.
 
-The monitoring prefix is where the read path (see below) is available. Sunlight expects the files uploaded to the backend to become available at this path, but it doesn’t serve them itself!
+The monitoring prefix is where the read path (see below) is available. Sunlight expects the files uploaded to the storage backend to become available at this path, but it doesn’t serve them itself!
 
 ```yaml
     secret: /tank/enc/example2025h2.seed.bin
@@ -91,7 +91,7 @@ The monitoring prefix is where the read path (see below) is available. Sunlight 
 
 Secret is the path to a file containing a secret seed from which the log's private keys are derived. This is the most important secret of the log!
 
-To generate a new seed, run
+To generate a new secret, run
 
 ```
 sunlight-keygen -f example2025h2.seed.bin
@@ -102,7 +102,7 @@ sunlight-keygen -f example2025h2.seed.bin
     poolsize: 750
 ```
 
-The period is how often pending certificates are pooled and written to the backend, in milliseconds. The pool size is how many certificates can fit in the pool before new submissions are rejected until the next write.
+The period is how often pending certificates are pooled and written to the storage backend, in milliseconds. The pool size is how many certificates can fit in the pool before new submissions are rejected until the next write.
 
 A shorter period reduces latency, but causes more frequent writes. You should not set period any higher than 1000.
 
@@ -173,13 +173,13 @@ debug [-u unit] {useragents|ips|keylog={on|off}|logs={on|off}|port}
 
 Static CT chunks the log into “tiles” of 256 entries. If the pool is flushed and the final tiles is smaller than 256 entries, it’s written out as a partial tile. It is allowed to delete partial tiles once the corresponding full tile has been created.
 
-partial-aftersun is a command designed to run as a cronjob which deletes superfluous partial tiles from a local backend, freeing up space. It reads the Sunlight config file directly, and has a number of safety measures to avoid deleting the wrong tiles.
+partial-aftersun is a command designed to run as a cronjob which deletes superfluous partial tiles from a local storage backend, freeing up space. It reads the Sunlight config file directly, and has a number of safety measures to avoid deleting the wrong tiles.
 
 The Tuscolo public configs include [an example of how to schedule it with systemd timers](https://config.sunlight.geomys.org/#%2fetc%2fsystemd%2fsystem%2fpartial-aftersun.service).
 
 ### Hosting the read path
 
-The [Static CT monitoring API](https://github.com/C2SP/C2SP/blob/static-ct-api/v1.0.0/static-ct-api.md#monitoring-apis) can be implemented by simply serving the files uploaded to or stored in the backend by Sunlight.
+The [Static CT monitoring API](https://github.com/C2SP/C2SP/blob/static-ct-api/v1.0.0/static-ct-api.md#monitoring-apis) can be implemented by simply serving the files uploaded to or stored in the storage backend by Sunlight.
 
 If you’re using the S3 backend, that probably means simply placing a CDN in front of it, or making the bucket public. The monitoring prefix of the log can be completely different from the submission prefix, so you can point the read path directly at your static file serving infrastructure.
 
