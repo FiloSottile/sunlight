@@ -16,6 +16,7 @@ import (
 	"filippo.io/torchwood"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/tls"
+	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -25,11 +26,19 @@ import (
 type Client struct {
 	c   *torchwood.Client
 	f   *torchwood.TileFetcher
+	k   crypto.PublicKey
 	err error
 }
 
 // ClientConfig is the configuration for a [Client].
 type ClientConfig struct {
+	// MonitoringPrefix is the c2sp.org/static-ct-api monitoring prefix.
+	MonitoringPrefix string
+
+	// PublicKey is the public key of the log, used to verify checkpoints in
+	// [Client.Checkpoint] and SCTs in [Client.CheckInclusion].
+	PublicKey crypto.PublicKey
+
 	// HTTPClient is the HTTP client used to fetch tiles. If nil, a client is
 	// created with default timeouts and settings.
 	//
@@ -58,8 +67,8 @@ type ClientConfig struct {
 	Logger *slog.Logger
 }
 
-// NewClient creates a new [Client] for the given monitoring prefix.
-func NewClient(prefix string, config *ClientConfig) (*Client, error) {
+// NewClient creates a new [Client].
+func NewClient(config *ClientConfig) (*Client, error) {
 	if config == nil || config.UserAgent == "" {
 		return nil, errors.New("sunlight: missing UserAgent")
 	}
@@ -67,7 +76,8 @@ func NewClient(prefix string, config *ClientConfig) (*Client, error) {
 		!strings.Contains(config.UserAgent, "+https://") {
 		return nil, errors.New("sunlight: UserAgent must include an email address or HTTPS URL (+https://example.com)")
 	}
-	fetcher, err := torchwood.NewTileFetcher(prefix, torchwood.WithTilePath(TilePath),
+	fetcher, err := torchwood.NewTileFetcher(config.MonitoringPrefix,
+		torchwood.WithTilePath(TilePath),
 		torchwood.WithHTTPClient(config.HTTPClient),
 		torchwood.WithUserAgent(config.UserAgent),
 		torchwood.WithConcurrencyLimit(config.ConcurrencyLimit),
@@ -89,7 +99,7 @@ func NewClient(prefix string, config *ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{c: client, f: fetcher}, nil
+	return &Client{c: client, f: fetcher, k: config.PublicKey}, nil
 }
 
 func cutEntry(tile []byte) (entry []byte, rh tlog.Hash, rest []byte, err error) {
@@ -120,9 +130,8 @@ func (c *Client) Err() error {
 // at the given index. The first item in the yielded pair is the overall entry
 // index in the log, starting at start.
 //
-// The provided tree should have been verified by the caller by verifying the
-// signatures on a checkpoint with [note.Open] and [NewRFC6962Verifier], and
-// then using [torchwood.ParseCheckpoint] to extract the tree.
+// The provided tree should have been verified by the caller, for example using
+// [Client.Checkpoint].
 //
 // Iteration may stop before the size of the tree to avoid fetching a partial
 // data tile. Resuming with the same tree will yield the remaining entries,
@@ -152,7 +161,7 @@ func (c *Client) Entries(ctx context.Context, tree tlog.Tree, start int64) iter.
 
 // CheckInclusion fetches the log entry for the given SCT, and verifies that it
 // is included in the given tree and that the SCT is valid for the entry.
-func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte, pubkey crypto.PublicKey) (*LogEntry, tlog.RecordProof, error) {
+func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte) (*LogEntry, tlog.RecordProof, error) {
 	var s ct.SignedCertificateTimestamp
 	if _, err := tls.Unmarshal(sct, &s); err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to unmarshal SCT: %w", err)
@@ -160,7 +169,7 @@ func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte,
 	if s.SCTVersion != ct.V1 {
 		return nil, nil, fmt.Errorf("sunlight: unsupported SCT version %d", s.SCTVersion)
 	}
-	spki, err := x509.MarshalPKIXPublicKey(pubkey)
+	spki, err := x509.MarshalPKIXPublicKey(c.k)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to marshal public key: %w", err)
 	}
@@ -188,8 +197,41 @@ func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte,
 	if entry.Timestamp != int64(s.Timestamp) {
 		return nil, nil, fmt.Errorf("sunlight: SCT timestamp %d does not match entry timestamp %d", s.Timestamp, entry.Timestamp)
 	}
-	if err := tls.VerifySignature(pubkey, entry.MerkleTreeLeaf(), tls.DigitallySigned(s.Signature)); err != nil {
+	if err := tls.VerifySignature(c.k, entry.MerkleTreeLeaf(), tls.DigitallySigned(s.Signature)); err != nil {
 		return nil, nil, fmt.Errorf("sunlight: SCT signature verification failed: %w", err)
 	}
 	return entry, proof, nil
+}
+
+// Checkpoint fetches the latest checkpoint and verifies it.
+func (c *Client) Checkpoint(ctx context.Context) (torchwood.Checkpoint, *note.Note, error) {
+	signedNote, err := c.f.ReadEndpoint(ctx, "checkpoint")
+	if err != nil {
+		return torchwood.Checkpoint{}, nil, fmt.Errorf("sunlight: failed to fetch checkpoint: %w", err)
+	}
+
+	// In Certificate Transparency, a log is identified only by its public key,
+	// so we can pull the name from the checkpoint. This will be a problem if CT
+	// integrates in the witness ecosystem, which instead tracks logs by their
+	// origin line. We'll need witness-aware clients to enforce the origin line.
+	name, _, _ := strings.Cut(string(signedNote), "\n")
+
+	verifier, err := NewRFC6962Verifier(name, c.k)
+	if err != nil {
+		return torchwood.Checkpoint{}, nil, fmt.Errorf("sunlight: failed to create verifier for checkpoint: %w", err)
+	}
+	n, err := note.Open(signedNote, note.VerifierList(verifier))
+	if err != nil {
+		return torchwood.Checkpoint{}, nil, fmt.Errorf("sunlight: failed to verify checkpoint note: %w", err)
+	}
+
+	checkpoint, err := torchwood.ParseCheckpoint(n.Text)
+	if err != nil {
+		return torchwood.Checkpoint{}, nil, fmt.Errorf("sunlight: failed to parse checkpoint: %w", err)
+	}
+	if checkpoint.Origin != name {
+		return torchwood.Checkpoint{}, nil, fmt.Errorf("sunlight: checkpoint origin %q does not match log name %q", checkpoint.Origin, name)
+	}
+
+	return checkpoint, n, nil
 }
