@@ -2,7 +2,11 @@ package sunlight
 
 import (
 	"context"
+	"crypto"
+	"crypto/sha256"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"iter"
 	"log/slog"
 	"net/http"
@@ -10,6 +14,8 @@ import (
 	"time"
 
 	"filippo.io/torchwood"
+	ct "github.com/google/certificate-transparency-go"
+	"github.com/google/certificate-transparency-go/tls"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -18,6 +24,7 @@ import (
 // entries as a Go iterator.
 type Client struct {
 	c   *torchwood.Client
+	f   *torchwood.TileFetcher
 	err error
 }
 
@@ -82,7 +89,7 @@ func NewClient(prefix string, config *ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{c: client}, nil
+	return &Client{c: client, f: fetcher}, nil
 }
 
 func cutEntry(tile []byte) (entry []byte, rh tlog.Hash, rest []byte, err error) {
@@ -141,4 +148,48 @@ func (c *Client) Entries(ctx context.Context, tree tlog.Tree, start int64) iter.
 			}
 		}
 	}
+}
+
+// CheckInclusion fetches the log entry for the given SCT, and verifies that it
+// is included in the given tree and that the SCT is valid for the entry.
+func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte, pubkey crypto.PublicKey) (*LogEntry, tlog.RecordProof, error) {
+	var s ct.SignedCertificateTimestamp
+	if _, err := tls.Unmarshal(sct, &s); err != nil {
+		return nil, nil, fmt.Errorf("sunlight: failed to unmarshal SCT: %w", err)
+	}
+	if s.SCTVersion != ct.V1 {
+		return nil, nil, fmt.Errorf("sunlight: unsupported SCT version %d", s.SCTVersion)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(pubkey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sunlight: failed to marshal public key: %w", err)
+	}
+	if logID := sha256.Sum256(spki); s.LogID.KeyID != logID {
+		return nil, nil, fmt.Errorf("sunlight: SCT log ID %x does not match public key %x", s.LogID.KeyID, logID)
+	}
+	ext, err := ParseExtensions(s.Extensions)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sunlight: failed to parse SCT extensions: %w", err)
+	}
+	e, proof, err := c.c.Entry(ctx, tree, ext.LeafIndex)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sunlight: failed to fetch log entry %d: %w", ext.LeafIndex, err)
+	}
+	entry, rest, err := ReadTileLeaf(e)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sunlight: failed to parse log entry %d: %w", ext.LeafIndex, err)
+	}
+	if len(rest) > 0 {
+		return nil, nil, fmt.Errorf("sunlight: unexpected trailing data in entry	%d", ext.LeafIndex)
+	}
+	if entry.LeafIndex != ext.LeafIndex {
+		return nil, nil, fmt.Errorf("sunlight: SCT leaf index %d does not match entry leaf index %d", ext.LeafIndex, entry.LeafIndex)
+	}
+	if entry.Timestamp != int64(s.Timestamp) {
+		return nil, nil, fmt.Errorf("sunlight: SCT timestamp %d does not match entry timestamp %d", s.Timestamp, entry.Timestamp)
+	}
+	if err := tls.VerifySignature(pubkey, entry.MerkleTreeLeaf(), tls.DigitallySigned(s.Signature)); err != nil {
+		return nil, nil, fmt.Errorf("sunlight: SCT signature verification failed: %w", err)
+	}
+	return entry, proof, nil
 }

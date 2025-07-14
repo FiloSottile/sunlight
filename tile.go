@@ -69,6 +69,14 @@ type LogEntry struct {
 }
 
 // MerkleTreeLeaf returns a RFC 6962 MerkleTreeLeaf.
+//
+// This is the Merkle tree leaf that can be passed, for example, to
+// [tlog.RecordHash] for use with [tlog.CheckRecord].
+//
+// It also matches the digitally-signed data of an SCT, which is technically not
+// a MerkleTreeLeaf, but a completely identical structure (except for the second
+// field, which is a SignatureType of value 0 and length 1 instead of a
+// MerkleLeafType of value 0 and length 1).
 func (e *LogEntry) MerkleTreeLeaf() []byte {
 	b := &cryptobyte.Builder{}
 	b.AddUint8(0 /* version = v1 */)

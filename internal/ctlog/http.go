@@ -212,10 +212,6 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		l.c.Log.ErrorContext(ctx, "failed to encode extensions", "err", err, "body", body)
 		return nil, http.StatusInternalServerError, fmtErrorf("failed to encode extensions: %w", err)
 	}
-	// The digitally-signed data of an SCT is technically not a MerkleTreeLeaf,
-	// but it's a completely identical structure, except for the second field,
-	// which is a SignatureType of value 0 and length 1 instead of a
-	// MerkleLeafType of value 0 and length 1.
 	sctSignature, err := digitallySign(l.c.Key, seq.MerkleTreeLeaf())
 	if err != nil {
 		l.c.Log.ErrorContext(ctx, "failed to sign SCT", "err", err, "body", body)
