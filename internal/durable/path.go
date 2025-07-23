@@ -6,9 +6,23 @@
 // starting over without reading back the failed files.
 //
 // See also https://www.usenix.org/conference/atc20/presentation/rebello,
+// https://despairlabs.com/blog/posts/2025-03-13-fsync-after-open-is-an-elaborate-no-op/,
 // https://wiki.postgresql.org/wiki/Fsync_Errors, and
 // https://danluu.com/deconstruct-files/.
 package durable
+
+// BUG(filippo): there is still a sad path; if fsync errors while applying a
+// staged bundle of tiles, we will crash, and the next start might read the
+// tiles from the page cache and think they are persisted.
+//
+// One option is to do reads with O_DIRECT, the other is to detonate the whole
+// machine on a fsync error.
+//
+// Flushing the cache doesn't seem to be an option, POSIX_FADV_DONTNEED used by
+// vmtouch is advisory, and /proc/sys/vm/drop_caches doesn't drop dirty pages.
+//
+// The good news is that an fsync error will make an OpenZFS pool read-only,
+// so we will never get to publish a checkpoint including those tiles.
 
 import (
 	"os"
