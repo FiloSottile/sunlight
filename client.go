@@ -102,6 +102,15 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	return &Client{c: client, f: fetcher, k: config.PublicKey}, nil
 }
 
+// Fetcher returns the underlying [torchwood.TileFetcher], which can be used to
+// fetch endpoints directly, or as a [tlog.HashReader] via
+// [torchwood.TileHashReaderWithContext].
+//
+// It does not use [ClientConfig.Cache]. If needed, use [torchwood.NewPermanentCache].
+func (c *Client) Fetcher() *torchwood.TileFetcher {
+	return c.f
+}
+
 func cutEntry(tile []byte) (entry []byte, rh tlog.Hash, rest []byte, err error) {
 	// This implementation is terribly inefficient, parsing the whole entry just
 	// to re-serialize and throw it away. If this function shows up in profiles,
