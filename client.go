@@ -235,3 +235,14 @@ func (c *Client) Checkpoint(ctx context.Context) (torchwood.Checkpoint, *note.No
 
 	return checkpoint, n, nil
 }
+
+// Issuer returns the issuer matching the fingerprint from
+// [LogEntry.ChainFingerprints].
+func (c *Client) Issuer(ctx context.Context, fp [32]byte) (*x509.Certificate, error) {
+	endpoint := fmt.Sprintf("issuer/%x", fp)
+	cert, err := c.f.ReadEndpoint(ctx, endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("sunlight: failed to fetch issuer certificate for %x: %w", fp, err)
+	}
+	return x509.ParseCertificate(cert)
+}
