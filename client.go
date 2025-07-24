@@ -253,5 +253,8 @@ func (c *Client) Issuer(ctx context.Context, fp [32]byte) (*x509.Certificate, er
 	if err != nil {
 		return nil, fmt.Errorf("sunlight: failed to fetch issuer certificate for %x: %w", fp, err)
 	}
+	if gotFP := sha256.Sum256(cert); gotFP != fp {
+		return nil, fmt.Errorf("sunlight: log returned wrong issuer %x instead of %x", gotFP, fp)
+	}
 	return x509.ParseCertificate(cert)
 }
