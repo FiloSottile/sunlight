@@ -5,6 +5,8 @@ import (
 	"math"
 	"strings"
 
+	"github.com/google/certificate-transparency-go/x509"
+	"github.com/google/certificate-transparency-go/x509/pkix"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -14,20 +16,32 @@ const TileWidth = 1 << TileHeight
 
 // TilePath returns a tile coordinate path describing t, according to
 // c2sp.org/static-st-api. It differs from [tlog.Tile.Path] in that it doesn't
-// include an explicit tile height.
+// include an explicit tile height. It also supports names tiles at level -2.
 //
 // If t.Height is not TileHeight, TilePath panics.
 func TilePath(t tlog.Tile) string {
 	if t.H != TileHeight {
 		panic(fmt.Sprintf("unexpected tile height %d", t.H))
 	}
+	if t.L == -2 {
+		t.L = -1
+		return "tile/names/" + strings.TrimPrefix(t.Path(), "tile/8/data/")
+	}
 	return "tile/" + strings.TrimPrefix(t.Path(), "tile/8/")
 }
 
 // ParseTilePath parses a tile coordinate path according to c2sp.org/static-st-api.
 // It differs from [tlog.ParseTilePath] in that it doesn't include an explicit
-// tile height.
+// tile height. It also supports names tiles at level -2.
 func ParseTilePath(path string) (tlog.Tile, error) {
+	if rest, ok := strings.CutPrefix(path, "tile/names/"); ok {
+		t, err := tlog.ParseTilePath("tile/8/data/" + rest)
+		if err != nil {
+			return tlog.Tile{}, fmt.Errorf("malformed tile path %q", path)
+		}
+		t.L = -2
+		return t, nil
+	}
 	if rest, ok := strings.CutPrefix(path, "tile/"); ok {
 		t, err := tlog.ParseTilePath("tile/8/" + rest)
 		if err != nil {
@@ -197,4 +211,53 @@ func addExtensions(b *cryptobyte.Builder, leafIndex int64) {
 		}
 		b.AddBytes(ext)
 	})
+}
+
+// A TrimmedEntry is a subset of the information in a [LogEntry], including
+// names parsed from the certificate or pre-certificate.
+type TrimmedEntry struct {
+	// Index is the zero-based index of the leaf in the log.
+	Index int64
+
+	// Timestamp is the UNIX timestamp in milliseconds of when the entry was
+	// added to the log.
+	Timestamp int64
+
+	// Subject is a DER encoded RDNSequence.
+	//
+	// It is omitted if it includes only a CommonName that matches one of the
+	// DNS or IP entries. That is the case for all Domain Validated WebPKI
+	// certificates.
+	Subject []byte `json:",omitempty"`
+
+	// DNS and IP are the Subject Alternative Names of the certificate.
+	DNS []string `json:",omitempty"`
+	IP  []string `json:",omitempty"`
+}
+
+func (e *LogEntry) TrimmedEntry() (*TrimmedEntry, error) {
+	t := &TrimmedEntry{
+		Index:     e.LeafIndex,
+		Timestamp: e.Timestamp,
+	}
+	certBytes := e.Certificate
+	if e.IsPrecert {
+		certBytes = e.PreCertificate
+	}
+	cert, err := x509.ParseCertificate(certBytes)
+	if cert == nil { // x509.ParseCertificate can return non-fatal errors
+		return nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+	for _, name := range cert.Subject.Names {
+		if !name.Type.Equal(pkix.OIDCommonName) {
+			t.Subject = cert.RawSubject
+			break
+		}
+	}
+	t.DNS = cert.DNSNames
+	t.IP = make([]string, len(cert.IPAddresses))
+	for i, ip := range cert.IPAddresses {
+		t.IP[i] = ip.String()
+	}
+	return t, nil
 }

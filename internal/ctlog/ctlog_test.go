@@ -138,24 +138,24 @@ func TestSequenceUploadCount(t *testing.T) {
 		t.Errorf("got %d uploads, expected 1", n)
 	}
 
-	// One entry in steady state (not at tile boundary) should cause four
-	// uploads (the staging bundle, the checkpoint, a level -1 tile, and a level
-	// 0 tile).
+	// One entry in steady state (not at tile boundary) should cause five
+	// uploads (the staging bundle, the checkpoint, and tiles at levels 0, -1,
+	// and -2).
 	addCertificate(t, tl)
 	fatalIfErr(t, tl.Log.Sequence())
-	if n := uploads(); n != 4 {
-		t.Errorf("got %d uploads, expected 4", n)
+	if n := uploads(); n != 5 {
+		t.Errorf("got %d uploads, expected 5", n)
 	}
 
-	// A tile width worth of entries should cause six uploads (the staging
-	// bundle, the checkpoint, two level -1 tiles, two level 0 tiles, and one
-	// level 1 tile).
+	// A tile width worth of entries should cause nine uploads (the staging
+	// bundle, the checkpoint, two level -2 tiles, two level -1 tiles, two level
+	// 0 tiles, and one level 1 tile).
 	for i := 0; i < tileWidth; i++ {
 		addCertificate(t, tl)
 	}
 	fatalIfErr(t, tl.Log.Sequence())
-	if n := uploads(); n != 7 {
-		t.Errorf("got %d uploads, expected 7", n)
+	if n := uploads(); n != 9 {
+		t.Errorf("got %d uploads, expected 9", n)
 	}
 }
 
@@ -202,6 +202,10 @@ func TestSequenceUploadPaths(t *testing.T) {
 		"tile/data/001",
 		"tile/data/001.p/5",
 		"tile/data/002.p/15",
+		"tile/names/000",
+		"tile/names/001",
+		"tile/names/001.p/5",
+		"tile/names/002.p/15",
 	}
 	if !reflect.DeepEqual(keys, expected) {
 		t.Errorf("got %#v, expected %#v", keys, expected)

@@ -282,6 +282,19 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 				return nil, fmt.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", i, got, exp)
 			}
 		}
+
+		// Fetch the right-most names tile.
+		namesTile := edgeTiles[0]
+		namesTile.L = -2
+		namesTile.B, err = fetchAndDecompress(ctx, config.Backend, namesTile.Path())
+		if err != nil {
+			// Names tiles are a best effort, and a new feature.
+			config.Log.ErrorContext(ctx, "couldn't fetch right edge names tile", "err", err)
+		} else {
+			edgeTiles[-2] = namesTile
+
+			// TODO: Verify the names tile against the data tile.
+		}
 	}
 	for _, t := range edgeTiles {
 		config.Log.DebugContext(ctx, "edge tile", "tile", t)
@@ -449,6 +462,7 @@ type UploadOptions struct {
 
 var optsHashTile = &UploadOptions{Immutable: true}
 var optsDataTile = &UploadOptions{Compressed: true, Immutable: true}
+var optsNamesTile = &UploadOptions{ContentType: "application/jsonl; charset=utf-8", Compressed: true, Immutable: true}
 var optsStaging = &UploadOptions{Compressed: true, Immutable: true}
 var optsIssuer = &UploadOptions{ContentType: "application/pkix-cert", Immutable: true}
 var optsCheckpoint = &UploadOptions{ContentType: "text/plain; charset=utf-8"}
@@ -786,10 +800,13 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 	var tileUploads []*uploadAction
 	edgeTiles := maps.Clone(l.edgeTiles)
-	var dataTile []byte
-	// Load the current partial data tile, if any.
+	var dataTile, namesTile []byte
+	// Load the current partial data/names tile, if any.
 	if t, ok := edgeTiles[-1]; ok && t.W < sunlight.TileWidth {
 		dataTile = bytes.Clone(t.B)
+	}
+	if t, ok := edgeTiles[-2]; ok && t.W < sunlight.TileWidth {
+		namesTile = bytes.Clone(t.B)
 	}
 	newHashes := make(map[int64]tlog.Hash)
 	hashReader := l.hashReader(newHashes)
@@ -801,6 +818,15 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		oldTileSize := len(dataTile)
 		dataTile = sunlight.AppendTileLeaf(dataTile, leaf)
 		l.m.SeqLeafSize.Observe(float64(len(dataTile) - oldTileSize))
+
+		if tl, err := leaf.TrimmedEntry(); err != nil {
+			l.c.Log.ErrorContext(ctx, "failed to trim entry", "err", err)
+		} else if line, err := json.Marshal(tl); err != nil {
+			l.c.Log.ErrorContext(ctx, "failed to encode entry for names tile", "err", err)
+		} else {
+			namesTile = append(namesTile, line...)
+			namesTile = append(namesTile, '\n')
+		}
 
 		// Compute the new tree hashes and add them to the hashReader overlay
 		// (we will use them later to insert more leaves and finally to produce
@@ -816,7 +842,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 
 		n++
 
-		// If the data tile is full, stage it.
+		// If the data/names tile is full, stage it.
 		if n%sunlight.TileWidth == 0 {
 			tile := tlog.TileForIndex(sunlight.TileHeight, tlog.StoredHashIndex(0, n-1))
 			tile.L = -1
@@ -834,10 +860,26 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			tileUploads = append(tileUploads, &uploadAction{
 				sunlight.TilePath(tile), gzipData, optsDataTile})
 			dataTile = nil
+
+			tile.L = -2
+			edgeTiles[-2] = tileWithBytes{tile, namesTile}
+
+			gzipNamesTile, err := compress(namesTile)
+			if err != nil {
+				return fmtErrorf("couldn't compress names tile: %w", err)
+			}
+			l.c.Log.DebugContext(ctx, "staging full names tile", "tree_size", n,
+				"tile", tile, "size", len(namesTile), "gzip_size", len(gzipNamesTile))
+			l.m.SeqNamesTileSize.Observe(float64(len(namesTile)))
+			l.m.SeqNamesTileGzipSize.Observe(float64(len(gzipNamesTile)))
+
+			tileUploads = append(tileUploads, &uploadAction{
+				sunlight.TilePath(tile), gzipNamesTile, optsNamesTile})
+			namesTile = nil
 		}
 	}
 
-	// Stage leftover partial data tile, if any.
+	// Stage leftover partial data/names tile, if any.
 	if n != l.tree.N && n%sunlight.TileWidth != 0 {
 		tile := tlog.TileForIndex(sunlight.TileHeight, tlog.StoredHashIndex(0, n-1))
 		tile.L = -1
@@ -852,6 +894,19 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		l.m.SeqDataTileGzipSize.Observe(float64(len(gzipData)))
 		tileUploads = append(tileUploads, &uploadAction{
 			sunlight.TilePath(tile), gzipData, optsDataTile})
+
+		tile.L = -2
+		edgeTiles[-2] = tileWithBytes{tile, namesTile}
+		gzipNamesTile, err := compress(namesTile)
+		if err != nil {
+			return fmtErrorf("couldn't compress names tile: %w", err)
+		}
+		l.c.Log.DebugContext(ctx, "staging partial names tile", "tree_size", n,
+			"tile", tile, "size", len(namesTile), "gzip_size", len(gzipNamesTile))
+		l.m.SeqNamesTileSize.Observe(float64(len(namesTile)))
+		l.m.SeqNamesTileGzipSize.Observe(float64(len(gzipNamesTile)))
+		tileUploads = append(tileUploads, &uploadAction{
+			sunlight.TilePath(tile), gzipNamesTile, optsNamesTile})
 	}
 
 	// Produce and stage new tree tiles.

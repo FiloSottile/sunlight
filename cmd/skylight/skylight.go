@@ -366,14 +366,19 @@ func main() {
 				httpError(w, r, "tile", "invalid tile path", http.StatusBadRequest)
 				return
 			}
-			if tile.L == -1 {
+			switch tile.L {
+			case -1:
 				w.Header().Set("Content-Encoding", "gzip")
 				if tile.W < sunlight.TileWidth {
 					r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "partial"))
 				} else {
 					r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "data"))
 				}
-			} else {
+			case -2:
+				w.Header().Set("Content-Encoding", "gzip")
+				w.Header().Set("Content-Type", "application/jsonl; charset=utf-8")
+				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "names"))
+			default:
 				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "tile"))
 			}
 			handler.ServeHTTP(w, r)
