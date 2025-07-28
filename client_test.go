@@ -5,6 +5,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"filippo.io/sunlight"
 	"github.com/google/certificate-transparency-go/x509"
@@ -12,6 +14,10 @@ import (
 )
 
 func ExampleClient_Entries() {
+	// Note: clients that don't participate in the transparency ecosystem
+	// and are only interested in a feed of names can consider using the
+	// more efficient UnauthenticatedTrimmedEntries method instead.
+
 	block, _ := pem.Decode([]byte(`-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4i7AmqGoGHsorn/eyclTMjrAnM0J
 UUbyGJUxXqq1AjQ4qBC77wXkWt7s/HA8An2vrEBKIGQzqTjV8QIHrmpd4w==
@@ -114,6 +120,43 @@ ybky1bC4rbimZJIjvhnqMcMkf/I=
 		// party, it can be checked as follows.
 		rh := tlog.RecordHash(entry.MerkleTreeLeaf())
 		if err := tlog.CheckRecord(proof, checkpoint.N, checkpoint.Hash, entry.LeafIndex, rh); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func ExampleClient_UnauthenticatedTrimmedEntries() {
+	// Important: UnauthenticatedTrimmedEntries does NOT verify the signed tree
+	// head. It is only suitable for clients that don't participate in the
+	// transparency ecosystem, and are only interested in a feed of names.
+
+	client, err := sunlight.NewClient(&sunlight.ClientConfig{
+		MonitoringPrefix: "https://navigli2025h2.skylight.geomys.org/",
+		UserAgent:        "ExampleClient (changeme@example.com, +https://example.com)",
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	var start int64
+	for {
+		checkpoint, err := client.Fetcher().ReadEndpoint(context.TODO(), "checkpoint")
+		if err != nil {
+			panic(err)
+		}
+
+		_, rest, _ := strings.Cut(string(checkpoint), "\n")
+		size, _, _ := strings.Cut(rest, "\n")
+		end, err := strconv.ParseInt(size, 10, 64)
+		if err != nil {
+			panic(err)
+		}
+
+		for i, entry := range client.UnauthenticatedTrimmedEntries(context.TODO(), end, start) {
+			fmt.Printf("%d: %s\n", i, entry.DNS)
+			start = i + 1
+		}
+		if err := client.Err(); err != nil {
 			panic(err)
 		}
 	}

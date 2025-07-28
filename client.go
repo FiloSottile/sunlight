@@ -5,12 +5,15 @@
 package sunlight
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
 	"net/http"
@@ -30,7 +33,8 @@ import (
 type Client struct {
 	c   *torchwood.Client
 	f   *torchwood.TileFetcher
-	k   crypto.PublicKey
+	r   torchwood.TileReaderWithContext
+	cc  *ClientConfig
 	err error
 }
 
@@ -103,7 +107,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{c: client, f: fetcher, k: config.PublicKey}, nil
+	return &Client{c: client, f: fetcher, r: tileReader, cc: config}, nil
 }
 
 // Fetcher returns the underlying [torchwood.TileFetcher], which can be used to
@@ -189,7 +193,7 @@ func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte)
 	if s.SCTVersion != ct.V1 {
 		return nil, nil, fmt.Errorf("sunlight: unsupported SCT version %d", s.SCTVersion)
 	}
-	spki, err := x509.MarshalPKIXPublicKey(c.k)
+	spki, err := x509.MarshalPKIXPublicKey(c.cc.PublicKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to marshal public key: %w", err)
 	}
@@ -217,7 +221,7 @@ func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte)
 	if entry.Timestamp != int64(s.Timestamp) {
 		return nil, nil, fmt.Errorf("sunlight: SCT timestamp %d does not match entry timestamp %d", s.Timestamp, entry.Timestamp)
 	}
-	if err := tls.VerifySignature(c.k, entry.MerkleTreeLeaf(), tls.DigitallySigned(s.Signature)); err != nil {
+	if err := tls.VerifySignature(c.cc.PublicKey, entry.MerkleTreeLeaf(), tls.DigitallySigned(s.Signature)); err != nil {
 		return nil, nil, fmt.Errorf("sunlight: SCT signature verification failed: %w", err)
 	}
 	return entry, proof, nil
@@ -236,7 +240,7 @@ func (c *Client) Checkpoint(ctx context.Context) (torchwood.Checkpoint, *note.No
 	// origin line. We'll need witness-aware clients to enforce the origin line.
 	name, _, _ := strings.Cut(string(signedNote), "\n")
 
-	verifier, err := NewRFC6962Verifier(name, c.k)
+	verifier, err := NewRFC6962Verifier(name, c.cc.PublicKey)
 	if err != nil {
 		return torchwood.Checkpoint{}, nil, fmt.Errorf("sunlight: failed to create verifier for checkpoint: %w", err)
 	}
@@ -268,4 +272,110 @@ func (c *Client) Issuer(ctx context.Context, fp [32]byte) (*x509.Certificate, er
 		return nil, fmt.Errorf("sunlight: log returned wrong issuer %x instead of %x", gotFP, fp)
 	}
 	return x509.ParseCertificate(cert)
+}
+
+// UnauthenticatedTrimmedEntries returns an iterator that yields trimmed
+// entries, starting and ending at the given index. The first item in the
+// yielded pair is the overall entry index in the log, starting at start.
+//
+// Entries are NOT authenticated against a checkpoint and, if supported by the
+// log, are fetched through a more efficient protocol than [Client.Entries].
+// This method is only suitable for clients that don't participate in the
+// transparency ecosystem, and are only interested in a feed of names.
+//
+// Callers must check [Client.Err] after the iteration breaks.
+func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end int64) iter.Seq2[int64, *TrimmedEntry] {
+	c.err = nil
+	if start < 0 || end < 0 || start > end {
+		return func(func(int64, *TrimmedEntry) bool) {
+			c.err = fmt.Errorf("sunlight: invalid range %d-%d", start, end)
+		}
+	}
+
+	fallbackToDataTile := false
+	return func(yield func(int64, *TrimmedEntry) bool) {
+		for start < end {
+			N := start / TileWidth
+			W := int(min(end-N, TileWidth))
+
+			data, err := func() ([]byte, error) {
+				ctx := ctx
+				if c.cc.Timeout != 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, c.cc.Timeout)
+					defer cancel()
+				}
+
+				tiles := []tlog.Tile{{H: TileHeight, L: -2, N: N, W: W}}
+				if !fallbackToDataTile {
+					tdata, err := c.f.ReadTiles(ctx, tiles)
+					if err != nil {
+						if c.cc.Logger != nil {
+							c.cc.Logger.Info("failed to read names tile, falling back to data tiles",
+								"tile", TilePath(tiles[0]), "err", err)
+						}
+						fallbackToDataTile = true
+					} else {
+						return tdata[0], nil
+					}
+				}
+				if fallbackToDataTile {
+					tiles[0].L = -1
+					tdata, err := c.f.ReadTiles(ctx, tiles)
+					if err != nil {
+						return nil, err
+					}
+					return tdata[0], nil
+				}
+				panic("unreachable")
+			}()
+			if err != nil {
+				c.err = err
+				return
+			}
+
+			if fallbackToDataTile {
+				for len(data) > 0 {
+					var e *LogEntry
+					e, data, err = ReadTileLeaf(data)
+					if err != nil {
+						c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", N, W, err)
+						return
+					}
+					te, err := e.TrimmedEntry()
+					if err != nil {
+						c.err = fmt.Errorf("failed to trim entry %d: %w", e.LeafIndex, err)
+						return
+					}
+
+					if te.Index < start {
+						continue
+					}
+					if !yield(te.Index, te) {
+						return
+					}
+				}
+			} else {
+				d := json.NewDecoder(bytes.NewReader(data))
+				for {
+					var te *TrimmedEntry
+					if err := d.Decode(&te); err == io.EOF {
+						break
+					} else if err != nil {
+						c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", N, W, err)
+						return
+					}
+
+					if te.Index < start {
+						continue
+					}
+					if !yield(te.Index, te) {
+						return
+					}
+				}
+			}
+
+			start += int64(W)
+		}
+	}
 }
