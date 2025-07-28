@@ -1,3 +1,7 @@
+// Package sunlight implements the [Static Certificate Transparency API],
+// including a Static CT log client.
+//
+// [Static Certificate Transparency API]: https://c2sp.org/static-ct-api
 package sunlight
 
 import (
