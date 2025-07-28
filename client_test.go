@@ -2,12 +2,12 @@ package sunlight_test
 
 import (
 	"context"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 
 	"filippo.io/sunlight"
+	"github.com/google/certificate-transparency-go/x509"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -48,25 +48,43 @@ UUbyGJUxXqq1AjQ4qBC77wXkWt7s/HA8An2vrEBKIGQzqTjV8QIHrmpd4w==
 
 func ExampleClient_CheckInclusion() {
 	block, _ := pem.Decode([]byte(`-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEK9d4GGtzbkwwsYpEtvnU9KKgZr67
-MsGlB7mnF8DW9bHnngHzPzXPbdo7n+FyCwSDYqEHbal1Z0CCVyZD6wQ/ow==
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4i7AmqGoGHsorn/eyclTMjrAnM0J
+UUbyGJUxXqq1AjQ4qBC77wXkWt7s/HA8An2vrEBKIGQzqTjV8QIHrmpd4w==
 -----END PUBLIC KEY-----`))
 	key, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
 		panic(err)
 	}
 
+	certificate, _ := pem.Decode([]byte(`-----BEGIN CERTIFICATE-----
+MIID0DCCA1WgAwIBAgISLJBonEz2NlVeQFEPlG5vsIrMMAoGCCqGSM49BAMDMFMx
+CzAJBgNVBAYTAlVTMSAwHgYDVQQKExcoU1RBR0lORykgTGV0J3MgRW5jcnlwdDEi
+MCAGA1UEAxMZKFNUQUdJTkcpIEZhbHNlIEZlbm5lbCBFNjAeFw0yNTA3MjcyMjA4
+NDlaFw0yNTEwMjUyMjA4NDhaMCMxITAfBgNVBAMTGGhhcmRlcnJhZGlvZm1qdW1w
+LnJhZC5pbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABCLE1WbEwJ1Y+k3bj+vf
+R4s6nDem8eZea0vZ8sgJqh13mm89lHZZTr5l/qRRFbcl6fL8LJNw0vapzr3rpnTu
+7NGjggI3MIICMzAOBgNVHQ8BAf8EBAMCB4AwHQYDVR0lBBYwFAYIKwYBBQUHAwEG
+CCsGAQUFBwMCMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFFvoTvFTQNkRzVpfP8JF
+v0YNc908MB8GA1UdIwQYMBaAFKF0GgZtULeGLUoswX60jYhJbM0WMDYGCCsGAQUF
+BwEBBCowKDAmBggrBgEFBQcwAoYaaHR0cDovL3N0Zy1lNi5pLmxlbmNyLm9yZy8w
+IwYDVR0RBBwwGoIYaGFyZGVycmFkaW9mbWp1bXAucmFkLmlvMBMGA1UdIAQMMAow
+CAYGZ4EMAQIBMDEGA1UdHwQqMCgwJqAkoCKGIGh0dHA6Ly9zdGctZTYuYy5sZW5j
+ci5vcmcvNzcuY3JsMIIBDQYKKwYBBAHWeQIEAgSB/gSB+wD5AHYA3Zk0/KXnJIDJ
+Vmh9gTSZCEmySfe1adjHvKs/XMHzbmQAAAGYTiQDlAAABAMARzBFAiAZaM/o9pZJ
+AoaMVTaHqM6aViSIjLam0CiEe8OK5M8RTAIhANS+35smBUCZvpM+zRNwSQ1siDDm
+f2F8ayHSru9+BTeEAH8A5Pt3SiEkxYZAsYMvUKv63ISjiu1xke62aSI3ksv2KJEA
+AAGYTiQDpAAIAAAFAATjOI4EAwBIMEYCIQC9ARnxeUgUL8Gkvl1lgKkuFVJaAOkv
+TQ6H8sYzVcbliQIhAN5nTObp15PQSusjd0Qd+povk1DJ4tVA9rNKFEGOpTVoMAoG
+CCqGSM49BAMDA2kAMGYCMQCuw26zAJbmCgvfsDu9ong073LppgwPWogX1DI050uS
+scMeHBWmB0jXuic4zkVzVBQCMQD+IkFkLg8qOHNtipO+mtTCtdW8mEl7Ptb3yv04
+ybky1bC4rbimZJIjvhnqMcMkf/I=
+-----END CERTIFICATE-----`))
+
 	client, err := sunlight.NewClient(&sunlight.ClientConfig{
-		MonitoringPrefix: "https://tuscolo2025h2.skylight.geomys.org/",
+		MonitoringPrefix: "https://navigli2025h2.skylight.geomys.org/",
 		PublicKey:        key,
 		UserAgent:        "ExampleClient (changeme@example.com, +https://example.com)",
 	})
-	if err != nil {
-		panic(err)
-	}
-
-	// sct is a single serialized SCT, as encoded in X.509 certificates.
-	sct, err := base64.StdEncoding.DecodeString("AO+dBEIuILQyECdU31LSUUYCf4RMB/2GXski7m/On3u8AAABl8safDMACAAABQAxq2nuBAMASDBGAiEAwdEb7/m/KfpH4KRHXsMkvOTTa7KsnzWa27EnQxfH0r8CIQDzDeX2wKCVeM/cyvRId7STFkMHz/i5HSQVRBx2PtfxNg==")
 	if err != nil {
 		panic(err)
 	}
@@ -75,15 +93,28 @@ MsGlB7mnF8DW9bHnngHzPzXPbdo7n+FyCwSDYqEHbal1Z0CCVyZD6wQ/ow==
 	if err != nil {
 		panic(err)
 	}
-	entry, proof, err := client.CheckInclusion(context.TODO(), checkpoint.Tree, sct)
+
+	cert, err := x509.ParseCertificate(certificate.Bytes)
 	if err != nil {
 		panic(err)
 	}
+	for _, sct := range cert.SCTList.SCTList {
+		entry, proof, err := client.CheckInclusion(context.TODO(), checkpoint.Tree, sct.Val)
+		if errors.Is(err, sunlight.ErrWrongLogID) {
+			println("SCT log ID does not match public key, skipping")
+			continue
+		}
+		if err != nil {
+			panic(err)
+		}
+		println("Entry leaf index:", entry.LeafIndex)
+		println("Entry timestamp:", entry.Timestamp)
 
-	// There is no need to check the inclusion proof, but if provided to a third
-	// party, it can be checked as follows.
-	rh := tlog.RecordHash(entry.MerkleTreeLeaf())
-	if err := tlog.CheckRecord(proof, checkpoint.N, checkpoint.Hash, entry.LeafIndex, rh); err != nil {
-		panic(err)
+		// There is no need to check the inclusion proof, but if provided to a third
+		// party, it can be checked as follows.
+		rh := tlog.RecordHash(entry.MerkleTreeLeaf())
+		if err := tlog.CheckRecord(proof, checkpoint.N, checkpoint.Hash, entry.LeafIndex, rh); err != nil {
+			panic(err)
+		}
 	}
 }

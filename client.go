@@ -168,8 +168,15 @@ func (c *Client) Entries(ctx context.Context, tree tlog.Tree, start int64) iter.
 	}
 }
 
+// ErrWrongLogID indicates that the log ID in the SCT does not match the public
+// key of the log. [Client.CheckInclusion] can return an error wrapping this.
+var ErrWrongLogID = errors.New("sunlight: SCT log ID does not match public key")
+
 // CheckInclusion fetches the log entry for the given SCT, and verifies that it
 // is included in the given tree and that the SCT is valid for the entry.
+//
+// If the SCT log ID does not match [ClientConfig.PublicKey], CheckInclusion
+// returns an error wrapping [ErrWrongLogID].
 func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte) (*LogEntry, tlog.RecordProof, error) {
 	var s ct.SignedCertificateTimestamp
 	if _, err := tls.Unmarshal(sct, &s); err != nil {
@@ -183,7 +190,7 @@ func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte)
 		return nil, nil, fmt.Errorf("sunlight: failed to marshal public key: %w", err)
 	}
 	if logID := sha256.Sum256(spki); s.LogID.KeyID != logID {
-		return nil, nil, fmt.Errorf("sunlight: SCT log ID %x does not match public key %x", s.LogID.KeyID, logID)
+		return nil, nil, fmt.Errorf("%w: expected %x, got %x", ErrWrongLogID, logID, s.LogID.KeyID)
 	}
 	ext, err := ParseExtensions(s.Extensions)
 	if err != nil {
