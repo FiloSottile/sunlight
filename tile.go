@@ -216,9 +216,6 @@ func addExtensions(b *cryptobyte.Builder, leafIndex int64) {
 // A TrimmedEntry is a subset of the information in a [LogEntry], including
 // names parsed from the certificate or pre-certificate.
 type TrimmedEntry struct {
-	// Index is the zero-based index of the leaf in the log.
-	Index int64
-
 	// Timestamp is the UNIX timestamp in milliseconds of when the entry was
 	// added to the log.
 	Timestamp int64
@@ -237,7 +234,6 @@ type TrimmedEntry struct {
 
 func (e *LogEntry) TrimmedEntry() (*TrimmedEntry, error) {
 	t := &TrimmedEntry{
-		Index:     e.LeafIndex,
 		Timestamp: e.Timestamp,
 	}
 	certBytes := e.Certificate

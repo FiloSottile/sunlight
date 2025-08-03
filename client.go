@@ -348,15 +348,16 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 						return
 					}
 
-					if te.Index < start {
+					if e.LeafIndex < start {
 						continue
 					}
-					if !yield(te.Index, te) {
+					if !yield(e.LeafIndex, te) {
 						return
 					}
 				}
 			} else {
 				d := json.NewDecoder(bytes.NewReader(data))
+				i := N * TileWidth
 				for {
 					var te *TrimmedEntry
 					if err := d.Decode(&te); err == io.EOF {
@@ -366,12 +367,14 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 						return
 					}
 
-					if te.Index < start {
+					if i < start {
+						i++
 						continue
 					}
-					if !yield(te.Index, te) {
+					if !yield(i, te) {
 						return
 					}
+					i++
 				}
 			}
 
