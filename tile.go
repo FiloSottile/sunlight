@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/google/certificate-transparency-go/x509"
-	"github.com/google/certificate-transparency-go/x509/pkix"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -220,12 +219,13 @@ type TrimmedEntry struct {
 	// added to the log.
 	Timestamp int64
 
-	// Subject is a DER encoded RDNSequence.
-	//
-	// It is omitted if it includes only a CommonName that matches one of the
-	// DNS or IP entries. That is the case for all Domain Validated WebPKI
-	// certificates.
-	Subject []byte `json:",omitempty"`
+	// Subject contains the parsed Subject information from the certificate.
+	Subject struct {
+		Country, Organization, OrganizationalUnit []string `json:",omitempty"`
+		Locality, Province                        []string `json:",omitempty"`
+		StreetAddress, PostalCode                 []string `json:",omitempty"`
+		CommonName                                string   `json:",omitempty"`
+	} `json:",omitzero"`
 
 	// DNS and IP are the Subject Alternative Names of the certificate.
 	DNS []string `json:",omitempty"`
@@ -244,12 +244,14 @@ func (e *LogEntry) TrimmedEntry() (*TrimmedEntry, error) {
 	if cert == nil { // x509.ParseCertificate can return non-fatal errors
 		return nil, fmt.Errorf("failed to parse certificate: %w", err)
 	}
-	for _, name := range cert.Subject.Names {
-		if !name.Type.Equal(pkix.OIDCommonName) {
-			t.Subject = cert.RawSubject
-			break
-		}
-	}
+	t.Subject.Country = cert.Subject.Country
+	t.Subject.Organization = cert.Subject.Organization
+	t.Subject.OrganizationalUnit = cert.Subject.OrganizationalUnit
+	t.Subject.Locality = cert.Subject.Locality
+	t.Subject.Province = cert.Subject.Province
+	t.Subject.StreetAddress = cert.Subject.StreetAddress
+	t.Subject.PostalCode = cert.Subject.PostalCode
+	t.Subject.CommonName = cert.Subject.CommonName
 	t.DNS = cert.DNSNames
 	t.IP = make([]string, len(cert.IPAddresses))
 	for i, ip := range cert.IPAddresses {
