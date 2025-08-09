@@ -5,6 +5,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 
 	"filippo.io/sunlight"
 	"github.com/google/certificate-transparency-go/x509"
@@ -44,6 +46,57 @@ UUbyGJUxXqq1AjQ4qBC77wXkWt7s/HA8An2vrEBKIGQzqTjV8QIHrmpd4w==
 			panic(err)
 		}
 	}
+}
+
+func ExampleClient_Entries_withCache() {
+	block, _ := pem.Decode([]byte(`-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4i7AmqGoGHsorn/eyclTMjrAnM0J
+UUbyGJUxXqq1AjQ4qBC77wXkWt7s/HA8An2vrEBKIGQzqTjV8QIHrmpd4w==
+-----END PUBLIC KEY-----`))
+	key, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		panic(err)
+	}
+
+	tmpdir, err := os.MkdirTemp("", "sunlight_client_test")
+	if err != nil {
+		panic(err)
+	}
+	client, err := sunlight.NewClient(&sunlight.ClientConfig{
+		MonitoringPrefix: "https://navigli2025h2.skylight.geomys.org/",
+		PublicKey:        key,
+		UserAgent:        "ExampleClient (changeme@example.com, +https://example.com)",
+		Logger:			  slog.Default(), 	// log output will indicate caching when present
+		ConcurrencyLimit: 2,				// avoid triggering rate limits
+		Cache:			  tmpdir,
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(tmpdir)
+
+	var start int64
+	checkpoint, _, err := client.Checkpoint(context.TODO())
+	if err != nil {
+		panic(err)
+	}
+	for _, entry := range client.Entries(context.TODO(), checkpoint.Tree, start) {
+		fmt.Println(entry.LeafIndex)
+		break  // Get first cert only to populate cache with initial tiles
+	}
+	if err := client.Err(); err != nil {
+		panic(err)
+	}
+	dirEntries, err := os.ReadDir(tmpdir)
+	if err != nil {
+		panic(err)
+	}
+	for _, dir := range dirEntries {
+		fmt.Println(dir.Name())
+	}
+	// Output: 
+	// 0
+	// tile
 }
 
 func ExampleClient_CheckInclusion() {

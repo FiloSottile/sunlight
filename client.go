@@ -98,7 +98,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 			return nil, err
 		}
 	}
-	client, err := torchwood.NewClient(fetcher, torchwood.WithCutEntry(cutEntry),
+	client, err := torchwood.NewClient(tileReader, torchwood.WithCutEntry(cutEntry),
 		torchwood.WithTimeout(config.Timeout))
 	if err != nil {
 		return nil, err
