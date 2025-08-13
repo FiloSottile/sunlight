@@ -17,6 +17,7 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -56,6 +57,8 @@ type ClientConfig struct {
 
 	// UserAgent is the User-Agent string used for HTTP requests. It must be
 	// set, and it must include an email address and/or an HTTPS URL.
+	//
+	// The library version will be appended to the User-Agent string.
 	UserAgent string
 
 	// Timeout is how long the Entries iterator can take to yield an entry.
@@ -87,7 +90,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	fetcher, err := torchwood.NewTileFetcher(config.MonitoringPrefix,
 		torchwood.WithTilePath(TilePath),
 		torchwood.WithHTTPClient(config.HTTPClient),
-		torchwood.WithUserAgent(config.UserAgent),
+		torchwood.WithUserAgent(config.UserAgent+" sunlight/"+libraryVersion()),
 		torchwood.WithConcurrencyLimit(config.ConcurrencyLimit),
 		torchwood.WithTileFetcherLogger(config.Logger))
 	if err != nil {
@@ -381,4 +384,20 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 			start += int64(W)
 		}
 	}
+}
+
+func libraryVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	for _, dep := range info.Deps {
+		if dep.Path == "filippo.io/sunlight" {
+			if dep.Replace != nil {
+				return dep.Version + "!"
+			}
+			return dep.Version
+		}
+	}
+	return "unknown"
 }
