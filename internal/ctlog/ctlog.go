@@ -263,7 +263,10 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		}
 		edgeTiles[-1] = dataTile
 
-		// Verify the data tile against the level 0 tile.
+		// Verify the data tile against the level 0 tile, and build the partial names tile.
+		namesTile := edgeTiles[0]
+		namesTile.L = -2
+		namesTile.B = nil
 		b := edgeTiles[-1].B
 		start := sunlight.TileWidth * dataTile.N
 		for i := start; i < start+int64(dataTile.W); i++ {
@@ -281,20 +284,17 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 			if got != exp {
 				return nil, fmt.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", i, got, exp)
 			}
-		}
 
-		// Fetch the right-most names tile.
-		namesTile := edgeTiles[0]
-		namesTile.L = -2
-		namesTile.B, err = fetchAndDecompress(ctx, config.Backend, namesTile.Path())
-		if err != nil {
-			// Names tiles are a best effort, and a new feature.
-			config.Log.ErrorContext(ctx, "couldn't fetch right edge names tile", "err", err)
-		} else {
-			edgeTiles[-2] = namesTile
-
-			// TODO: Verify the names tile against the data tile.
+			if tl, err := e.TrimmedEntry(); err != nil {
+				config.Log.ErrorContext(ctx, "failed to trim entry", "err", err)
+			} else if line, err := json.Marshal(tl); err != nil {
+				config.Log.ErrorContext(ctx, "failed to encode entry for names tile", "err", err)
+			} else {
+				namesTile.B = append(namesTile.B, line...)
+				namesTile.B = append(namesTile.B, '\n')
+			}
 		}
+		edgeTiles[-2] = namesTile
 	}
 	for _, t := range edgeTiles {
 		config.Log.DebugContext(ctx, "edge tile", "tile", t)
