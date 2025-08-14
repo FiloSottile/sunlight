@@ -152,7 +152,7 @@ func ExampleClient_UnauthenticatedTrimmedEntries() {
 			panic(err)
 		}
 
-		for i, entry := range client.UnauthenticatedTrimmedEntries(context.TODO(), end, start) {
+		for i, entry := range client.UnauthenticatedTrimmedEntries(context.TODO(), start, end) {
 			fmt.Printf("%d: %s\n", i, entry.DNS)
 			start = i + 1
 		}
