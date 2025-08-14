@@ -299,7 +299,7 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 	return func(yield func(int64, *TrimmedEntry) bool) {
 		for start < end {
 			N := start / TileWidth
-			W := int(min(end-N, TileWidth))
+			W := int(min((N+1)*TileWidth, end) - N*TileWidth)
 
 			data, err := func() ([]byte, error) {
 				ctx := ctx
