@@ -298,10 +298,17 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 	fallbackToDataTile := false
 	return func(yield func(int64, *TrimmedEntry) bool) {
 		for start < end {
-			N := start / TileWidth
-			W := int(min((N+1)*TileWidth, end) - N*TileWidth)
+			tiles := make([]tlog.Tile, 0, 16)
+			for i := range cap(tiles) {
+				N := start/TileWidth + int64(i)
+				W := int(min((N+1)*TileWidth, end) - N*TileWidth)
+				if W <= 0 {
+					break
+				}
+				tiles = append(tiles, tlog.Tile{H: TileHeight, L: -2, N: N, W: W})
+			}
 
-			data, err := func() ([]byte, error) {
+			data, err := func() ([][]byte, error) {
 				ctx := ctx
 				if c.cc.Timeout != 0 {
 					var cancel context.CancelFunc
@@ -309,26 +316,27 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 					defer cancel()
 				}
 
-				tiles := []tlog.Tile{{H: TileHeight, L: -2, N: N, W: W}}
 				if !fallbackToDataTile {
-					tdata, err := c.f.ReadTiles(ctx, tiles)
+					tdata, err := c.r.ReadTiles(ctx, tiles)
 					if err != nil {
 						if c.cc.Logger != nil {
-							c.cc.Logger.Info("failed to read names tile, falling back to data tiles",
-								"tile", TilePath(tiles[0]), "err", err)
+							c.cc.Logger.Info("failed to read names tiles, falling back to data tiles",
+								"first_tile", TilePath(tiles[0]), "err", err)
 						}
 						fallbackToDataTile = true
 					} else {
-						return tdata[0], nil
+						return tdata, nil
 					}
 				}
 				if fallbackToDataTile {
-					tiles[0].L = -1
-					tdata, err := c.f.ReadTiles(ctx, tiles)
+					for i := range tiles {
+						tiles[i].L = -1
+					}
+					tdata, err := c.r.ReadTiles(ctx, tiles)
 					if err != nil {
 						return nil, err
 					}
-					return tdata[0], nil
+					return tdata, nil
 				}
 				panic("unreachable")
 			}()
@@ -337,51 +345,54 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 				return
 			}
 
-			if fallbackToDataTile {
-				for len(data) > 0 {
-					var e *LogEntry
-					e, data, err = ReadTileLeaf(data)
-					if err != nil {
-						c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", N, W, err)
-						return
-					}
-					te, err := e.TrimmedEntry()
-					if err != nil {
-						c.err = fmt.Errorf("failed to trim entry %d: %w", e.LeafIndex, err)
-						return
-					}
+			for t, data := range data {
+				tile := tiles[t]
+				if fallbackToDataTile {
+					for len(data) > 0 {
+						var e *LogEntry
+						e, data, err = ReadTileLeaf(data)
+						if err != nil {
+							c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", tile.N, tile.W, err)
+							return
+						}
+						te, err := e.TrimmedEntry()
+						if err != nil {
+							c.err = fmt.Errorf("failed to trim entry %d: %w", e.LeafIndex, err)
+							return
+						}
 
-					if e.LeafIndex < start {
-						continue
+						if e.LeafIndex < start {
+							continue
+						}
+						if !yield(e.LeafIndex, te) {
+							return
+						}
 					}
-					if !yield(e.LeafIndex, te) {
-						return
-					}
-				}
-			} else {
-				d := json.NewDecoder(bytes.NewReader(data))
-				i := N * TileWidth
-				for {
-					var te *TrimmedEntry
-					if err := d.Decode(&te); err == io.EOF {
-						break
-					} else if err != nil {
-						c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", N, W, err)
-						return
-					}
+				} else {
+					d := json.NewDecoder(bytes.NewReader(data))
+					i := tile.N * TileWidth
+					for {
+						var te *TrimmedEntry
+						if err := d.Decode(&te); err == io.EOF {
+							break
+						} else if err != nil {
+							c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", tile.N, tile.W, err)
+							return
+						}
 
-					if i < start {
+						if i < start {
+							i++
+							continue
+						}
+						if !yield(i, te) {
+							return
+						}
 						i++
-						continue
 					}
-					if !yield(i, te) {
-						return
-					}
-					i++
 				}
-			}
 
-			start += int64(W)
+				start += int64(tile.W)
+			}
 		}
 	}
 }
