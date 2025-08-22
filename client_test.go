@@ -1,163 +1,119 @@
-package sunlight_test
+package sunlight
 
 import (
 	"context"
-	"encoding/pem"
-	"errors"
 	"fmt"
-	"strconv"
-	"strings"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
 
-	"filippo.io/sunlight"
-	"github.com/google/certificate-transparency-go/x509"
+	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
-func ExampleClient_Entries() {
-	// Note: clients that don't participate in the transparency ecosystem
-	// and are only interested in a feed of names can consider using the
-	// more efficient UnauthenticatedTrimmedEntries method instead.
-
-	block, _ := pem.Decode([]byte(`-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4i7AmqGoGHsorn/eyclTMjrAnM0J
-UUbyGJUxXqq1AjQ4qBC77wXkWt7s/HA8An2vrEBKIGQzqTjV8QIHrmpd4w==
------END PUBLIC KEY-----`))
-	key, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		panic(err)
-	}
-
-	client, err := sunlight.NewClient(&sunlight.ClientConfig{
-		MonitoringPrefix: "https://navigli2025h2.skylight.geomys.org/",
-		PublicKey:        key,
-		UserAgent:        "ExampleClient (changeme@example.com, +https://example.com)",
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	var start int64
-	for {
-		checkpoint, _, err := client.Checkpoint(context.TODO())
-		if err != nil {
-			panic(err)
-		}
-		for i, entry := range client.Entries(context.TODO(), checkpoint.Tree, start) {
-			fmt.Printf("%d: %d %d %x\n", i, entry.LeafIndex, entry.Timestamp, entry.IssuerKeyHash)
-			start = i + 1
-		}
-		if err := client.Err(); err != nil {
-			panic(err)
-		}
-	}
+type testTileReader struct {
+	t                         *testing.T
+	noDataTiles, noNamesTiles bool
 }
 
-func ExampleClient_CheckInclusion() {
-	block, _ := pem.Decode([]byte(`-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4i7AmqGoGHsorn/eyclTMjrAnM0J
-UUbyGJUxXqq1AjQ4qBC77wXkWt7s/HA8An2vrEBKIGQzqTjV8QIHrmpd4w==
------END PUBLIC KEY-----`))
-	key, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		panic(err)
-	}
+var _ torchwood.TileReaderWithContext = &testTileReader{}
 
-	certificate, _ := pem.Decode([]byte(`-----BEGIN CERTIFICATE-----
-MIID0DCCA1WgAwIBAgISLJBonEz2NlVeQFEPlG5vsIrMMAoGCCqGSM49BAMDMFMx
-CzAJBgNVBAYTAlVTMSAwHgYDVQQKExcoU1RBR0lORykgTGV0J3MgRW5jcnlwdDEi
-MCAGA1UEAxMZKFNUQUdJTkcpIEZhbHNlIEZlbm5lbCBFNjAeFw0yNTA3MjcyMjA4
-NDlaFw0yNTEwMjUyMjA4NDhaMCMxITAfBgNVBAMTGGhhcmRlcnJhZGlvZm1qdW1w
-LnJhZC5pbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABCLE1WbEwJ1Y+k3bj+vf
-R4s6nDem8eZea0vZ8sgJqh13mm89lHZZTr5l/qRRFbcl6fL8LJNw0vapzr3rpnTu
-7NGjggI3MIICMzAOBgNVHQ8BAf8EBAMCB4AwHQYDVR0lBBYwFAYIKwYBBQUHAwEG
-CCsGAQUFBwMCMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFFvoTvFTQNkRzVpfP8JF
-v0YNc908MB8GA1UdIwQYMBaAFKF0GgZtULeGLUoswX60jYhJbM0WMDYGCCsGAQUF
-BwEBBCowKDAmBggrBgEFBQcwAoYaaHR0cDovL3N0Zy1lNi5pLmxlbmNyLm9yZy8w
-IwYDVR0RBBwwGoIYaGFyZGVycmFkaW9mbWp1bXAucmFkLmlvMBMGA1UdIAQMMAow
-CAYGZ4EMAQIBMDEGA1UdHwQqMCgwJqAkoCKGIGh0dHA6Ly9zdGctZTYuYy5sZW5j
-ci5vcmcvNzcuY3JsMIIBDQYKKwYBBAHWeQIEAgSB/gSB+wD5AHYA3Zk0/KXnJIDJ
-Vmh9gTSZCEmySfe1adjHvKs/XMHzbmQAAAGYTiQDlAAABAMARzBFAiAZaM/o9pZJ
-AoaMVTaHqM6aViSIjLam0CiEe8OK5M8RTAIhANS+35smBUCZvpM+zRNwSQ1siDDm
-f2F8ayHSru9+BTeEAH8A5Pt3SiEkxYZAsYMvUKv63ISjiu1xke62aSI3ksv2KJEA
-AAGYTiQDpAAIAAAFAATjOI4EAwBIMEYCIQC9ARnxeUgUL8Gkvl1lgKkuFVJaAOkv
-TQ6H8sYzVcbliQIhAN5nTObp15PQSusjd0Qd+povk1DJ4tVA9rNKFEGOpTVoMAoG
-CCqGSM49BAMDA2kAMGYCMQCuw26zAJbmCgvfsDu9ong073LppgwPWogX1DI050uS
-scMeHBWmB0jXuic4zkVzVBQCMQD+IkFkLg8qOHNtipO+mtTCtdW8mEl7Ptb3yv04
-ybky1bC4rbimZJIjvhnqMcMkf/I=
------END CERTIFICATE-----`))
-
-	client, err := sunlight.NewClient(&sunlight.ClientConfig{
-		MonitoringPrefix: "https://navigli2025h2.skylight.geomys.org/",
-		PublicKey:        key,
-		UserAgent:        "ExampleClient (changeme@example.com, +https://example.com)",
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	checkpoint, _, err := client.Checkpoint(context.TODO())
-	if err != nil {
-		panic(err)
-	}
-
-	cert, err := x509.ParseCertificate(certificate.Bytes)
-	if err != nil {
-		panic(err)
-	}
-	for _, sct := range cert.SCTList.SCTList {
-		entry, proof, err := client.CheckInclusion(context.TODO(), checkpoint.Tree, sct.Val)
-		if errors.Is(err, sunlight.ErrWrongLogID) {
-			println("SCT log ID does not match public key, skipping")
-			continue
+func (tr *testTileReader) ReadTiles(ctx context.Context, tiles []tlog.Tile) (data [][]byte, err error) {
+	for _, t := range tiles {
+		if t.L == -1 && tr.noDataTiles {
+			return nil, fmt.Errorf("refusing to read tile %s due to noDataTiles setting", TilePath(t))
 		}
+		if t.L == -2 && tr.noNamesTiles {
+			return nil, fmt.Errorf("refusing to read tile %s due to noNamesTiles setting", TilePath(t))
+		}
+		path := TilePath(t)
+		path = filepath.Join("testdata", "navigli2025h2", path)
+		b, err := os.ReadFile(path)
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("failed to read tile %s: %w", path, err)
 		}
-		println("Entry leaf index:", entry.LeafIndex)
-		println("Entry timestamp:", entry.Timestamp)
-
-		// There is no need to check the inclusion proof, but if provided to a third
-		// party, it can be checked as follows.
-		rh := tlog.RecordHash(entry.MerkleTreeLeaf())
-		if err := tlog.CheckRecord(proof, checkpoint.N, checkpoint.Hash, entry.LeafIndex, rh); err != nil {
-			panic(err)
-		}
+		data = append(data, b)
 	}
+	return data, nil
 }
 
-func ExampleClient_UnauthenticatedTrimmedEntries() {
-	// Important: UnauthenticatedTrimmedEntries does NOT verify the signed tree
-	// head. It is only suitable for clients that don't participate in the
-	// transparency ecosystem, and are only interested in a feed of names.
+func (tr *testTileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) {}
 
-	client, err := sunlight.NewClient(&sunlight.ClientConfig{
-		MonitoringPrefix: "https://navigli2025h2.skylight.geomys.org/",
-		UserAgent:        "ExampleClient (changeme@example.com, +https://example.com)",
-	})
+func NewTestClient(t *testing.T, config *ClientConfig) (*Client, *testTileReader) {
+	tileReader := &testTileReader{t: t}
+	client, err := torchwood.NewClient(tileReader, torchwood.WithCutEntry(cutEntry))
 	if err != nil {
-		panic(err)
+		t.Fatalf("failed to create client: %v", err)
+	}
+	return &Client{c: client, f: nil, r: tileReader, cc: config}, tileReader
+}
+
+const partialCount = 256*3 + 10
+const allCount = 256 * 4
+
+func TestUnauthenticatedTrimmedEntries(t *testing.T) {
+	t.Run("names", func(t *testing.T) {
+		t.Parallel()
+		client, tr := NewTestClient(t, &ClientConfig{})
+		tr.noNamesTiles = true
+		testUnauthenticatedTrimmedEntries(t, client)
+	})
+	t.Run("data", func(t *testing.T) {
+		t.Parallel()
+		client, tr := NewTestClient(t, &ClientConfig{})
+		tr.noDataTiles = true
+		testUnauthenticatedTrimmedEntries(t, client)
+	})
+}
+
+func testUnauthenticatedTrimmedEntries(t *testing.T, client *Client) {
+	var allEntries []*TrimmedEntry
+	var index int64
+	for i, e := range client.UnauthenticatedTrimmedEntries(t.Context(), 0, allCount) {
+		if i != index {
+			t.Errorf("expected entry index %d, got %d", index, i)
+		}
+		allEntries = append(allEntries, e)
+		index++
+	}
+	if err := client.Err(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(allEntries) != allCount {
+		t.Fatalf("expected %d entries, got %d", allCount, len(allEntries))
 	}
 
-	var start int64
-	for {
-		checkpoint, err := client.Fetcher().ReadEndpoint(context.TODO(), "checkpoint")
-		if err != nil {
-			panic(err)
-		}
-
-		_, rest, _ := strings.Cut(string(checkpoint), "\n")
-		size, _, _ := strings.Cut(rest, "\n")
-		end, err := strconv.ParseInt(size, 10, 64)
-		if err != nil {
-			panic(err)
-		}
-
-		for i, entry := range client.UnauthenticatedTrimmedEntries(context.TODO(), start, end) {
-			fmt.Printf("%d: %s\n", i, entry.DNS)
-			start = i + 1
+	compareRange := func(t *testing.T, start, end int64) {
+		var gotEntries []*TrimmedEntry
+		index := start
+		for i, e := range client.UnauthenticatedTrimmedEntries(t.Context(), start, end) {
+			if i != index {
+				t.Errorf("expected entry index %d, got %d", index, i)
+			}
+			gotEntries = append(gotEntries, e)
+			index++
 		}
 		if err := client.Err(); err != nil {
-			panic(err)
+			t.Fatalf("unexpected error: %v", err)
 		}
+		if len(gotEntries) != int(end-start) {
+			t.Fatalf("expected %d entries, got %d", end-start, len(gotEntries))
+		}
+		if !reflect.DeepEqual(allEntries[start:end], gotEntries) {
+			t.Errorf("entries from %d to %d do not match expected entries", start, end)
+		}
+	}
+	for n := range allCount {
+		t.Run(fmt.Sprintf("%d:%d", n, allCount), func(t *testing.T) {
+			t.Parallel()
+			compareRange(t, int64(n), allCount)
+		})
+	}
+	for n := range partialCount {
+		t.Run(fmt.Sprintf("%d:%d", n, partialCount), func(t *testing.T) {
+			t.Parallel()
+			compareRange(t, int64(n), partialCount)
+		})
 	}
 }

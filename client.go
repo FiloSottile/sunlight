@@ -391,7 +391,7 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 					}
 				}
 
-				start += int64(tile.W)
+				start = tile.N*TileWidth + int64(tile.W)
 			}
 		}
 	}
