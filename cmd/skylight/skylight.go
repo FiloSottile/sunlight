@@ -148,6 +148,8 @@ func newRateLimitHandler(handler http.Handler) http.Handler {
 			allow, retryAfter := anonymousClientLimit.Allow(rateLimitInterval, rateLimitBurst)
 			if !allow {
 				w.Header().Set("Retry-After", retryAfter.Format(time.RFC1123))
+				w.Header().Del("Content-Encoding")
+				w.Header().Del("Cache-Control")
 				http.Error(w, msg, http.StatusTooManyRequests)
 				return
 			}
