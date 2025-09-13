@@ -75,7 +75,17 @@ type LogEntry struct {
 
 	// LeafIndex is the zero-based index of the leaf in the log.
 	// It must be between 0 and 2^40-1.
+	//
+	// If RFC6962ArchivalLeaf is true, this field is ignored and
+	// should be set to 0.
 	LeafIndex int64
+
+	// RFC6962ArchivalLeaf is true if this LogEntry is an archived
+	// RFC 6962 log leaf, which is missing the leaf index extension.
+	//
+	// [ReadTileLeaf] always sets this to false. To read such leaves,
+	// use [ReadTileLeafMaybeArchival].
+	RFC6962ArchivalLeaf bool
 
 	// Timestamp is the TimestampedEntry.timestamp.
 	Timestamp int64
@@ -107,7 +117,7 @@ func (e *LogEntry) MerkleTreeLeaf() []byte {
 			b.AddBytes(e.Certificate)
 		})
 	}
-	addExtensions(b, e.LeafIndex)
+	addExtensions(b, e)
 	return b.BytesOrPanic()
 }
 
@@ -125,6 +135,26 @@ func (e *LogEntry) MerkleTreeLeaf() []byte {
 // ReadTileLeaf reads a LogEntry from a data tile, and returns the remaining
 // data in the tile.
 func ReadTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
+	e, rest, err = readTileLeaf(tile)
+	if err != nil {
+		return nil, rest, err
+	}
+	if e.RFC6962ArchivalLeaf {
+		return nil, rest, fmt.Errorf("leaf is missing leaf index extension")
+	}
+	return e, rest, nil
+}
+
+// ReadTileLeafMaybeArchival reads a LogEntry from a data tile, and returns the
+// remaining data in the tile.
+//
+// If the leaf is missing the leaf index extension, the returned LogEntry has
+// RFC6962ArchivalLeaf set to true, and LeafIndex set to zero.
+func ReadTileLeafMaybeArchival(tile []byte) (e *LogEntry, rest []byte, err error) {
+	return readTileLeaf(tile)
+}
+
+func readTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
 	e = &LogEntry{}
 	s := cryptobyte.String(tile)
 	var timestamp uint64
@@ -153,13 +183,17 @@ func ReadTileLeaf(tile []byte) (e *LogEntry, rest []byte, err error) {
 	default:
 		return nil, s, fmt.Errorf("invalid data tile: unknown type %d", entryType)
 	}
-	var extensionType uint8
-	var extensionData cryptobyte.String
-	if !extensions.ReadUint8(&extensionType) || extensionType != 0 ||
-		!extensions.ReadUint16LengthPrefixed(&extensionData) ||
-		!readUint40(&extensionData, &e.LeafIndex) || !extensionData.Empty() ||
-		!extensions.Empty() {
-		return nil, s, fmt.Errorf("invalid data tile extensions")
+	if extensions.Empty() {
+		e.RFC6962ArchivalLeaf = true
+	} else {
+		var extensionType uint8
+		var extensionData cryptobyte.String
+		if !extensions.ReadUint8(&extensionType) || extensionType != 0 ||
+			!extensions.ReadUint16LengthPrefixed(&extensionData) ||
+			!readUint40(&extensionData, &e.LeafIndex) || !extensionData.Empty() ||
+			!extensions.Empty() {
+			return nil, s, fmt.Errorf("invalid data tile extensions")
+		}
 	}
 	for !fingerprints.Empty() {
 		var f [32]byte
@@ -187,7 +221,7 @@ func AppendTileLeaf(t []byte, e *LogEntry) []byte {
 			b.AddBytes(e.Certificate)
 		})
 	}
-	addExtensions(b, e.LeafIndex)
+	addExtensions(b, e)
 	if e.IsPrecert {
 		b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
 			b.AddBytes(e.PreCertificate)
@@ -201,9 +235,13 @@ func AppendTileLeaf(t []byte, e *LogEntry) []byte {
 	return b.BytesOrPanic()
 }
 
-func addExtensions(b *cryptobyte.Builder, leafIndex int64) {
+func addExtensions(b *cryptobyte.Builder, e *LogEntry) {
+	if e.RFC6962ArchivalLeaf {
+		b.AddUint16(0)
+		return
+	}
 	b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
-		ext, err := MarshalExtensions(Extensions{LeafIndex: leafIndex})
+		ext, err := MarshalExtensions(Extensions{LeafIndex: e.LeafIndex})
 		if err != nil {
 			b.SetError(err)
 			return
