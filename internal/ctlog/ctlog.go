@@ -1136,24 +1136,10 @@ func signTreeHead(c *Config, tree treeWithTimestamp) (checkpoint []byte, err err
 	if err != nil {
 		return nil, fmtErrorf("couldn't produce signature: %w", err)
 	}
-
-	// struct {
-	//     uint64 timestamp;
-	//     TreeHeadSignature signature;
-	// } RFC6962NoteSignature;
-	var b cryptobyte.Builder
-	b.AddUint64(uint64(tree.Time))
-	b.AddBytes(treeHeadSignature)
-	sig, err := b.Bytes()
+	rs, err := sunlight.NewRFC6962InjectedSigner(c.Name, c.Key.Public(), treeHeadSignature, tree.Time)
 	if err != nil {
 		return nil, fmtErrorf("couldn't encode RFC6962NoteSignature: %w", err)
 	}
-
-	v, err := sunlight.NewRFC6962Verifier(c.Name, c.Key.Public())
-	if err != nil {
-		return nil, fmtErrorf("couldn't construct verifier: %w", err)
-	}
-	rs := &injectedSigner{v, sig}
 
 	ws, err := newEd25519Signer(c.Name, c.WitnessKey)
 	if err != nil {
@@ -1176,16 +1162,6 @@ func signTreeHead(c *Config, tree treeWithTimestamp) (checkpoint []byte, err err
 	}
 	return signedNote, nil
 }
-
-type injectedSigner struct {
-	v   note.Verifier
-	sig []byte
-}
-
-func (s *injectedSigner) Sign(msg []byte) ([]byte, error) { return s.sig, nil }
-func (s *injectedSigner) Name() string                    { return s.v.Name() }
-func (s *injectedSigner) KeyHash() uint32                 { return s.v.KeyHash() }
-func (s *injectedSigner) Verifier() note.Verifier         { return s.v }
 
 // digitallySign produces an encoded digitally-signed signature.
 //

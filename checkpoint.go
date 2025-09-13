@@ -133,6 +133,44 @@ func RFC6962SignatureTimestamp(sig note.Signature) (int64, error) {
 	return int64(timestamp), nil
 }
 
+// NewRFC6962InjectedSigner constructs a [note.Signer] that uses the provided
+// signature bytes as-is. It is useful to construct a signed checkpoint from a
+// RFC 6962 TreeHeadSignature obtained from elsewhere.
+func NewRFC6962InjectedSigner(name string, key crypto.PublicKey, sig []byte, timestamp int64) (note.Signer, error) {
+	v, err := NewRFC6962Verifier(name, key)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't construct verifier: %w", err)
+	}
+	// struct {
+	//     uint64 timestamp;
+	//     TreeHeadSignature signature;
+	// } RFC6962NoteSignature;
+	var b cryptobyte.Builder
+	b.AddUint64(uint64(timestamp))
+	b.AddBytes(sig)
+	s, err := b.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("couldn't encode RFC6962NoteSignature: %w", err)
+	}
+	return &injectedSigner{v, s}, nil
+}
+
+type injectedSigner struct {
+	v   note.Verifier
+	sig []byte
+}
+
+func (s *injectedSigner) Name() string            { return s.v.Name() }
+func (s *injectedSigner) KeyHash() uint32         { return s.v.KeyHash() }
+func (s *injectedSigner) Verifier() note.Verifier { return s.v }
+
+func (s *injectedSigner) Sign(msg []byte) ([]byte, error) {
+	if !s.v.Verify(msg, s.sig) {
+		return nil, fmt.Errorf("injected signature doesn't verify")
+	}
+	return s.sig, nil
+}
+
 // Backwards compatibility shims for functionality that was originally
 // duplicated from [torchwood] and that's not Sunlight specific.
 
