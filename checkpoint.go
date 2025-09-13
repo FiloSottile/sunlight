@@ -80,7 +80,7 @@ func NewRFC6962Verifier(name string, key crypto.PublicKey) (note.Verifier, error
 			if sigAlg != 1 {
 				return false
 			}
-			return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig) == nil
+			return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature) == nil
 		case *ecdsa.PublicKey:
 			if sigAlg != 3 {
 				return false
