@@ -146,6 +146,9 @@ func cutEntry(tile []byte) (entry []byte, rh tlog.Hash, rest []byte, err error) 
 	if err != nil {
 		return nil, tlog.Hash{}, nil, err
 	}
+	if e.RFC6962ArchivalLeaf {
+		return nil, tlog.Hash{}, nil, errors.New("sunlight: unexpected RFC 6962 leaf")
+	}
 	rh = tlog.RecordHash(e.MerkleTreeLeaf())
 	entry = tile[:len(tile)-len(rest)]
 	return entry, rh, rest, nil
@@ -184,6 +187,10 @@ func (c *Client) Entries(ctx context.Context, tree tlog.Tree, start int64) iter.
 				c.err = err
 				return
 			}
+			if entry.RFC6962ArchivalLeaf {
+				c.err = errors.New("sunlight: unexpected RFC 6962 leaf")
+				return
+			}
 			if len(rest) > 0 {
 				c.err = errors.New("internal error: unexpected trailing data in entry")
 				return
@@ -207,6 +214,9 @@ func (c *Client) Entry(ctx context.Context, tree tlog.Tree, index int64) (*LogEn
 	entry, rest, err := ReadTileLeaf(e)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to parse log entry %d: %w", index, err)
+	}
+	if entry.RFC6962ArchivalLeaf {
+		return nil, nil, fmt.Errorf("sunlight: unexpected RFC 6962 leaf in entry %d", index)
 	}
 	if len(rest) > 0 {
 		return nil, nil, fmt.Errorf("sunlight: unexpected trailing data in entry %d", index)
@@ -388,6 +398,10 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 						e, data, err = ReadTileLeaf(data)
 						if err != nil {
 							c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", tile.N, tile.W, err)
+							return
+						}
+						if e.RFC6962ArchivalLeaf {
+							c.err = errors.New("sunlight: unexpected RFC 6962 leaf")
 							return
 						}
 						te, err := e.TrimmedEntry()
