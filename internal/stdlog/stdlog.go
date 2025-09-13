@@ -10,18 +10,28 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 var logLevel = new(slog.LevelVar)
 
 // Handler is a multi-handler that writes human-readable logs to
 // stdout and machine-readable logs to stderr.
-var Handler = multiHandler([]slog.Handler{
+var Handler slog.Handler = multiHandler([]slog.Handler{
 	slog.Handler(slog.NewJSONHandler(os.Stdout,
 		&slog.HandlerOptions{AddSource: true, Level: logLevel})),
 	slog.Handler(slog.NewTextHandler(os.Stderr,
 		&slog.HandlerOptions{Level: logLevel})),
 })
+
+func init() {
+	// Disable JSON logs if stdout is a terminal.
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		Handler = slog.Handler(slog.NewTextHandler(os.Stderr,
+			&slog.HandlerOptions{AddSource: true, Level: logLevel}))
+	}
+}
 
 // HTTPErrorLog is a [log.Logger] to be used as a [http.Server.ErrorLog]. It
 // logs at the WARN level, filtering out common background noise unless debug
