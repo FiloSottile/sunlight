@@ -7,10 +7,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// TODO: add-checkpoint metrics partitioned by origin, outcome.
-// TODO: log size gauge partitioned by origin.
-
 type metrics struct {
+	KnownLogs          prometheus.Gauge
+	LogSize            *prometheus.GaugeVec
+	AddCheckpointCount *prometheus.CounterVec
+
 	ReqCount    *prometheus.CounterVec
 	ReqInFlight *prometheus.GaugeVec
 	ReqDuration *prometheus.SummaryVec
@@ -18,6 +19,25 @@ type metrics struct {
 
 func initMetrics() metrics {
 	return metrics{
+		KnownLogs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "known_logs",
+			Help: "Number of logs known to the witness.",
+		}),
+		LogSize: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "log_entries_total",
+				Help: "Size of the latest checkpoint, by log origin.",
+			},
+			[]string{"origin"},
+		),
+		AddCheckpointCount: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "add_checkpoint_requests_total",
+				Help: "Total number of add-checkpoint requests processed, by log origin.",
+			},
+			[]string{"error", "origin", "progress"},
+		),
+
 		ReqInFlight: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "http_in_flight_requests",
