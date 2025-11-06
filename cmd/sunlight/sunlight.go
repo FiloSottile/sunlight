@@ -149,9 +149,11 @@ type Config struct {
 		//
 		Secret string
 
-		// KnownLogs is a list of known logs that the witness will accept and
-		// cosign checkpoints for, along with their vkeys.
-		KnownLogs []witness.LogConfig
+		// LogList is the URL of a witness network log list.
+		//
+		// Logs are pulled from the list on startup and every 15 minutes. The
+		// list can only add logs, never remove them or change their public key.
+		LogList string
 	}
 
 	Logs []LogConfig
@@ -413,18 +415,24 @@ func main() {
 
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 
-	var homeData struct {
-		Logs    []logInfo
-		Witness struct {
-			Name             string
-			SubmissionPrefix string
-			VerifierKey      string
-			Logs             []string
-		}
+	var homeLogsInfo []logInfo
+	type witnessInfo struct {
+		Name             string
+		SubmissionPrefix string
+		VerifierKey      string
+		LogList          string
+		Logs             []string
 	}
+	homeWitnessInfo := func() witnessInfo { return witnessInfo{} }
 	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		if err := homeTmpl.Execute(w, homeData); err != nil {
+		if err := homeTmpl.Execute(w, struct {
+			Logs    []logInfo
+			Witness witnessInfo
+		}{
+			Logs:    homeLogsInfo,
+			Witness: homeWitnessInfo(),
+		}); err != nil {
 			logger.Error("failed to execute homepage template", "err", err)
 		}
 	})
@@ -644,7 +652,7 @@ func main() {
 		}
 		log.Interval.NotAfterStart = lc.NotAfterStart
 		log.Interval.NotAfterLimit = lc.NotAfterLimit
-		homeData.Logs = append(homeData.Logs, log)
+		homeLogsInfo = append(homeLogsInfo, log)
 
 		j, err := json.MarshalIndent(log, "", "    ")
 		if err != nil {
@@ -685,11 +693,27 @@ func main() {
 			Key:     wk,
 			Backend: db,
 			Log:     logger,
-			Logs:    c.Witness.KnownLogs,
 		})
 		if err != nil {
 			fatalError(logger, "failed to create witness", "err", err)
 		}
+
+		reloadChan := make(chan os.Signal, 1)
+		signal.Notify(reloadChan, syscall.SIGHUP)
+		serveGroup.Go(func() error {
+			ticker := time.NewTicker(15 * time.Minute)
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-reloadChan:
+				case <-ticker.C:
+				}
+				if err := w.PullLogList(ctx, c.Witness.LogList); err != nil {
+					logger.Error("failed to pull log list", "err", err)
+				}
+			}
+		})
 
 		c.Witness.SubmissionPrefix = strings.TrimSuffix(c.Witness.SubmissionPrefix, "/")
 		prefix, err := url.Parse(c.Witness.SubmissionPrefix)
@@ -711,11 +735,14 @@ func main() {
 		witnessMetrics := prometheus.WrapRegistererWithPrefix("witness_", sunlightMetrics)
 		witnessMetrics.MustRegister(w.Metrics()...)
 
-		homeData.Witness.Name = c.Witness.Name
-		homeData.Witness.SubmissionPrefix = c.Witness.SubmissionPrefix
-		homeData.Witness.VerifierKey = w.VerifierKey()
-		for _, log := range c.Witness.KnownLogs {
-			homeData.Witness.Logs = append(homeData.Witness.Logs, log.Origin)
+		homeWitnessInfo = func() witnessInfo {
+			return witnessInfo{
+				Name:             c.Witness.Name,
+				SubmissionPrefix: c.Witness.SubmissionPrefix,
+				VerifierKey:      w.VerifierKey(),
+				LogList:          c.Witness.LogList,
+				Logs:             w.Logs(),
+			}
 		}
 	}
 

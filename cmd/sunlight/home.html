@@ -52,26 +52,6 @@
     
     <p>
       <a href="metrics">Metrics</a> are available.
-    
-    {{ if .Witness.Name }}
-    <hr>
-
-    <p>
-      The following witness is active.
-
-    <h2>{{ .Witness.Name }}</h2>
-
-    <p>
-      Submission prefix: <code>{{ .Witness.SubmissionPrefix }}</code><br>
-      Known logs:
-      <ul>
-        {{ range .Witness.Logs }}
-        <li><code>{{ . }}</code></li>
-        {{ end }}
-      </ul>
-
-    <pre><code>{{ .Witness.VerifierKey }}</code></pre>
-    {{ end }}
 
     <hr>
 
@@ -101,6 +81,30 @@
     <input type="file" class="chain" data-prefix="{{ .SubmissionPrefix }}">
     <pre><code class="response"></code></pre>
 
+    {{ end }}
+
+    {{ if .Witness.Name }}
+    <hr>
+
+    <p>
+      The following witness is active.
+
+    <h2>{{ .Witness.Name }}</h2>
+
+    <p>
+      Submission prefix: <code>{{ .Witness.SubmissionPrefix }}</code><br>
+      Log list source: <a href="{{ .Witness.LogList }}">{{ .Witness.LogList }}</a><br>
+      Verifier key:<br>
+
+    <pre><code>{{ .Witness.VerifierKey }}</code></pre>
+
+    <p>
+      Known logs:
+      <ul>
+        {{ range .Witness.Logs }}
+        <li><code>{{ . }}</code></li>
+        {{ end }}
+      </ul>
     {{ end }}
 
     <script>
