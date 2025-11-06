@@ -163,6 +163,7 @@ func NewWitness(ctx context.Context, config *Config) (*Witness, error) {
 		w.checkpoints[log.Origin] = &lockedCheckpoint{}
 	}
 
+	w.m.KnownLogs.Set(float64(len(stored.Logs)))
 	config.Log.InfoContext(ctx, "starting witness", "name", config.Name, "logs", len(stored.Logs))
 	return w, nil
 }
@@ -249,12 +250,13 @@ func (w *Witness) PullLogList(ctx context.Context, url string) error {
 	}
 	w.verifiers = verifiers
 	w.checkpoints = checkpoints
+	w.m.KnownLogs.Set(float64(len(w.verifiers)))
 
 	return nil
 }
 
 func (w *Witness) Handler() http.Handler {
-	labels := prometheus.Labels{"endpoint": "get-roots"}
+	labels := prometheus.Labels{"endpoint": "add-checkpoint"}
 	addCheckpoint := http.Handler(http.HandlerFunc(w.serveAddCheckpoint))
 	addCheckpoint = promhttp.InstrumentHandlerCounter(w.m.ReqCount.MustCurryWith(labels), addCheckpoint)
 	addCheckpoint = promhttp.InstrumentHandlerDuration(w.m.ReqDuration.MustCurryWith(labels), addCheckpoint)
@@ -274,6 +276,7 @@ func (*conflictError) Error() string { return "known tree size doesn't match pro
 var errUnknownLog = errors.New("unknown log")
 var errInvalidSignature = errors.New("invalid signature")
 var errBadRequest = errors.New("invalid input")
+var errBadCheckpoint = errors.New("invalid checkpoint")
 var errProof = errors.New("bad consistency proof")
 
 func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
@@ -318,12 +321,12 @@ func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) (cosig []byte, err error) {
-	l := w.c.Log.With("request", string(body))
+	labels := prometheus.Labels{"error": "", "origin": "", "progress": ""}
 	defer func() {
 		if err != nil {
-			l = l.With("error", err)
+			labels["error"] = err.Error()
 		}
-		l.Debug("processed add-checkpoint request")
+		w.m.AddCheckpointCount.With(labels).Inc()
 	}()
 	body, noteBytes, ok := bytes.Cut(body, []byte("\n\n"))
 	if !ok {
@@ -341,7 +344,6 @@ func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) 
 	if err != nil || oldSize < 0 {
 		return nil, errBadRequest
 	}
-	l = l.With("oldSize", oldSize)
 	proof := make(tlog.TreeProof, len(lines[1:]))
 	for i, h := range lines[1:] {
 		proof[i], err = tlog.ParseHash(h)
@@ -350,27 +352,30 @@ func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) 
 		}
 	}
 	origin, _, _ := strings.Cut(string(noteBytes), "\n")
-	l = l.With("origin", origin)
 	v, ok := w.verifiersForOrigin(origin)
 	if !ok {
 		return nil, errUnknownLog
 	}
+	labels["origin"] = origin
 	n, err := note.Open(noteBytes, v)
 	switch err.(type) {
 	case *note.UnverifiedNoteError, *note.InvalidSignatureError:
 		return nil, errInvalidSignature
 	}
 	if err != nil {
-		return nil, err
+		return nil, errors.New("internal error: failed to verify note")
 	}
 	c, err := torchwood.ParseCheckpoint(n.Text)
 	if err != nil {
-		return nil, err
+		return nil, errBadCheckpoint
 	}
 	if origin != c.Origin {
 		return nil, errors.New("internal error: incoherent parsing")
 	}
-	l = l.With("size", c.N)
+	labels["progress"] = "false"
+	if c.N > oldSize {
+		labels["progress"] = "true"
+	}
 	return w.updateCheckpoint(ctx, c.Origin, oldSize, c.N, c.Hash, proof, noteBytes)
 }
 
@@ -445,6 +450,8 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 		return nil, errors.New("internal error: failed to store new checkpoint")
 	}
 	lock.LockedCheckpoint = newLock
+
+	w.m.LogSize.WithLabelValues(origin).Set(float64(newSize))
 
 	return sigs, nil
 }
