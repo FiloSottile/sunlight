@@ -52,7 +52,7 @@ This database must be global and it **must never be changed or modified** as an 
 The database must already exist, to prevent misconfigurations. Create it with 
 
 ```
-sqlite3 checkpoints.db "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body TEXT)"
+sqlite3 checkpoints.db "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body BLOB NOT NULL) STRICT"
 ```
 
 Sunlight can alternatively use DynamoDB or S3-compatible object storage with `ETag` and `If-Match` support (such as Tigris) as global lock backends.

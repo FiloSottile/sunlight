@@ -34,7 +34,7 @@ func NewSQLiteBackend(ctx context.Context, path string, l *slog.Logger) (*SQLite
 
 	conn, err := sqlite.OpenConn(path, sqlite.OpenFlagsDefault & ^sqlite.SQLITE_OPEN_CREATE)
 	if err != nil {
-		return nil, fmt.Errorf(`failed to open SQLite lock database (hint: to avoid misconfiguration, the lock database must be created manually with "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body TEXT)"): %w`, err)
+		return nil, fmt.Errorf(`failed to open SQLite lock database (hint: to avoid misconfiguration, the lock database must be created manually with "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body BLOB NOT NULL) STRICT"): %w`, err)
 	}
 	if err := sqlitex.ExecTransient(conn, "PRAGMA synchronous = FULL", nil); err != nil {
 		conn.Close()
@@ -86,6 +86,10 @@ func (b *SQLiteBackend) Replace(ctx context.Context, old LockedCheckpoint, new [
 	defer prometheus.NewTimer(b.duration).ObserveDuration()
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if new == nil {
+		// NULL does *not* compare equal to an empty blob!
+		new = []byte{}
+	}
 	o := old.(*sqliteCheckpoint)
 	err := sqlitex.Exec(b.conn, "UPDATE checkpoints SET body = ? WHERE logID = ? AND body = ?",
 		nil, new, o.logID[:], o.body)
@@ -93,6 +97,7 @@ func (b *SQLiteBackend) Replace(ctx context.Context, old LockedCheckpoint, new [
 		return nil, fmtErrorf("failed to update SQLite checkpoint: %w", err)
 	}
 	if b.conn.Changes() == 0 {
+		// TODO: this also hits if new == old.body, and shouldn't.
 		return nil, fmtErrorf("SQLite checkpoint not found or has changed")
 	}
 	return &sqliteCheckpoint{logID: o.logID, body: new}, nil
@@ -101,6 +106,10 @@ func (b *SQLiteBackend) Replace(ctx context.Context, old LockedCheckpoint, new [
 func (b *SQLiteBackend) Create(ctx context.Context, logID [sha256.Size]byte, new []byte) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if new == nil {
+		// NULL does *not* compare equal to an empty blob!
+		new = []byte{}
+	}
 	err := sqlitex.Exec(b.conn, `INSERT INTO checkpoints (logID, body) VALUES (?, ?)
 		ON CONFLICT(logID) DO NOTHING`, nil, logID[:], new)
 	if err != nil {
