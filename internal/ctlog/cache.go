@@ -20,9 +20,9 @@ func initCache(path string) (readConn, writeConn *sqlite.Conn, err error) {
 	if err := sqlitex.ExecTransient(writeConn, `
 		CREATE TABLE IF NOT EXISTS cache (
 			key BLOB PRIMARY KEY,
-			timestamp INTEGER,
-			leaf_index INTEGER
-		) WITHOUT ROWID;`, nil); err != nil {
+			timestamp INTEGER NOT NULL,
+			leaf_index INTEGER NOT NULL
+		) WITHOUT ROWID, STRICT;`, nil); err != nil {
 		writeConn.Close()
 		return nil, nil, err
 	}
