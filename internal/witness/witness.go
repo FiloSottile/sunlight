@@ -414,6 +414,9 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 			return nil, errors.New("internal error: can't parse stored checkpoint")
 		}
 
+		if known.Origin != origin {
+			return nil, errors.New("internal error: incoherent stored checkpoint")
+		}
 		if oldSize > newSize {
 			return nil, errBadRequest
 		}
