@@ -1,21 +1,61 @@
 name: Go tests
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  schedule: # daily at 09:42 UTC
+    - cron: '42 9 * * *'
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - { go-version: stable }
+          - { go-version-file: go.mod }
+        deps:
+          - locked
+          - latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
+      - uses: actions/checkout@v5
         with:
-          fetch-depth: 0
-      - name: Install Go (from go.mod)
-        uses: actions/setup-go@v4
+          persist-credentials: false
+      - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
-          check-latest: true
-      - name: Run tests
-        run: go test ./...
-      - name: Run tests (short + race)
-        run: go test -short -race ./...
+          go-version: ${{ matrix.go.go-version }}
+          go-version-file: ${{ matrix.go.go-version-file }}
+      - uses: geomys/sandboxed-step@v1.2.0
+        with:
+          run: |
+            if [ "${{ matrix.deps }}" = "latest" ]; then
+              go get -u -t ./...
+            fi
+            go test ./...
+            go test -short -race ./...
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - uses: geomys/sandboxed-step@v1.2.0
+        with:
+          run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - uses: geomys/sandboxed-step@v1.2.0
+        with:
+          run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

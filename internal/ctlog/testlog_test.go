@@ -432,16 +432,6 @@ func (r *tileReader) ReadTiles(tiles []tlog.Tile) (data [][]byte, err error) {
 
 func (r *tileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) {}
 
-type verifier struct {
-	name   string
-	hash   uint32
-	verify func(msg, sig []byte) bool
-}
-
-func (v *verifier) Name() string                { return v.name }
-func (v *verifier) KeyHash() uint32             { return v.hash }
-func (v *verifier) Verify(msg, sig []byte) bool { return v.verify(msg, sig) }
-
 type MemoryBackend struct {
 	t   testing.TB
 	mu  sync.Mutex
