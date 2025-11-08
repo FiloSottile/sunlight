@@ -17,7 +17,7 @@ type testTileReader struct {
 	noDataTiles, noNamesTiles bool
 }
 
-var _ torchwood.TileReaderWithContext = &testTileReader{}
+var _ torchwood.TileReader = &testTileReader{}
 
 func (tr *testTileReader) ReadTiles(ctx context.Context, tiles []tlog.Tile) (data [][]byte, err error) {
 	for _, t := range tiles {
@@ -40,13 +40,17 @@ func (tr *testTileReader) ReadTiles(ctx context.Context, tiles []tlog.Tile) (dat
 
 func (tr *testTileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) {}
 
+func (tr *testTileReader) ReadEndpoint(ctx context.Context, endpoint string) ([]byte, error) {
+	return nil, fmt.Errorf("testTileReader: ReadEndpoint not implemented")
+}
+
 func NewTestClient(t *testing.T, config *ClientConfig) (*Client, *testTileReader) {
 	tileReader := &testTileReader{t: t}
 	client, err := torchwood.NewClient(tileReader, torchwood.WithCutEntry(cutEntry))
 	if err != nil {
 		t.Fatalf("failed to create client: %v", err)
 	}
-	return &Client{c: client, f: nil, r: tileReader, cc: config}, tileReader
+	return &Client{c: client, r: tileReader, cc: config}, tileReader
 }
 
 const partialCount = 256*3 + 10

@@ -33,8 +33,7 @@ import (
 // entries as a Go iterator.
 type Client struct {
 	c   *torchwood.Client
-	f   *torchwood.TileFetcher
-	r   torchwood.TileReaderWithContext
+	r   torchwood.TileReader
 	cc  *ClientConfig
 	err error
 }
@@ -69,8 +68,13 @@ type ClientConfig struct {
 	// made by the Client. If zero, there is no limit.
 	ConcurrencyLimit int
 
-	// Cache, if set, is a directory where the client will cache verified
-	// non-partial tiles, following the same structure as the URLs.
+	// Cache, if set, is a directory where the client will permanently cache
+	// verified non-partial tiles, following the same structure as the URLs.
+	//
+	// This directory always grows and is never pruned by the client. Most
+	// clients, especially those scanning a log sequentially, have no need to
+	// set this. [Client.Entries] will still use in-memory caching for the
+	// duration of the call.
 	Cache string
 
 	// Logger is the logger used to log errors and progress.
@@ -96,7 +100,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	var tileReader torchwood.TileReaderWithContext = fetcher
+	var tileReader torchwood.TileReader = fetcher
 	if config.Cache != "" {
 		tileReader, err = torchwood.NewPermanentCache(tileReader, config.Cache,
 			torchwood.WithPermanentCacheLogger(config.Logger),
@@ -110,16 +114,28 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{c: client, f: fetcher, r: tileReader, cc: config}, nil
+	return &Client{c: client, r: tileReader, cc: config}, nil
 }
 
-// Fetcher returns the underlying [torchwood.TileFetcher], which can be used to
-// fetch endpoints directly, or as a [tlog.HashReader] via
+// TileReader returns the underlying [torchwood.TileReader], which can be used
+// to fetch endpoints directly, or as a [tlog.HashReader] via
 // [torchwood.TileHashReaderWithContext].
 //
-// It does not use [ClientConfig.Cache]. If needed, use [torchwood.NewPermanentCache].
-func (c *Client) Fetcher() *torchwood.TileFetcher {
-	return c.f
+// Its [torchwood.TileReader.ReadTiles] method respects [ClientConfig.Cache] if
+// set. [torchwood.TileReader.ReadEndpoint] does not.
+func (c *Client) TileReader() torchwood.TileReader {
+	return c.r
+}
+
+// Fetcher used to return the underlying [torchwood.TileFetcher]. It is now a
+// compatibility alias of [Client.TileReader], which now exposes a
+// [torchwood.TileReader.ReadEndpoint] method.
+//
+// Deprecated: use [Client.TileReader] instead.
+//
+//go:fix inline
+func (c *Client) Fetcher() torchwood.TileReader {
+	return c.TileReader()
 }
 
 func cutEntry(tile []byte) (entry []byte, rh tlog.Hash, rest []byte, err error) {
@@ -251,7 +267,7 @@ func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte)
 // [note.Note.Sigs] entry. [RFC6962SignatureTimestamp] can be used to extract
 // the STH timestamp from the signature.
 func (c *Client) Checkpoint(ctx context.Context) (torchwood.Checkpoint, *note.Note, error) {
-	signedNote, err := c.f.ReadEndpoint(ctx, "checkpoint")
+	signedNote, err := c.r.ReadEndpoint(ctx, "checkpoint")
 	if err != nil {
 		return torchwood.Checkpoint{}, nil, fmt.Errorf("sunlight: failed to fetch checkpoint: %w", err)
 	}
@@ -286,7 +302,7 @@ func (c *Client) Checkpoint(ctx context.Context) (torchwood.Checkpoint, *note.No
 // [LogEntry.ChainFingerprints].
 func (c *Client) Issuer(ctx context.Context, fp [32]byte) (*x509.Certificate, error) {
 	endpoint := fmt.Sprintf("issuer/%x", fp)
-	cert, err := c.f.ReadEndpoint(ctx, endpoint)
+	cert, err := c.r.ReadEndpoint(ctx, endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("sunlight: failed to fetch issuer certificate for %x: %w", fp, err)
 	}
