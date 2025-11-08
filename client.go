@@ -179,12 +179,37 @@ func (c *Client) Entries(ctx context.Context, tree tlog.Tree, start int64) iter.
 	}
 }
 
+// Entry returns a log entry by its index, and an inclusion proof in the tree.
+//
+// The provided tree should have been verified by the caller, for example using
+// [Client.Checkpoint].
+func (c *Client) Entry(ctx context.Context, tree tlog.Tree, index int64) (*LogEntry, tlog.RecordProof, error) {
+	e, proof, err := c.c.Entry(ctx, tree, index)
+	if err != nil {
+		return nil, nil, err
+	}
+	entry, rest, err := ReadTileLeaf(e)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sunlight: failed to parse log entry %d: %w", index, err)
+	}
+	if len(rest) > 0 {
+		return nil, nil, fmt.Errorf("sunlight: unexpected trailing data in entry %d", index)
+	}
+	if entry.LeafIndex != index {
+		return nil, nil, fmt.Errorf("sunlight: log entry index %d does not match requested index %d", entry.LeafIndex, index)
+	}
+	return entry, proof, nil
+}
+
 // ErrWrongLogID indicates that the log ID in the SCT does not match the public
 // key of the log. [Client.CheckInclusion] can return an error wrapping this.
 var ErrWrongLogID = errors.New("sunlight: SCT log ID does not match public key")
 
 // CheckInclusion fetches the log entry for the given SCT, and verifies that it
 // is included in the given tree and that the SCT is valid for the entry.
+//
+// The provided tree should have been verified by the caller, for example using
+// [Client.Checkpoint].
 //
 // If the SCT log ID does not match [ClientConfig.PublicKey], CheckInclusion
 // returns an error wrapping [ErrWrongLogID].
@@ -207,19 +232,9 @@ func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to parse SCT extensions: %w", err)
 	}
-	e, proof, err := c.c.Entry(ctx, tree, ext.LeafIndex)
+	entry, proof, err := c.Entry(ctx, tree, ext.LeafIndex)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to fetch log entry %d: %w", ext.LeafIndex, err)
-	}
-	entry, rest, err := ReadTileLeaf(e)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sunlight: failed to parse log entry %d: %w", ext.LeafIndex, err)
-	}
-	if len(rest) > 0 {
-		return nil, nil, fmt.Errorf("sunlight: unexpected trailing data in entry	%d", ext.LeafIndex)
-	}
-	if entry.LeafIndex != ext.LeafIndex {
-		return nil, nil, fmt.Errorf("sunlight: SCT leaf index %d does not match entry leaf index %d", ext.LeafIndex, entry.LeafIndex)
 	}
 	if entry.Timestamp != int64(s.Timestamp) {
 		return nil, nil, fmt.Errorf("sunlight: SCT timestamp %d does not match entry timestamp %d", s.Timestamp, entry.Timestamp)
