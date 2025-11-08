@@ -108,15 +108,29 @@ func testUnauthenticatedTrimmedEntries(t *testing.T, client *Client) {
 			t.Errorf("entries from %d to %d do not match expected entries", start, end)
 		}
 	}
+	if testing.Short() {
+		for _, n := range []int64{0, 1, 255, 256, 257, partialCount - 1} {
+			t.Run(fmt.Sprintf("%d:%d", n, allCount), func(t *testing.T) {
+				compareRange(t, n, allCount)
+			})
+			t.Run(fmt.Sprintf("%d:%d", n, partialCount), func(t *testing.T) {
+				compareRange(t, n, partialCount)
+			})
+		}
+		for _, n := range []int64{partialCount, partialCount + 1, allCount - 1} {
+			t.Run(fmt.Sprintf("%d:%d", n, allCount), func(t *testing.T) {
+				compareRange(t, n, allCount)
+			})
+		}
+		return
+	}
 	for n := range allCount {
 		t.Run(fmt.Sprintf("%d:%d", n, allCount), func(t *testing.T) {
-			t.Parallel()
 			compareRange(t, int64(n), allCount)
 		})
 	}
 	for n := range partialCount {
 		t.Run(fmt.Sprintf("%d:%d", n, partialCount), func(t *testing.T) {
-			t.Parallel()
 			compareRange(t, int64(n), partialCount)
 		})
 	}
