@@ -594,10 +594,12 @@ func main() {
 				fatalError(logger, "CCADBRoots must be 'trusted', 'testing', or empty",
 					"CCADBRoots", lc.CCADBRoots)
 			}
-			// We don't run loadCCADBRoots at start, because CCADB is very
-			// flakey, so we don't want to prevent the log from starting if it's
-			// down. The previous roots will be loaded by LoadLog anyway.
 			serveGroup.Go(func() error {
+				if newRoots, err := loadCCADBRoots(ctx, lc, l); err != nil {
+					logger.Error("failed to load initial CCADB roots", "err", err)
+				} else if newRoots {
+					logger.Info("successfully loaded new roots from CCADB/ExtraRoots")
+				}
 				ticker := time.NewTicker(15 * time.Minute)
 				for {
 					select {
@@ -606,12 +608,9 @@ func main() {
 					case <-reloadChan:
 					case <-ticker.C:
 					}
-					newRoots, err := loadCCADBRoots(ctx, lc, l)
-					if err != nil {
+					if newRoots, err := loadCCADBRoots(ctx, lc, l); err != nil {
 						logger.Error("failed to reload CCADB roots", "err", err)
-						continue
-					}
-					if newRoots {
+					} else if newRoots {
 						logger.Info("successfully loaded new roots from CCADB/ExtraRoots on SIGHUP or timer")
 					}
 				}
@@ -701,6 +700,9 @@ func main() {
 		reloadChan := make(chan os.Signal, 1)
 		signal.Notify(reloadChan, syscall.SIGHUP)
 		serveGroup.Go(func() error {
+			if err := w.PullLogList(ctx, c.Witness.LogList); err != nil {
+				logger.Error("failed to pull log list", "err", err)
+			}
 			ticker := time.NewTicker(15 * time.Minute)
 			for {
 				select {
