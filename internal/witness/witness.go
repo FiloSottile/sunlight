@@ -209,7 +209,7 @@ func (w *Witness) PullLogList(ctx context.Context, url string) error {
 		if err != nil {
 			return fmt.Errorf("couldn't parse vkey %q for log %q: %w", vkey, origin, err)
 		}
-		w.c.Log.InfoContext(ctx, "adding new log to witness config", "origin", origin, "vkey", vkey)
+		w.c.Log.InfoContext(ctx, "adding new log to witness config", "origin", origin, "vkey", vkey, "source", url)
 		if err := w.c.Backend.Create(ctx, backendKeyForCheckpoint(w.c, origin), nil); err != nil {
 			return fmt.Errorf("couldn't create empty checkpoint for new log %q: %w", origin, err)
 		}

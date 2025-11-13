@@ -149,11 +149,11 @@ type Config struct {
 		//
 		Secret string
 
-		// LogList is the URL of a witness network log list.
+		// LogList are the URLs of witness network log list.
 		//
-		// Logs are pulled from the list on startup and every 15 minutes. The
-		// list can only add logs, never remove them or change their public key.
-		LogList string
+		// Logs are pulled from the lists on startup and every 15 minutes. The
+		// lists can only add logs, never remove them or change their public key.
+		LogLists []string
 	}
 
 	Logs []LogConfig
@@ -420,7 +420,7 @@ func main() {
 		Name             string
 		SubmissionPrefix string
 		VerifierKey      string
-		LogList          string
+		LogLists         []string
 		Logs             []string
 	}
 	homeWitnessInfo := func() witnessInfo { return witnessInfo{} }
@@ -700,8 +700,10 @@ func main() {
 		reloadChan := make(chan os.Signal, 1)
 		signal.Notify(reloadChan, syscall.SIGHUP)
 		serveGroup.Go(func() error {
-			if err := w.PullLogList(ctx, c.Witness.LogList); err != nil {
-				logger.Error("failed to pull log list", "err", err)
+			for _, url := range c.Witness.LogLists {
+				if err := w.PullLogList(ctx, url); err != nil {
+					logger.Error("failed to pull log list", "list", url, "err", err)
+				}
 			}
 			ticker := time.NewTicker(15 * time.Minute)
 			for {
@@ -711,8 +713,10 @@ func main() {
 				case <-reloadChan:
 				case <-ticker.C:
 				}
-				if err := w.PullLogList(ctx, c.Witness.LogList); err != nil {
-					logger.Error("failed to pull log list", "err", err)
+				for _, url := range c.Witness.LogLists {
+					if err := w.PullLogList(ctx, url); err != nil {
+						logger.Error("failed to pull log list", "list", url, "err", err)
+					}
 				}
 			}
 		})
@@ -742,7 +746,7 @@ func main() {
 				Name:             c.Witness.Name,
 				SubmissionPrefix: c.Witness.SubmissionPrefix,
 				VerifierKey:      w.VerifierKey(),
-				LogList:          c.Witness.LogList,
+				LogLists:         c.Witness.LogLists,
 				Logs:             w.Logs(),
 			}
 		}

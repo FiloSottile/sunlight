@@ -92,11 +92,20 @@
     <h2>{{ .Witness.Name }}</h2>
 
     <p>
-      Submission prefix: <code>{{ .Witness.SubmissionPrefix }}</code><br>
-      Log list source: <a href="{{ .Witness.LogList }}">{{ .Witness.LogList }}</a><br>
-      Verifier key:<br>
+      Submission prefix: <code>{{ .Witness.SubmissionPrefix }}</code>
+
+    <p>
+      Verifier key:
 
     <pre><code>{{ .Witness.VerifierKey }}</code></pre>
+
+    <p>
+      Log list sources:
+      <ul>
+        {{ range .Witness.LogLists }}
+        <li><a href="{{ . }}">{{ . }}</a></li>
+        {{ end }}
+      </ul>
 
     <p>
       Known logs:
