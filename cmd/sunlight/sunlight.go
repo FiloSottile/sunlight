@@ -133,7 +133,8 @@ type Config struct {
 		Name string
 
 		// SubmissionPrefix is the full URL of the c2sp.org/tlog-witness
-		// submission prefix of the witness.
+		// submission prefix of the witness. If not set, it defaults to
+		// "https://" + Name.
 		//
 		// The HTTP server will serve the witness at this URL, and if ACME is
 		// enabled, Sunlight will obtain a certificate for the host of this URL.
@@ -721,6 +722,9 @@ func main() {
 			}
 		})
 
+		if c.Witness.SubmissionPrefix == "" {
+			c.Witness.SubmissionPrefix = "https://" + c.Witness.Name
+		}
 		c.Witness.SubmissionPrefix = strings.TrimSuffix(c.Witness.SubmissionPrefix, "/")
 		prefix, err := url.Parse(c.Witness.SubmissionPrefix)
 		if err != nil {
