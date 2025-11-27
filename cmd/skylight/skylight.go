@@ -174,7 +174,18 @@ func clientFromContext(ctx context.Context) string {
 
 func newClientContextHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if userAgent := r.UserAgent(); strings.Contains(userAgent, "changeme@example.com") {
+		// If you are reading this to figure out how to bypass the rate limit,
+		// we know it's easy, but please don't. We also know how to make your
+		// life harder by blocking your ASN or fingerprinting your client.
+		//
+		// There's no need to bypass anything!
+		//
+		// We don't need to know who you are, we only want to be able to contact
+		// you if necessary: you can just register a throwaway email address,
+		// forward it to your email, and put that in your User-Agent.
+		//
+		// Thank you!
+		if userAgent := r.UserAgent(); strings.Contains(userAgent, "example.com") {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
 		} else if strings.Contains(userAgent, "@") {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-email"))
