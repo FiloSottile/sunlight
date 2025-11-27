@@ -215,8 +215,30 @@ func main() {
 	for n := tree.N; n < sth.TreeSize; n += batchSize {
 		end := min(n+batchSize, sth.TreeSize)
 		entries, err := fetchBatch(ctx, n, end)
+		backoffs := []time.Duration{
+			1 * time.Second,
+			5 * time.Second,
+			10 * time.Second,
+			30 * time.Second,
+			1 * time.Minute,
+			2 * time.Minute,
+			3 * time.Minute,
+			5 * time.Minute,
+			7 * time.Minute,
+			10 * time.Minute,
+		}
+		for i := 0; err != nil && i < len(backoffs); i++ {
+			logger.Warn("failed to fetch batch, retrying",
+				"err", err, "attempt", i+1, "backoff", backoffs[i])
+			select {
+			case <-ctx.Done():
+				fatalError(logger, "interrupted during retry", "err", ctx.Err())
+			case <-time.After(backoffs[i]):
+			}
+			entries, err = fetchBatch(ctx, n, end)
+		}
 		if err != nil {
-			fatalError(logger, "failed to fetch tile", "err", err)
+			fatalError(logger, "failed to fetch batch after retries", "err", err)
 		}
 		hashes := make([]tlog.Hash, len(entries))
 		for i := range entries {
