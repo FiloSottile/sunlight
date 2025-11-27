@@ -146,7 +146,7 @@ type Config struct {
 		//
 		// To generate a new seed, run:
 		//
-		//   $ sunlight-keygen -f seed.bin
+		//   $ sunlight-keygen -f seed.bin -witness <name>
 		//
 		Secret string
 
