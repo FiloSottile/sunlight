@@ -17,6 +17,7 @@ import (
 
 	"filippo.io/keygen"
 	"filippo.io/sunlight/internal/immutable"
+	"filippo.io/torchwood"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/mod/sumdb/note"
 )
@@ -25,6 +26,7 @@ func main() {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
 	fileFlag := fs.String("f", "", "path to the seed file")
 	prefixFlag := fs.String("prefix", "", "submission prefix for the log, to output a witness verifier key")
+	witnessFlag := fs.String("witness", "", "witness name, for generating a witness secret instead")
 	fs.Parse(os.Args[1:])
 	if fs.NArg() != 0 || *fileFlag == "" {
 		fmt.Fprintln(os.Stderr, "usage: sunlight-keygen -f <seed file>")
@@ -55,6 +57,21 @@ func main() {
 	}
 	if len(seed) != 32 {
 		log.Fatal("seed file must be exactly 32 bytes")
+	}
+
+	if *witnessFlag != "" {
+		ed25519Secret := make([]byte, ed25519.SeedSize)
+		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight Ed25519 witness key"),
+			[]byte(*witnessFlag)), ed25519Secret); err != nil {
+			log.Fatal("failed to derive Ed25519 key:", err)
+		}
+		wk := ed25519.NewKeyFromSeed(ed25519Secret)
+		s, err := torchwood.NewCosignatureSigner(*witnessFlag, wk)
+		if err != nil {
+			log.Fatal("failed to create witness signer:", err)
+		}
+		fmt.Printf("Witness vkey: %s\n", s.Verifier())
+		return
 	}
 
 	ecdsaSecret := make([]byte, 32)
