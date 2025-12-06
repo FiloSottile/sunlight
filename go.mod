@@ -1,10 +1,10 @@
 module filippo.io/sunlight
 
-go 1.24.4
+go 1.24.0
 
 require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
-	filippo.io/torchwood v0.5.1-0.20251108121651-147243fa786b
+	filippo.io/torchwood v0.8.0
 	github.com/aws/aws-sdk-go-v2 v1.30.3
 	github.com/aws/aws-sdk-go-v2/config v1.27.27
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.34.4
@@ -12,10 +12,10 @@ require (
 	github.com/aws/smithy-go v1.20.3
 	github.com/google/certificate-transparency-go v1.3.2
 	github.com/prometheus/client_golang v1.22.0
-	golang.org/x/crypto v0.39.0
-	golang.org/x/mod v0.25.0
-	golang.org/x/net v0.40.0
-	golang.org/x/sync v0.15.0
+	golang.org/x/crypto v0.44.0
+	golang.org/x/mod v0.29.0
+	golang.org/x/net v0.46.0
+	golang.org/x/sync v0.18.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -57,8 +57,8 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
-	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/text v0.26.0 // indirect
+	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250303144028-a0af3efb3deb // indirect
 	google.golang.org/grpc v1.72.2 // indirect

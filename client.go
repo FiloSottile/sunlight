@@ -17,6 +17,7 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -41,11 +42,29 @@ type Client struct {
 // ClientConfig is the configuration for a [Client].
 type ClientConfig struct {
 	// MonitoringPrefix is the c2sp.org/static-ct-api monitoring prefix.
+	//
+	// If the MonitoringPrefix has schema "file://", Client will read tiles from
+	// the local filesystem, and most other settings will be ignored.
+	//
+	// If it has schema "gzip+file://", the data tiles are expected to be
+	// gzip-compressed.
+	//
+	// If it has schema "archive+file://", Client will read tiles from a set of
+	// [archival zip files] in the specified directory.
+	//
+	// [archival zip files]:
+	// https://github.com/geomys/ct-archive/blob/main/README.md#archival-format
 	MonitoringPrefix string
 
 	// PublicKey is the public key of the log, used to verify checkpoints in
 	// [Client.Checkpoint] and SCTs in [Client.CheckInclusion].
 	PublicKey crypto.PublicKey
+
+	// AllowRFC6962ArchivalLeafs indicates whether to accept leafs archived from
+	// RFC 6962 logs, which lack the LeafIndex extension.
+	//
+	// See [LogEntry.RFC6962ArchivalLeaf] for details.
+	AllowRFC6962ArchivalLeafs bool
 
 	// HTTPClient is the HTTP client used to fetch tiles. If nil, a client is
 	// created with default timeouts and settings.
@@ -84,7 +103,35 @@ type ClientConfig struct {
 
 // NewClient creates a new [Client].
 func NewClient(config *ClientConfig) (*Client, error) {
-	if config == nil || config.UserAgent == "" {
+	if schema, path, ok := strings.Cut(config.MonitoringPrefix, "://"); ok &&
+		(schema == "file" || schema == "archive+file" || schema == "gzip+file") {
+		if config.Cache != "" {
+			return nil, errors.New("sunlight: permanent cache cannot be used with file://")
+		}
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			return nil, fmt.Errorf("sunlight: failed to open file:// monitoring prefix: %w", err)
+		}
+		tileFS := root.FS()
+		if schema == "archive+file" {
+			tileFS = torchwood.NewTileArchiveFS(root.FS())
+		}
+		options := []torchwood.TileFSOption{torchwood.WithTileFSTilePath(TilePath)}
+		if schema == "gzip+file" {
+			options = append(options, torchwood.WithGzipDataTiles())
+		}
+		tileReader, err := torchwood.NewTileFS(tileFS, options...)
+		if err != nil {
+			return nil, fmt.Errorf("sunlight: failed to create file:// tile reader: %w", err)
+		}
+		client, err := torchwood.NewClient(tileReader, torchwood.WithCutEntry(cutEntry))
+		if err != nil {
+			return nil, fmt.Errorf("sunlight: failed to create file:// client: %w", err)
+		}
+		return &Client{c: client, r: tileReader, cc: config}, nil
+	}
+
+	if config.UserAgent == "" {
 		return nil, errors.New("sunlight: missing UserAgent")
 	}
 	if !strings.Contains(config.UserAgent, "@") &&
@@ -142,7 +189,7 @@ func cutEntry(tile []byte) (entry []byte, rh tlog.Hash, rest []byte, err error) 
 	// This implementation is terribly inefficient, parsing the whole entry just
 	// to re-serialize and throw it away. If this function shows up in profiles,
 	// let me know and I'll improve it.
-	e, rest, err := ReadTileLeaf(tile)
+	e, rest, err := ReadTileLeafMaybeArchival(tile)
 	if err != nil {
 		return nil, tlog.Hash{}, nil, err
 	}
@@ -179,7 +226,16 @@ func (c *Client) Entries(ctx context.Context, tree tlog.Tree, start int64) iter.
 	c.err = nil
 	return func(yield func(int64, *LogEntry) bool) {
 		for i, e := range c.c.Entries(ctx, tree, start) {
-			entry, rest, err := ReadTileLeaf(e)
+			var (
+				entry *LogEntry
+				rest  []byte
+				err   error
+			)
+			if c.cc.AllowRFC6962ArchivalLeafs {
+				entry, rest, err = ReadTileLeafMaybeArchival(e)
+			} else {
+				entry, rest, err = ReadTileLeaf(e)
+			}
 			if err != nil {
 				c.err = err
 				return
@@ -204,14 +260,22 @@ func (c *Client) Entry(ctx context.Context, tree tlog.Tree, index int64) (*LogEn
 	if err != nil {
 		return nil, nil, err
 	}
-	entry, rest, err := ReadTileLeaf(e)
+	var (
+		entry *LogEntry
+		rest  []byte
+	)
+	if c.cc.AllowRFC6962ArchivalLeafs {
+		entry, rest, err = ReadTileLeafMaybeArchival(e)
+	} else {
+		entry, rest, err = ReadTileLeaf(e)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to parse log entry %d: %w", index, err)
 	}
 	if len(rest) > 0 {
 		return nil, nil, fmt.Errorf("sunlight: unexpected trailing data in entry %d", index)
 	}
-	if entry.LeafIndex != index {
+	if !entry.RFC6962ArchivalLeaf && entry.LeafIndex != index {
 		return nil, nil, fmt.Errorf("sunlight: log entry index %d does not match requested index %d", entry.LeafIndex, index)
 	}
 	return entry, proof, nil

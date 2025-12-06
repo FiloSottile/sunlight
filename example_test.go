@@ -2,6 +2,7 @@ package sunlight_test
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -9,7 +10,7 @@ import (
 	"strings"
 
 	"filippo.io/sunlight"
-	"github.com/google/certificate-transparency-go/x509"
+	x509ct "github.com/google/certificate-transparency-go/x509"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -100,7 +101,7 @@ ybky1bC4rbimZJIjvhnqMcMkf/I=
 		panic(err)
 	}
 
-	cert, err := x509.ParseCertificate(certificate.Bytes)
+	cert, err := x509ct.ParseCertificate(certificate.Bytes)
 	if err != nil {
 		panic(err)
 	}
@@ -160,4 +161,33 @@ func ExampleClient_UnauthenticatedTrimmedEntries() {
 			panic(err)
 		}
 	}
+}
+
+func ExampleClient_localFilesystem() {
+	block, _ := pem.Decode([]byte(`-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4i7AmqGoGHsorn/eyclTMjrAnM0J
+UUbyGJUxXqq1AjQ4qBC77wXkWt7s/HA8An2vrEBKIGQzqTjV8QIHrmpd4w==
+-----END PUBLIC KEY-----`))
+	key, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		panic(err)
+	}
+
+	client, err := sunlight.NewClient(&sunlight.ClientConfig{
+		MonitoringPrefix: "gzip+file:///tank/logs/navigli2025h2/data/",
+		PublicKey:        key,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	checkpoint, _, err := client.Checkpoint(context.TODO())
+	if err != nil {
+		panic(err)
+	}
+	entry, _, err := client.Entry(context.TODO(), checkpoint.Tree, 142424242)
+	if err != nil {
+		panic(err)
+	}
+	println(entry.Timestamp)
 }
