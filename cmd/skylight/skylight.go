@@ -36,6 +36,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,6 +398,22 @@ func main() {
 			handler.ServeHTTP(w, r)
 		})
 	}
+
+	mux.HandleFunc("/logs.json", func(w http.ResponseWriter, r *http.Request) {
+		reused := reused.LabelFromContext(r.Context())
+		client := clientFromContext(r.Context())
+		reqCount.WithLabelValues("", "logs.json", client, reused, "200").Inc()
+
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+
+		var logs []string
+		for log := range roots {
+			logs = append(logs, log.MonitoringPrefix)
+		}
+		slices.Sort(logs)
+		json.NewEncoder(w).Encode(logs)
+	})
 
 	if c.HomeRedirect != "" {
 		mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
