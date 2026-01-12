@@ -190,8 +190,8 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 }
 
 func overrideImmutable(root *os.Root, name string) error {
-	// Fourth level of safety: refuse to make a partial tile if there isn't a
-	// full tile, which is checked through a *different* mechanism.
+	// Fourth level of safety: refuse to make a partial tile mutable if there
+	// isn't a full tile, which is checked through a *different* mechanism.
 	full, size, ok := strings.Cut(name, ".p/")
 	if !ok {
 		return fmt.Errorf("failed to parse partial tile path %s", name)
