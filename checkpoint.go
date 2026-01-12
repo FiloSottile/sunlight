@@ -43,8 +43,11 @@ func NewRFC6962Verifier(name string, key crypto.PublicKey) (note.Verifier, error
 	v.name = name
 	v.hash = keyHash(name, append([]byte{0x05}, keyID[:]...))
 	v.verify = func(msg, sig []byte) (ok bool) {
-		c, err := ParseCheckpoint(string(msg))
+		c, err := torchwood.ParseCheckpoint(string(msg))
 		if err != nil {
+			return false
+		}
+		if c.Origin != name {
 			return false
 		}
 		if c.Extension != "" {
