@@ -512,6 +512,11 @@ type logInfo struct {
 	Interval     struct {
 		NotAfterLimit string `json:"end_exclusive"`
 	} `json:"temporal_interval"`
+	FinalTree struct {
+		RootHash  []byte `json:"sha256_root_hash"`
+		Size      int64  `json:"tree_size"`
+		Timestamp int64  `json:"timestamp"`
+	} `json:"final_tree_head,omitzero"`
 }
 
 var errLogSunset = errors.New("log is read-only")
@@ -557,6 +562,18 @@ func checkLog(root *os.Root) error {
 		return fmt.Errorf("failed to parse NotAfterLimit: %w", err)
 	}
 	if time.Since(notAfterLimit) > 7*24*time.Hour+3*time.Second {
+		if log.FinalTree.RootHash == nil {
+			return fmt.Errorf("log is past NotAfterLimit + 1 week and has no final tree")
+		}
+		if !bytes.Equal(log.FinalTree.RootHash, checkpoint.Hash[:]) {
+			return fmt.Errorf("mismatching final tree hash")
+		}
+		if log.FinalTree.Size != checkpoint.N {
+			return fmt.Errorf("mismatching final tree size")
+		}
+		if log.FinalTree.Timestamp != t {
+			return fmt.Errorf("mismatching final tree timestamp")
+		}
 		// The log is read-only, so the checkpoint can be old.
 		return errLogSunset
 	}

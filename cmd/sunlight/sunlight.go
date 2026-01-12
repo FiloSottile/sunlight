@@ -30,13 +30,17 @@ import (
 	"flag"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"text/template"
 	"time"
@@ -297,12 +301,13 @@ type LogConfig struct {
 }
 
 // logInfo is used on the homepage and for /log.v3.json. The JSON schema is from
-// https://www.gstatic.com/ct/log_list/v3/log_list_schema.json.
+// https://www.gstatic.com/ct/log_list/v3/log_list_schema.json with additions from
+// https://docs.google.com/document/d/1KIBO8OjTHcmf6e2OsEGYanovC9LWIQL6sS9N8XODmt4/edit.
 type logInfo struct {
 	// Fields from LogConfig, we don't embed the whole struct to avoid
 	// accidentally exposing sensitive fields.
 	Name             string `json:"description"`
-	ShortName        string `json:"-"`
+	ShortName        string `json:"friendly_name"`
 	SubmissionPrefix string `json:"submission_url"` // with trailing slash
 	MonitoringPrefix string `json:"monitoring_url"` // with trailing slash
 	PoolSize         int    `json:"-"`
@@ -322,6 +327,19 @@ type logInfo struct {
 
 	// MMD is always 60 seconds but note that Sunlight logs have zero MMD.
 	MMD int `json:"mmd"`
+
+	// Fields from the "Operator-published CT Log Metadata" proposal.
+	TLSOnly     bool     `json:"tls_only"`              // always true
+	IntendedUse string   `json:"intended_use,omitzero"` // "production" or "test"
+	FinalTree   struct { // only included for sunsetted logs
+		RootHash  []byte `json:"sha256_root_hash"`
+		Size      int64  `json:"tree_size"`
+		Timestamp int64  `json:"timestamp"`
+	} `json:"final_tree_head,omitzero"`
+	Software struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"log_software"`
 }
 
 //go:embed home.html
@@ -416,7 +434,26 @@ func main() {
 
 	sequencerGroup, sequencerContext := errgroup.WithContext(ctx)
 
-	var homeLogsInfo []logInfo
+	var logsMu sync.RWMutex
+	logs := make(map[string]logInfo) // short name => log info
+	homeLogsInfo := func() []logInfo {
+		logsMu.RLock()
+		defer logsMu.RUnlock()
+		return slices.SortedFunc(maps.Values(logs), func(a, b logInfo) int {
+			return strings.Compare(a.ShortName, b.ShortName)
+		})
+	}
+	logInfoForShortName := func(shortName string) (logInfo, bool) {
+		logsMu.RLock()
+		defer logsMu.RUnlock()
+		li, ok := logs[shortName]
+		return li, ok
+	}
+	setLogInfo := func(shortName string, li logInfo) {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		logs[shortName] = li
+	}
 	type witnessInfo struct {
 		Name             string
 		SubmissionPrefix string
@@ -431,7 +468,7 @@ func main() {
 			Logs    []logInfo
 			Witness witnessInfo
 		}{
-			Logs:    homeLogsInfo,
+			Logs:    homeLogsInfo(),
 			Witness: homeWitnessInfo(),
 		}); err != nil {
 			logger.Error("failed to execute homepage template", "err", err)
@@ -446,6 +483,9 @@ func main() {
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("log", lc.ShortName),
 		}))
+		if _, ok := logInfoForShortName(lc.ShortName); ok {
+			fatalError(logger, "duplicate log short name")
+		}
 
 		var b ctlog.Backend
 		switch {
@@ -618,17 +658,52 @@ func main() {
 			})
 		}
 
-		period := 1 * time.Second
-		if lc.Period > 0 {
-			period = time.Duration(lc.Period) * time.Millisecond
-		}
-		sequencerGroup.Go(func() error {
-			err := l.RunSequencer(sequencerContext, period)
-			if e := new(ctlog.SunsetLogError); errors.As(err, e) {
-				return nil
+		// Do some consistency checking on the stored log.v3.json file, if any.
+		if j, err := b.Fetch(ctx, "log.v3.json"); err == nil {
+			var got logInfo
+			if err := json.Unmarshal(j, &got); err != nil {
+				fatalError(logger, "failed to parse stored log.v3.json", "err", err)
 			}
-			return err
-		})
+			if got.ShortName != "" && got.ShortName != lc.ShortName {
+				fatalError(logger, "stored log.v3.json has mismatching short name",
+					"want", lc.ShortName, "got", got.ShortName)
+			}
+			if got.FinalTree.RootHash != nil && l.AcceptingSubmissions() {
+				fatalError(logger, "stored log.v3.json shows log is sunsetted, but log is accepting submissions")
+			}
+		}
+
+		if l.AcceptingSubmissions() {
+			if err := updateMetadata(ctx, setLogInfo, lc, cc, nil); err != nil {
+				fatalError(logger, "failed to update log metadata", "err", err)
+			}
+			period := 1 * time.Second
+			if lc.Period > 0 {
+				period = time.Duration(lc.Period) * time.Millisecond
+			}
+			sequencerGroup.Go(func() error {
+				err := l.RunSequencer(sequencerContext, period)
+				if e := new(ctlog.SunsetLogError); errors.As(err, e) {
+					// Update log.v3.json with the new state and final checkpoint.
+					return updateMetadata(sequencerContext, setLogInfo, lc, cc, e)
+				}
+				return err
+			})
+		} else {
+			// Run the sequencer, which will immediately exit and return the
+			// final checkpoint. We do this to avoid synchronizing access to the
+			// sequencing loop state.
+			err := l.RunSequencer(sequencerContext, 10*time.Nanosecond)
+			sunsetErr := new(ctlog.SunsetLogError)
+			if !errors.As(err, sunsetErr) {
+				fatalError(logger, "log not accepting submissions but not sunsetted?", "err", err)
+			}
+			if err := updateMetadata(sequencerContext, setLogInfo, lc, cc, sunsetErr); err != nil {
+				fatalError(logger, "failed to update log metadata", "err", err)
+			}
+			logger.Info("log is not accepting submissions (sunsetted)",
+				"tree_size", sunsetErr.FinalTree.N, "timestamp", sunsetErr.FinalTimestamp)
+		}
 		mux.Handle(prefix.Host+prefix.Path+"/ct/v1/", http.StripPrefix(prefix.Path, l.Handler()))
 
 		acmeHosts = append(acmeHosts, prefix.Hostname())
@@ -636,39 +711,12 @@ func main() {
 		prometheus.WrapRegistererWith(prometheus.Labels{"log": lc.ShortName}, sunlightMetrics).
 			MustRegister(l.Metrics()...)
 
-		pkix, err := x509.MarshalPKIXPublicKey(&k.PublicKey)
-		if err != nil {
-			fatalError(logger, "failed to marshal public key for display", "err", err)
-		}
-		pemKey := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pkix})
-		logID := sha256.Sum256(pkix)
-		log := logInfo{
-			Name:             prefix.Host + prefix.Path,
-			ShortName:        lc.ShortName,
-			ID:               base64.StdEncoding.EncodeToString(logID[:]),
-			SubmissionPrefix: lc.SubmissionPrefix + "/",
-			MonitoringPrefix: lc.MonitoringPrefix + "/",
-			PoolSize:         lc.PoolSize,
-			PublicKeyPEM:     string(pemKey),
-			PublicKeyDER:     pkix,
-			PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
-			MMD:              60,
-		}
-		log.Interval.NotAfterStart = lc.NotAfterStart
-		log.Interval.NotAfterLimit = lc.NotAfterLimit
-		homeLogsInfo = append(homeLogsInfo, log)
-
-		j, err := json.MarshalIndent(log, "", "    ")
-		if err != nil {
-			fatalError(logger, "failed to marshal log info", "err", err)
-		}
-		err = b.Upload(ctx, "log.v3.json", j, &ctlog.UploadOptions{ContentType: "application/json"})
-		if err != nil {
-			fatalError(logger, "failed to upload log info", "err", err)
-		}
 		mux.HandleFunc(prefix.Host+prefix.Path+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(j)
+			li, _ := logInfoForShortName(lc.ShortName)
+			e := json.NewEncoder(w)
+			e.SetIndent("", "    ")
+			e.Encode(li)
 		})
 	}
 
@@ -828,6 +876,54 @@ func main() {
 	}
 
 	os.Exit(1)
+}
+
+func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc LogConfig, cc *ctlog.Config, e *ctlog.SunsetLogError) error {
+	pkix, err := x509.MarshalPKIXPublicKey(&cc.Key.PublicKey)
+	if err != nil {
+		return err
+	}
+	pemKey := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pkix})
+	logID := sha256.Sum256(pkix)
+	log := logInfo{
+		Name:             cc.Name,
+		ShortName:        lc.ShortName,
+		ID:               base64.StdEncoding.EncodeToString(logID[:]),
+		SubmissionPrefix: lc.SubmissionPrefix + "/",
+		MonitoringPrefix: lc.MonitoringPrefix + "/",
+		PoolSize:         lc.PoolSize,
+		PublicKeyPEM:     string(pemKey),
+		PublicKeyDER:     pkix,
+		PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
+		MMD:              60,
+		TLSOnly:          true,
+	}
+	log.Interval.NotAfterStart = lc.NotAfterStart
+	log.Interval.NotAfterLimit = lc.NotAfterLimit
+	switch {
+	case lc.Roots != "":
+		// No IntendedUse for custom roots.
+	case lc.CCADBRoots == "trusted" || lc.CCADBRoots == "":
+		log.IntendedUse = "production"
+	case lc.CCADBRoots == "testing":
+		log.IntendedUse = "test"
+	}
+	if e != nil {
+		log.FinalTree.RootHash = e.FinalTree.Hash[:]
+		log.FinalTree.Size = e.FinalTree.N
+		log.FinalTree.Timestamp = e.FinalTimestamp
+	}
+	info, _ := debug.ReadBuildInfo()
+	log.Software.Name = info.Main.Path
+	log.Software.Version = info.Main.Version
+
+	setLogInfo(lc.ShortName, log)
+
+	j, err := json.MarshalIndent(log, "", "    ")
+	if err != nil {
+		return err
+	}
+	return cc.Backend.Upload(ctx, "log.v3.json", j, &ctlog.UploadOptions{ContentType: "application/json"})
 }
 
 func fetchCheckpoint(ctx context.Context, logger *slog.Logger, prefix string) []byte {
