@@ -633,6 +633,11 @@ func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry) (f waitE
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
 	p := l.currentPool
+	if err := p.err; err != nil {
+		return func(ctx context.Context) (*sunlight.LogEntry, error) {
+			return nil, err
+		}, "closed"
+	}
 	h := computeCacheHash(leaf.Certificate, leaf.IsPrecert, leaf.IssuerKeyHash)
 	if f, ok := p.byHash[h]; ok {
 		return f, "pool"
