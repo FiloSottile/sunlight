@@ -422,6 +422,13 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	return nil
 }
 
+// AcceptingSubmissions returns whether the log is accepting submissions. It can
+// only go from true to false, when the log becomes read-only, not back.
+func (l *Log) AcceptingSubmissions() bool {
+	// Turn read-only one week after the end of the shard window.
+	return time.Since(l.c.NotAfterLimit) < 7*24*time.Hour
+}
+
 // Backend is an object storage. It is dedicated to a single log instance.
 //
 // It can be eventually consistent, but writes must be durable once they return.
@@ -709,6 +716,15 @@ func (l *Log) uploadIssuer(ctx context.Context, issuer []byte) error {
 	return nil
 }
 
+type SunsetLogError struct {
+	FinalTree      tlog.Tree
+	FinalTimestamp int64
+}
+
+func (SunsetLogError) Error() string {
+	return "the log is read-only"
+}
+
 func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error) {
 	// If the sequencer stops, return errors for all pending and future leaves.
 	defer func() {
@@ -730,6 +746,9 @@ func (l *Log) RunSequencer(ctx context.Context, period time.Duration) (err error
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
+			if !l.AcceptingSubmissions() {
+				return SunsetLogError{l.tree.Tree, l.tree.Time}
+			}
 			if err := l.sequence(ctx); err != nil {
 				return err
 			}

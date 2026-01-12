@@ -413,7 +413,9 @@ func main() {
 		buf := &bytes.Buffer{}
 		for log, root := range roots {
 			if err := checkLog(root); err != nil {
-				if log.Staging {
+				if errors.Is(err, errLogSunset) {
+					fmt.Fprintf(buf, "%s: read-only\n", log.ShortName)
+				} else if log.Staging {
 					fmt.Fprintf(buf, "%s: %v (ignored)\n", log.ShortName, err)
 				} else {
 					status = http.StatusInternalServerError
@@ -507,7 +509,12 @@ func main() {
 type logInfo struct {
 	Name         string `json:"description"`
 	PublicKeyDER []byte `json:"key"`
+	Interval     struct {
+		NotAfterLimit string `json:"end_exclusive"`
+	} `json:"temporal_interval"`
 }
+
+var errLogSunset = errors.New("log is read-only")
 
 func checkLog(root *os.Root) error {
 	logJSON, err := fs.ReadFile(root.FS(), "log.v3.json")
@@ -544,6 +551,14 @@ func checkLog(root *os.Root) error {
 	t, err := sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
 	if err != nil {
 		return fmt.Errorf("failed to parse signature timestamp: %w", err)
+	}
+	notAfterLimit, err := time.Parse(time.RFC3339, log.Interval.NotAfterLimit)
+	if err != nil {
+		return fmt.Errorf("failed to parse NotAfterLimit: %w", err)
+	}
+	if time.Since(notAfterLimit) > 7*24*time.Hour+3*time.Second {
+		// The log is read-only, so the checkpoint can be old.
+		return errLogSunset
 	}
 	if ct := time.UnixMilli(t); time.Since(ct) > 5*time.Second {
 		return fmt.Errorf("checkpoint is too old: %v", ct)

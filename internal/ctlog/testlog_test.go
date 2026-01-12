@@ -63,7 +63,7 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 		Lock:          NewMemoryLockBackend(t),
 		Log:           slog.New(logHandler),
 		NotAfterStart: time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
-		NotAfterLimit: time.Date(2024, time.July, 1, 0, 0, 0, 0, time.UTC),
+		NotAfterLimit: time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC),
 	}
 	err = ctlog.CreateLog(t.Context(), config)
 	fatalIfErr(t, err)
@@ -318,7 +318,8 @@ func (tl *TestLog) StartSequencer() {
 	tl.t.Cleanup(cancel)
 	go func() {
 		err := tl.Log.RunSequencer(ctx, 50*time.Millisecond)
-		if err != context.Canceled {
+		if err != nil && !errors.Is(err, context.Canceled) &&
+			!errors.As(err, new(ctlog.SunsetLogError)) {
 			tl.t.Errorf("RunSequencer returned an error: %v", err)
 		}
 	}()

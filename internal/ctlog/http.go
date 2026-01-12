@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -203,6 +204,8 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	}
 	if err == errPoolFull {
 		return nil, http.StatusServiceUnavailable, err
+	} else if errors.As(err, new(SunsetLogError)) {
+		return nil, http.StatusGone, err
 	} else if err != nil {
 		return nil, http.StatusInternalServerError, fmtErrorf("failed to sequence leaf: %w", err)
 	}

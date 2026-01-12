@@ -623,7 +623,11 @@ func main() {
 			period = time.Duration(lc.Period) * time.Millisecond
 		}
 		sequencerGroup.Go(func() error {
-			return l.RunSequencer(sequencerContext, period)
+			err := l.RunSequencer(sequencerContext, period)
+			if e := new(ctlog.SunsetLogError); errors.As(err, e) {
+				return nil
+			}
+			return err
 		})
 		mux.Handle(prefix.Host+prefix.Path+"/ct/v1/", http.StripPrefix(prefix.Path, l.Handler()))
 
