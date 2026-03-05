@@ -118,7 +118,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 
 func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
-		"precert": "", "preissuer": "", "chain_len": "", "source": ""}
+		"precert": "", "preissuer": "", "chain_len": "", "low_priority": "", "source": ""}
 	defer func() {
 		if err != nil {
 			labels["error"] = errorCategory(err)
@@ -147,9 +147,11 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	if err != nil {
 		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: %w", err)
 	}
+	lowPriority := lowPriority(chain[0])
 	labels["chain_len"] = fmt.Sprintf("%d", len(chain))
 	labels["root"] = x509util.NameToString(chain[len(chain)-1].Subject)
 	labels["issuer"] = x509util.NameToString(chain[0].Issuer)
+	labels["low_priority"] = fmt.Sprintf("%v", lowPriority)
 
 	e := &PendingLogEntry{Certificate: chain[0].Raw}
 	for _, issuer := range chain[1:] {
@@ -195,14 +197,15 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		return nil, http.StatusBadRequest, err
 	}
 
-	waitLeaf, source := l.addLeafToPool(ctx, e)
+	waitLeaf, source := l.addLeafToPool(ctx, e, lowPriority)
 	labels["source"] = source
 	waitTimer := prometheus.NewTimer(l.m.AddChainWait)
 	seq, err := waitLeaf(ctx)
-	if source == "sequencer" {
+	if source == "sequencer" && err != errEvicted {
 		waitTimer.ObserveDuration()
 	}
-	if err == errPoolFull {
+	if err == errPoolFull || err == errEvicted {
+		labels["source"] = "evicted"
 		return nil, http.StatusServiceUnavailable, err
 	} else if errors.As(err, new(SunsetLogError)) {
 		return nil, http.StatusGone, err
@@ -234,6 +237,19 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	}
 
 	return rsp, http.StatusOK, nil
+}
+
+func lowPriority(c *x509.Certificate) bool {
+	if isPrecert, _ := ctfe.IsPrecertificate(c); isPrecert {
+		// The BRs allow at most 48 hours of backdating. A precertificate older
+		// than that can't turn into a valid certificate anymore, so it must be
+		// cross-posted.
+		return time.Since(c.NotBefore) >= 48*time.Hour
+	}
+	// If a certificate has SCTs, it's already been logged. It'd be better to
+	// verify the signatures, but this check is meant for when we are under load
+	// and need to prioritize.
+	return len(c.SCTList.SCTList) > 0
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {

@@ -6,8 +6,17 @@ import (
 	"filippo.io/sunlight"
 )
 
-func (l *Log) AddLeafToPool(e *PendingLogEntry) (waitEntryFunc, string) {
-	return l.addLeafToPool(context.Background(), e)
+var ErrEvicted = errEvicted
+var ErrPoolFull = errPoolFull
+
+type WaitEntryFunc = waitEntryFunc
+
+func (l *Log) AddLeafToPool(e *PendingLogEntry) (WaitEntryFunc, string) {
+	return l.addLeafToPool(context.Background(), e, false)
+}
+
+func (l *Log) AddLeafToPoolWithLowPriority(e *PendingLogEntry) (WaitEntryFunc, string) {
+	return l.addLeafToPool(context.Background(), e, true)
 }
 
 func (l *Log) Sequence() error {

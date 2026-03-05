@@ -586,6 +586,7 @@ func computeCacheHash(Certificate []byte, IsPrecert bool, IssuerKeyHash [32]byte
 type pool struct {
 	pendingLeaves []*PendingLogEntry
 	byHash        map[cacheHash]waitEntryFunc
+	lowPriority   map[int]func() // pendingLeaves idx => cancel func
 
 	// done is closed when the pool has been sequenced and
 	// the results below are ready.
@@ -605,18 +606,23 @@ type waitEntryFunc func(ctx context.Context) (*sunlight.LogEntry, error)
 
 func newPool() *pool {
 	return &pool{
-		done:   make(chan struct{}),
-		byHash: make(map[cacheHash]waitEntryFunc),
+		done:        make(chan struct{}),
+		byHash:      make(map[cacheHash]waitEntryFunc),
+		lowPriority: make(map[int]func()),
 	}
 }
 
 var errPoolFull = fmtErrorf("rate limited")
+var errEvicted = fmtErrorf("evicted to make way for higher priority leaves")
 
 // addLeafToPool adds leaf to the current pool, unless it is found in a
 // deduplication cache. It returns a function that will wait until the pool is
 // sequenced and return the sequenced leaf, as well as the source of the
 // sequenced leaf (pool or cache if deduplicated, sequencer otherwise).
-func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry) (f waitEntryFunc, source string) {
+//
+// Low priority entries might get evicted to make space for high priority ones,
+// in which case the waitEntryFunc of the evicted entry will immediately return.
+func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry, lowPriority bool) (f waitEntryFunc, source string) {
 	// We could marginally more efficiently do uploadIssuer after checking the
 	// caches, but it's simpler for the the block below to be under a single
 	// poolMu lock, and uploadIssuer goes to the network so we don't want to
@@ -656,16 +662,43 @@ func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry) (f waitE
 	}
 	n := len(p.pendingLeaves)
 	if l.c.PoolSize > 0 && n >= l.c.PoolSize {
-		return func(ctx context.Context) (*sunlight.LogEntry, error) {
-			return nil, errPoolFull
-		}, "ratelimit"
+		if lowPriority || len(p.lowPriority) == 0 {
+			return func(ctx context.Context) (*sunlight.LogEntry, error) {
+				return nil, errPoolFull
+			}, "ratelimit"
+		}
+		for nn, cancel := range p.lowPriority {
+			cancel()
+			delete(p.lowPriority, nn)
+			n = nn
+			p.pendingLeaves[n] = leaf
+			break
+		}
+	} else {
+		p.pendingLeaves = append(p.pendingLeaves, leaf)
 	}
-	p.pendingLeaves = append(p.pendingLeaves, leaf)
+	var cancelChan chan struct{}
+	if lowPriority {
+		cancelChan = make(chan struct{})
+		p.lowPriority[n] = func() {
+			close(cancelChan)
+		}
+	}
 	f = func(ctx context.Context) (*sunlight.LogEntry, error) {
 		select {
 		case <-ctx.Done():
 			return nil, fmtErrorf("context canceled while waiting for sequencing: %w", ctx.Err())
+		case <-cancelChan:
+			return nil, errEvicted
 		case <-p.done:
+			if err := ctx.Err(); err != nil {
+				return nil, fmtErrorf("context canceled while waiting for sequencing: %w", err)
+			}
+			select {
+			case <-cancelChan:
+				return nil, errEvicted
+			default:
+			}
 			if p.err != nil {
 				return nil, p.err
 			}

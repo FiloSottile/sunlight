@@ -229,6 +229,117 @@ func TestSequenceUploadPaths(t *testing.T) {
 	}
 }
 
+func TestRatelimit(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	tl.Config.PoolSize = 10
+
+	var pendingEvictions []ctlog.WaitEntryFunc
+	addCertificateExpectEvictionWithSeed := func(seed int64) string {
+		r := mathrand.New(mathrand.NewSource(seed))
+		e := &ctlog.PendingLogEntry{}
+		e.Certificate = make([]byte, r.Intn(4)+8)
+		r.Read(e.Certificate)
+		e.Issuers = chains[r.Intn(len(chains))]
+		f, source := tl.Log.AddLeafToPoolWithLowPriority(e)
+		pendingEvictions = append(pendingEvictions, f)
+		return source
+	}
+	addCertificateExpectEviction := func() {
+		addCertificateExpectEvictionWithSeed(mathrand.Int63())
+	}
+	checkEvictions := func() {
+		for _, f := range pendingEvictions {
+			_, err := f(t.Context())
+			if err != ctlog.ErrEvicted {
+				t.Errorf("got error %v, expected ErrEvicted", err)
+			}
+		}
+		pendingEvictions = nil
+	}
+
+	addLowPriorityExpectRatelimit := func() {
+		r := mathrand.New(mathrand.NewSource(mathrand.Int63()))
+		e := &ctlog.PendingLogEntry{}
+		e.Certificate = make([]byte, r.Intn(4)+8)
+		r.Read(e.Certificate)
+		e.Issuers = chains[r.Intn(len(chains))]
+		f, source := tl.Log.AddLeafToPoolWithLowPriority(e)
+		if source != "ratelimit" {
+			t.Errorf("got source %q, expected \"ratelimit\"", source)
+		}
+		if _, err := f(t.Context()); err != ctlog.ErrPoolFull {
+			t.Errorf("got error %v, expected ErrPoolFull", err)
+		}
+	}
+
+	// When the pool is full of high-priority entries, new entries are rejected.
+	for range 10 {
+		addCertificate(t, tl)
+	}
+	for range 10 {
+		addCertificateExpectFailure(t, tl)
+	}
+	for range 10 {
+		addLowPriorityExpectRatelimit()
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(10)
+
+	// When there are low-priority entries, high-priority entries cause them to
+	// be evicted.
+	for range 5 {
+		addCertificate(t, tl)
+	}
+	for range 3 {
+		addCertificateExpectEviction()
+	}
+	for range 2 {
+		addCertificate(t, tl)
+	}
+	addLowPriorityExpectRatelimit()
+	for range 3 {
+		addCertificate(t, tl)
+	}
+	addCertificateExpectFailure(t, tl)
+	// Evictions unblock before the sequencing.
+	checkEvictions()
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(20)
+
+	// If we were to wait to call the waitFunc until after sequencing, the
+	// evictions would still know they were evicted.
+	for range 5 {
+		addCertificateExpectEviction()
+	}
+	for range 10 {
+		addCertificate(t, tl)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(30)
+	checkEvictions()
+
+	// If a low-priority entry is deduplicated (resubmitted to the same pool)
+	// and then evicted, both callers get ErrEvicted.
+	for range 5 {
+		addCertificate(t, tl)
+	}
+	seed := mathrand.Int63()
+	if source := addCertificateExpectEvictionWithSeed(seed); source != "sequencer" {
+		t.Errorf("got source %q, expected \"sequencer\"", source)
+	}
+	if source := addCertificateExpectEvictionWithSeed(seed); source != "pool" {
+		t.Errorf("got source %q, expected \"pool\"", source)
+	}
+	for range 4 {
+		addCertificate(t, tl)
+	}
+	// Evict the low-priority entry by filling the pool with high-priority ones.
+	addCertificate(t, tl)
+	checkEvictions()
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(40)
+}
+
 func TestDuplicates(t *testing.T) {
 	t.Run("Certificates", func(t *testing.T) {
 		testDuplicates(t, addCertificateWithSeed)
