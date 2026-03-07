@@ -204,8 +204,10 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	if source == "sequencer" && err != errEvicted {
 		waitTimer.ObserveDuration()
 	}
-	if err == errPoolFull || err == errEvicted {
+	if err == errEvicted {
 		labels["source"] = "evicted"
+	}
+	if err == errPoolFull || err == errEvicted {
 		return nil, http.StatusServiceUnavailable, err
 	} else if errors.As(err, new(SunsetLogError)) {
 		return nil, http.StatusGone, err
