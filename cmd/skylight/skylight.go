@@ -312,6 +312,7 @@ func main() {
 		}
 		roots[lc] = root
 		handler := http.FileServerFS(root.FS())
+		prefixHandler := http.StripPrefix(prefix.Path, handler)
 
 		// Wrap the file handler with duration and response size metrics.
 		// Avoid tracking the size and duration of errors or simple responses.
@@ -351,13 +352,14 @@ func main() {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "checkpoint"))
-			handler.ServeHTTP(w, r)
+
+			prefixHandler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Content-Type", "application/json")
 			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "log.v3.json"))
-			handler.ServeHTTP(w, r)
+			prefixHandler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/issuer/{issuer}", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -368,7 +370,7 @@ func main() {
 				return
 			}
 			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "issuer"))
-			handler.ServeHTTP(w, r)
+			prefixHandler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/tile/{tile...}", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -395,7 +397,7 @@ func main() {
 			default:
 				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "tile"))
 			}
-			handler.ServeHTTP(w, r)
+			prefixHandler.ServeHTTP(w, r)
 		})
 	}
 
