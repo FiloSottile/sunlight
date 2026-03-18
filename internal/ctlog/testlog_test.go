@@ -440,7 +440,7 @@ type MemoryBackend struct {
 	imm map[string]bool
 	del map[string]bool
 
-	uploads uint64
+	uploads atomic.Uint64
 
 	UploadCallback func(key string, data []byte) (apply bool, err error)
 }
@@ -452,7 +452,7 @@ func NewMemoryBackend(t testing.TB) *MemoryBackend {
 }
 
 func (b *MemoryBackend) Upload(ctx context.Context, key string, data []byte, opts *ctlog.UploadOptions) error {
-	atomic.AddUint64(&b.uploads, 1)
+	b.uploads.Add(1)
 	// TODO: check key format is expected.
 	if len(data) == 0 && key != "_roots.pem" {
 		b.t.Errorf("uploaded key %q with empty data", key)

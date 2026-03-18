@@ -125,7 +125,7 @@ func TestSequenceUploadCount(t *testing.T) {
 
 	var old uint64
 	uploads := func() uint64 {
-		new := tl.Config.Backend.(*MemoryBackend).uploads
+		new := tl.Config.Backend.(*MemoryBackend).uploads.Load()
 		n := new - old
 		old = new
 		return n
