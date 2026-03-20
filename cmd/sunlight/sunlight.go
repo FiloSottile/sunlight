@@ -261,9 +261,11 @@ type LogConfig struct {
 	Cache string
 
 	// PoolSize is the maximum number of chains pending in the sequencing pool.
-	// Since the pool is sequenced every second, it works as a qps limit. If the
-	// pool is full, add-chain requests will be rejected with a 503. Zero means
-	// no limit.
+	// Since the pool is sequenced every Period, it works as a qps limit. If the
+	// pool is full, lower-priority entries will be evicted and replaced if
+	// possible, and otherwise add-chain requests will be rejected with a 503.
+	// Lower-priority entries are precertificates with NotBefore more than 48h
+	// in the past, or certificates with an SCT extension. Zero means no limit.
 	PoolSize int
 
 	// S3Region is the AWS region for the S3 bucket.
