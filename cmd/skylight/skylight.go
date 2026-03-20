@@ -311,7 +311,7 @@ func main() {
 			fatalError(logger, "failed to open local directory", "err", err)
 		}
 		roots[lc] = root
-		handler := http.FileServerFS(root.FS())
+		handler := http.StripPrefix(prefix.Path, http.FileServerFS(root.FS()))
 
 		// Wrap the file handler with duration and response size metrics.
 		// Avoid tracking the size and duration of errors or simple responses.
