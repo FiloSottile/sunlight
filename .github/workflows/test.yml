@@ -19,6 +19,9 @@ jobs:
         deps:
           - locked
           - latest
+        exclude:
+          - go: { go-version-file: go.mod }
+            deps: latest
     steps:
       - uses: actions/checkout@v5
         with:
