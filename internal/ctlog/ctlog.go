@@ -422,11 +422,14 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	return nil
 }
 
+// ReadOnlyAfter is how long after the end of the shard window
+// the log becomes read-only: one week.
+const ReadOnlyAfter = 7 * 24 * time.Hour
+
 // AcceptingSubmissions returns whether the log is accepting submissions. It can
 // only go from true to false, when the log becomes read-only, not back.
 func (l *Log) AcceptingSubmissions() bool {
-	// Turn read-only one week after the end of the shard window.
-	return time.Since(l.c.NotAfterLimit) < 7*24*time.Hour
+	return time.Since(l.c.NotAfterLimit) < ReadOnlyAfter
 }
 
 // Backend is an object storage. It is dedicated to a single log instance.

@@ -331,17 +331,34 @@ type logInfo struct {
 	MMD int `json:"mmd"`
 
 	// Fields from the "Operator-published CT Log Metadata" proposal.
-	TLSOnly     bool     `json:"tls_only"`              // always true
-	IntendedUse string   `json:"intended_use,omitzero"` // "production" or "test"
-	FinalTree   struct { // only included for sunsetted logs
+	LogSpec         string          `json:"log_spec"`              // always "static-ct-api"
+	MMDSeconds      int             `json:"mmd_seconds"`           // always 60, same as MMD
+	TLSOnly         bool            `json:"tls_only"`              // always true
+	IntendedUse     string          `json:"intended_use,omitzero"` // "production" or "test"
+	Status          string          `json:"status"`                // "active" or "readonly" or "inactive"
+	StatusTimestamp string          `json:"status_timestamp"`
+	PlannedChanges  []PlannedChange `json:"planned_changes,omitempty"`
+	FinalTree       struct {        // only included for non-active logs
 		RootHash  []byte `json:"sha256_root_hash"`
 		Size      int64  `json:"tree_size"`
 		Timestamp int64  `json:"timestamp"`
 	} `json:"final_tree_head,omitzero"`
+	SubmissionEndpoint struct {
+		URL string `json:"url"`
+	} `json:"submission_endpoint"`
+	MonitoringEndpoint struct {
+		URL string `json:"url"`
+	} `json:"monitoring_endpoint"`
 	Software struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"log_software"`
+}
+
+type PlannedChange struct {
+	NewStatus     string `json:"new_status"`
+	EffectiveDate string `json:"effective_date"`
+	Comment       string `json:"comment,omitempty"`
 }
 
 //go:embed home.html
@@ -898,10 +915,14 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 		PublicKeyDER:     pkix,
 		PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
 		MMD:              60,
+		MMDSeconds:       60,
 		TLSOnly:          true,
+		LogSpec:          "static-ct-api",
 	}
 	log.Interval.NotAfterStart = lc.NotAfterStart
 	log.Interval.NotAfterLimit = lc.NotAfterLimit
+	log.SubmissionEndpoint.URL = log.SubmissionPrefix
+	log.MonitoringEndpoint.URL = log.MonitoringPrefix
 	switch {
 	case lc.Roots != "":
 		// No IntendedUse for custom roots.
@@ -910,10 +931,20 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 	case lc.CCADBRoots == "testing":
 		log.IntendedUse = "test"
 	}
+	readOnlyAt := cc.NotAfterLimit.Add(ctlog.ReadOnlyAfter)
 	if e != nil {
+		log.Status = "readonly"
+		log.StatusTimestamp = readOnlyAt.Format(time.RFC3339)
 		log.FinalTree.RootHash = e.FinalTree.Hash[:]
 		log.FinalTree.Size = e.FinalTree.N
 		log.FinalTree.Timestamp = e.FinalTimestamp
+	} else {
+		log.Status = "active"
+		log.StatusTimestamp = lc.Inception + "T00:00:00Z"
+		log.PlannedChanges = []PlannedChange{{
+			NewStatus:     "readonly",
+			EffectiveDate: readOnlyAt.Format(time.RFC3339),
+		}}
 	}
 	info, _ := debug.ReadBuildInfo()
 	log.Software.Name = info.Main.Path
