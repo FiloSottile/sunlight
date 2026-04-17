@@ -84,6 +84,10 @@ type Config struct {
 	// HomeRedirect is the 302 destination of the root. Optional.
 	HomeRedirect string
 
+	// OperatorName is the human-readable name of the CT log operator,
+	// served at /logs.json per the operator-list-v1 schema. Optional.
+	OperatorName string
+
 	Logs []LogConfig
 }
 
@@ -409,10 +413,16 @@ func main() {
 
 		var logs []string
 		for log := range roots {
-			logs = append(logs, log.MonitoringPrefix)
+			logs = append(logs, log.MonitoringPrefix+"/log.v3.json")
 		}
 		slices.Sort(logs)
-		json.NewEncoder(w).Encode(logs)
+		json.NewEncoder(w).Encode(struct {
+			OperatorName string   `json:"operator_name,omitempty"`
+			Logs         []string `json:"logs"`
+		}{
+			OperatorName: c.OperatorName,
+			Logs:         logs,
+		})
 	})
 
 	if c.HomeRedirect != "" {
