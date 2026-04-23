@@ -60,6 +60,10 @@ func main() {
 		process:       fmt.Sprintf(`job=~%q`, *logName+"|"+*skylightJob),
 		networkDevice: fmt.Sprintf(`device=~%q`, *netDevice),
 		dsPrefix:      *datasetF,
+		processLabels: map[string]string{
+			*logName:     "sunlight (write path)",
+			*skylightJob: "skylight (read path)",
+		},
 	}
 
 	page := buildPage(p, *title, start, end, *step, sel)
@@ -280,6 +284,7 @@ type selectors struct {
 	process       string // e.g. `job=~"tuscolo|skylight"`
 	networkDevice string // e.g. `device=~"enp.*"`
 	dsPrefix      string // e.g. "tank/logs/" (for stripping dataset labels)
+	processLabels map[string]string
 }
 
 func buildPage(p *prom, title string, start, end time.Time, step time.Duration, sel selectors) *pageData {
@@ -327,12 +332,12 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 	add("CPU",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`sum by (job) (rate(process_cpu_seconds_total{%s}[5m]))`, sel.process),
-			[]string{"job"}, chartOpts{Unit: unitCPU}))
+			[]string{"job"}, chartOpts{Unit: unitCPU, LabelMap: sel.processLabels}))
 
 	add("Resident memory",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`sum by (job) (process_resident_memory_bytes{%s})`, sel.process),
-			[]string{"job"}, chartOpts{Unit: unitBytes}))
+			[]string{"job"}, chartOpts{Unit: unitBytes, LabelMap: sel.processLabels}))
 
 	return page
 }
