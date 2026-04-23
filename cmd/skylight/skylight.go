@@ -84,6 +84,10 @@ type Config struct {
 	// HomeRedirect is the 302 destination of the root. Optional.
 	HomeRedirect string
 
+	// OperatorName is the human-readable name of the CT log operator,
+	// served at /logs.json per the operator-list-v1 schema. Optional.
+	OperatorName string
+
 	Logs []LogConfig
 }
 
@@ -321,13 +325,19 @@ func main() {
 		handler = promhttp.InstrumentHandlerResponseSize(resSize.MustCurryWith(labels), handler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext))
 
-		// Then, apply the rate limit handler.
-		handler = newRateLimitHandler(handler)
+		// Then, apply the rate limit handler. Keep an unrestricted handler for
+		// small browser-friendly endpoints like checkpoint and JSON metadata.
+		rateLimitedHandler := newRateLimitHandler(handler)
+		unlimitedHandler := handler
 
 		// Next, the request counter. It needs to go before the mux as it uses
 		// the context keys we set in the per-path handlers, but after the rate
 		// limit handler, so it will capture the 429 errors.
-		handler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), handler,
+		unlimitedHandler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), unlimitedHandler,
+			promhttp.WithLabelFromCtx("kind", kindFromContext),
+			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
+			promhttp.WithLabelFromCtx("client", clientFromContext))
+		rateLimitedHandler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), rateLimitedHandler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
 			promhttp.WithLabelFromCtx("client", clientFromContext))
@@ -351,13 +361,13 @@ func main() {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "checkpoint"))
-			handler.ServeHTTP(w, r)
+			unlimitedHandler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Content-Type", "application/json")
 			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "log.v3.json"))
-			handler.ServeHTTP(w, r)
+			unlimitedHandler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/issuer/{issuer}", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -368,7 +378,7 @@ func main() {
 				return
 			}
 			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "issuer"))
-			handler.ServeHTTP(w, r)
+			rateLimitedHandler.ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/tile/{tile...}", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -395,7 +405,7 @@ func main() {
 			default:
 				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "tile"))
 			}
-			handler.ServeHTTP(w, r)
+			rateLimitedHandler.ServeHTTP(w, r)
 		})
 	}
 
@@ -409,10 +419,16 @@ func main() {
 
 		var logs []string
 		for log := range roots {
-			logs = append(logs, log.MonitoringPrefix)
+			logs = append(logs, log.MonitoringPrefix+"/log.v3.json")
 		}
 		slices.Sort(logs)
-		json.NewEncoder(w).Encode(logs)
+		json.NewEncoder(w).Encode(struct {
+			OperatorName string   `json:"operator_name,omitempty"`
+			Logs         []string `json:"logs"`
+		}{
+			OperatorName: c.OperatorName,
+			Logs:         logs,
+		})
 	})
 
 	if c.HomeRedirect != "" {
