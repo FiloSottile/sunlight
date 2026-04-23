@@ -313,15 +313,16 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 			fmt.Sprintf(`max by (quantile) (sunlight_addchain_wait_seconds{%s,quantile=~"0.5|0.99"})`, sel.sunlight),
 			[]string{"quantile"}, chartOpts{Unit: unitSeconds}))
 
-	add("Requests/s served (by kind)",
+	add("Requests/s served (per kind)",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`sum by (kind) (rate(skylight_http_requests_total{%s}[5m]))`, sel.skylight),
-			[]string{"kind"}, chartOpts{Unit: unitRate, Stack: true}))
+			[]string{"kind"}, chartOpts{Unit: unitRate}))
 
 	add("Requests/s served (by client)",
-		rangeChart(p, start, end, step,
-			fmt.Sprintf(`sum by (client) (rate(skylight_http_requests_total{%s}[5m]))`, sel.skylight),
-			[]string{"client"}, chartOpts{Unit: unitRate, Stack: true}))
+		multiRangeChart(p, start, end, step, []namedQuery{
+			{"identified", fmt.Sprintf(`sum(rate(skylight_http_requests_total{%s,client!="anonymous"}[5m]))`, sel.skylight)},
+			{"anonymous", fmt.Sprintf(`sum(rate(skylight_http_requests_total{%s,client="anonymous"}[5m]))`, sel.skylight)},
+		}, chartOpts{Unit: unitRate, Stack: true}))
 
 	add("Bandwidth (system-wide)",
 		multiRangeChart(p, start, end, step, []namedQuery{
