@@ -326,7 +326,7 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 	add("Bandwidth (system-wide)",
 		multiRangeChart(p, start, end, step, []namedQuery{
 			{"out", fmt.Sprintf(`sum(rate(node_network_transmit_bytes_total{%s}[5m]))`, sel.networkDevice)},
-			{"in", fmt.Sprintf(`-sum(rate(node_network_receive_bytes_total{%s}[5m]))`, sel.networkDevice)},
+			{"in", fmt.Sprintf(`sum(rate(node_network_receive_bytes_total{%s}[5m]))`, sel.networkDevice)},
 		}, chartOpts{Unit: unitMbps}))
 
 	add("CPU",
