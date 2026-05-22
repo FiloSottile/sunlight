@@ -346,7 +346,9 @@ type logInfo struct {
 
 //go:embed home.html
 var homeHTML string
-var homeTmpl = template.Must(template.New("home").Parse(homeHTML))
+var homeTmpl = template.Must(template.New("home").Funcs(template.FuncMap{
+	"timestamp": func(ms int64) string { return time.UnixMilli(ms).UTC().Format(time.RFC3339) },
+}).Parse(homeHTML))
 
 func main() {
 	fs := flag.NewFlagSet("sunlight", flag.ExitOnError)
