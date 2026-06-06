@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -508,16 +509,12 @@ func main() {
 	homeWitnessInfo := func() witnessInfo { return witnessInfo{} }
 	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		pageTitle := "Sunlight"
-		if c.Name != "" {
-			pageTitle = c.Name
-		}
 		if err := homeTmpl.Execute(w, struct {
 			Title   string
 			Logs    []logInfo
 			Witness witnessInfo
 		}{
-			Title:   pageTitle,
+			Title:   cmp.Or(c.Name, "Sunlight"),
 			Logs:    homeLogsInfo(),
 			Witness: homeWitnessInfo(),
 		}); err != nil {
