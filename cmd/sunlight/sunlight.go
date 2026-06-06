@@ -409,6 +409,25 @@ func main() {
 	}))
 	sunlightMetrics := prometheus.WrapRegistererWithPrefix("sunlight_", metrics)
 
+	buildInfo, _ := debug.ReadBuildInfo()
+	buildVersion := buildInfo.Main.Version
+	buildCommit := ""
+	for _, s := range buildInfo.Settings {
+		if s.Key == "vcs.revision" {
+			buildCommit = s.Value
+			break
+		}
+	}
+	buildInfoGauge := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "sunlight_build_info",
+			Help: "Build information about the running sunlight binary.",
+		},
+		[]string{"version", "commit"},
+	)
+	buildInfoGauge.WithLabelValues(buildVersion, buildCommit).Set(1)
+	metrics.MustRegister(buildInfoGauge)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
