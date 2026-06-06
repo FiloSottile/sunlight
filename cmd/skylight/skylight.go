@@ -36,6 +36,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -280,6 +281,25 @@ func main() {
 	)
 	skylightMetrics := prometheus.WrapRegistererWithPrefix("skylight_", metrics)
 	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize)
+
+	buildInfo, _ := debug.ReadBuildInfo()
+	buildVersion := buildInfo.Main.Version
+	buildCommit := ""
+	for _, s := range buildInfo.Settings {
+		if s.Key == "vcs.revision" {
+			buildCommit = s.Value
+			break
+		}
+	}
+	buildInfoGauge := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "build_info",
+			Help: "Build information about the running sunlight binary.",
+		},
+		[]string{"version", "commit"},
+	)
+	buildInfoGauge.WithLabelValues(buildVersion, buildCommit).Set(1)
+	skylightMetrics.MustRegister(buildInfoGauge)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

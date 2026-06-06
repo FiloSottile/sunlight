@@ -427,13 +427,13 @@ func main() {
 	}
 	buildInfoGauge := prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "sunlight_build_info",
+			Name: "build_info",
 			Help: "Build information about the running sunlight binary.",
 		},
 		[]string{"version", "commit"},
 	)
 	buildInfoGauge.WithLabelValues(buildVersion, buildCommit).Set(1)
-	metrics.MustRegister(buildInfoGauge)
+	sunlightMetrics.MustRegister(buildInfoGauge)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
