@@ -202,7 +202,7 @@ func (p *prom) get(q string) ([]series, error) {
 		} else {
 			s.Samples = make([]sample, len(e.Values))
 			for j, pp := range e.Values {
-				s.Samples[j] = sample{T: pp.T, V: pp.V}
+				s.Samples[j] = sample(pp)
 			}
 		}
 		out[i] = s
