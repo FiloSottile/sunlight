@@ -65,6 +65,10 @@ import (
 )
 
 type Config struct {
+	// Name is the display name for this Sunlight instance, used as the
+	// HTML page title. Optional. If empty, the title defaults to "Sunlight".
+	Name string
+
 	// Listen are the addresses to listen on, e.g. ":443".
 	Listen []string
 
@@ -504,10 +508,16 @@ func main() {
 	homeWitnessInfo := func() witnessInfo { return witnessInfo{} }
 	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
+		pageTitle := "Sunlight"
+		if c.Name != "" {
+			pageTitle = c.Name
+		}
 		if err := homeTmpl.Execute(w, struct {
+			Title   string
 			Logs    []logInfo
 			Witness witnessInfo
 		}{
+			Title:   pageTitle,
 			Logs:    homeLogsInfo(),
 			Witness: homeWitnessInfo(),
 		}); err != nil {
