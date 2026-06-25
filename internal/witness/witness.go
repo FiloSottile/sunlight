@@ -462,7 +462,8 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 
 	newLock, err := w.c.Backend.Replace(ctx, lock.LockedCheckpoint, new)
 	if err != nil {
-		// TODO: this is a fatal error, because we don't know if it was persisted.
+		// We don't know if it was persisted, let it be re-fetched at the next update.
+		lock.LockedCheckpoint = nil
 		return nil, errors.New("internal error: failed to store new checkpoint")
 	}
 	lock.LockedCheckpoint = newLock
