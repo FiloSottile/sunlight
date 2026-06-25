@@ -210,12 +210,12 @@ func (w *Witness) PullLogList(ctx context.Context, url string) error {
 			return fmt.Errorf("couldn't parse vkey %q for log %q: %w", vkey, origin, err)
 		}
 		w.c.Log.InfoContext(ctx, "adding new log to witness config", "origin", origin, "vkey", vkey, "source", url)
-		if err := w.c.Backend.Create(ctx, backendKeyForCheckpoint(w.c, origin), nil); err != nil {
-			return fmt.Errorf("couldn't create empty checkpoint for new log %q: %w", origin, err)
-		}
+		// Create() might fail if the log was previously configured and removed,
+		// or if a previous PullLogList crashed before persisting the new config.
+		createErr := w.c.Backend.Create(ctx, backendKeyForCheckpoint(w.c, origin), nil)
 		ch, err := w.c.Backend.Fetch(ctx, backendKeyForCheckpoint(w.c, origin))
 		if err != nil {
-			return fmt.Errorf("couldn't fetch empty checkpoint for new log %q: %w", origin, err)
+			return fmt.Errorf("couldn't fetch empty checkpoint for new log %q: %w (Create() error: %q)", origin, err, createErr)
 		}
 		verifiers[origin] = note.VerifierList(v)
 		checkpoints[origin] = &lockedCheckpoint{LockedCheckpoint: ch}
