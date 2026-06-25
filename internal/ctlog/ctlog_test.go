@@ -532,6 +532,28 @@ func testSubmit(t *testing.T, precert bool) {
 	}
 }
 
+func TestSunsetLog(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	// Set NotAfterLimit to the past (but after the test cert's NotAfter of 2024-02-13)
+	// so AcceptingSubmissions returns false but chain validation passes.
+	tl.Config.NotAfterLimit = time.Date(2024, time.June, 1, 0, 0, 0, 0, time.UTC)
+	tl = ReloadLog(t, tl)
+
+	// LogClient starts the sequencer, which will immediately return SunsetLogError
+	// and close the pool since AcceptingSubmissions() returns false.
+	logClient := tl.LogClient()
+
+	// Try to add a chain and verify we get 410 Gone.
+	_, err := logClient.AddChain(context.Background(), []ct.ASN1Cert{
+		{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
+	if err == nil {
+		t.Fatal("expected error for sunset log")
+	}
+	if !strings.Contains(err.Error(), "410") {
+		t.Errorf("expected 410 Gone, got: %v", err)
+	}
+}
+
 func TestReloadWrongName(t *testing.T) {
 	tl := NewEmptyTestLog(t)
 	log, err := ctlog.LoadLog(context.Background(), tl.Config)
