@@ -346,7 +346,7 @@ func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) 
 		return nil, errBadRequest
 	}
 	oldSize, err := strconv.ParseInt(size, 10, 64)
-	if err != nil || oldSize < 0 {
+	if err != nil || oldSize < 0 || size != strconv.FormatInt(oldSize, 10) {
 		return nil, errBadRequest
 	}
 	proof := make(tlog.TreeProof, len(lines[1:]))
@@ -368,7 +368,7 @@ func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) 
 		return nil, errInvalidSignature
 	}
 	if err != nil {
-		return nil, errors.New("internal error: failed to verify note")
+		return nil, errBadRequest
 	}
 	c, err := torchwood.ParseCheckpoint(n.Text)
 	if err != nil {
@@ -408,9 +408,15 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 		lock.LockedCheckpoint = c
 	}
 
+	if oldSize > newSize {
+		return nil, errBadRequest
+	}
 	if len(lock.Bytes()) == 0 {
 		if oldSize != 0 {
 			return nil, &conflictError{0}
+		}
+		if len(proof) != 0 {
+			return nil, errProof
 		}
 	} else {
 		n, err := note.Open(lock.Bytes(), note.VerifierList(w.s.Verifier()))
@@ -424,9 +430,6 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 
 		if known.Origin != origin {
 			return nil, errors.New("internal error: incoherent stored checkpoint")
-		}
-		if oldSize > newSize {
-			return nil, errBadRequest
 		}
 		if known.N != oldSize {
 			return nil, &conflictError{known.N}

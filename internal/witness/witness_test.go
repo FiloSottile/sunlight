@@ -258,6 +258,30 @@ QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=
 			wantCode: http.StatusConflict,
 			wantBody: "5\n",
 		},
+		{
+			name: "syntactically invalid note",
+			body: `old 5
+
+sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562
+5
+QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=
+`,
+			wantCode: http.StatusBadRequest,
+			wantBody: "invalid input",
+		},
+		{
+			name: "invalid checkpoint body",
+			body: `old 5
+
+sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562
+five
+KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+— sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562 UgIom4JTC2MerrFcJ5xDcWHzRPVB6zzGBIw4OFqcKDflqjH4q4xY5vMxUxyczvdIlEwFYf7ivQU4KoWan2bLmzLx0go=
+`,
+			wantCode: http.StatusBadRequest,
+			wantBody: "invalid checkpoint",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
