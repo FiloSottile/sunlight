@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -357,6 +358,61 @@ func TestRejectsExtensions(t *testing.T) {
 	}
 	if !strings.Contains(body, "extension") {
 		t.Errorf("response body %q does not mention extensions", body)
+	}
+}
+
+// TestGrowFromSizeZero checks that a log which first cosigns an empty (size 0)
+// tree can subsequently grow. The consistency proof from size 0 is empty, so no
+// proof is checked.
+func TestGrowFromSizeZero(t *testing.T) {
+	origin := "example.com/log"
+	logSigner, vkey := newTestLog(t, origin)
+	w := newTestWitness(t, origin, vkey)
+
+	// First cosign the empty tree.
+	cp0 := signCheckpoint(t, logSigner, origin, nil, "")
+	if code, body := addCheckpoint(t, w, request(0, nil, cp0)); code != http.StatusOK {
+		t.Fatalf("cosigning size 0: got %d, body %q", code, body)
+	}
+
+	// Grow from the stored size 0 to size 5 with an empty proof.
+	cp5 := signCheckpoint(t, logSigner, origin, [][]byte{{1}, {2}, {3}, {4}, {5}}, "")
+	code, body := addCheckpoint(t, w, request(0, nil, cp5))
+	if code != http.StatusOK {
+		t.Fatalf("growing from size 0: got %d, body %q", code, body)
+	}
+
+	// The returned cosignature must verify against the submitted checkpoint and
+	// cover the whole size-5 tree.
+	full := append(append([]byte{}, cp5...), body...)
+	n, err := note.Open(full, note.VerifierList(w.s.Verifier()))
+	if err != nil {
+		t.Fatalf("witness cosignature does not verify: %v", err)
+	}
+	c, err := torchwood.ParseCheckpoint(n.Text)
+	fatalIfErr(t, err)
+	if c.N != 5 {
+		t.Errorf("cosigned tree size = %d, want 5", c.N)
+	}
+}
+
+// TestSizeZeroRejectsProof checks that a non-empty proof is rejected when
+// growing from a stored size 0, since the consistency proof from size 0 must be
+// empty.
+func TestSizeZeroRejectsProof(t *testing.T) {
+	origin := "example.com/log"
+	logSigner, vkey := newTestLog(t, origin)
+	w := newTestWitness(t, origin, vkey)
+
+	cp0 := signCheckpoint(t, logSigner, origin, nil, "")
+	if code, body := addCheckpoint(t, w, request(0, nil, cp0)); code != http.StatusOK {
+		t.Fatalf("cosigning size 0: got %d, body %q", code, body)
+	}
+
+	cp5 := signCheckpoint(t, logSigner, origin, [][]byte{{1}, {2}, {3}, {4}, {5}}, "")
+	bogusHash := base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
+	if code, body := addCheckpoint(t, w, request(0, []string{bogusHash}, cp5)); code != http.StatusUnprocessableEntity {
+		t.Fatalf("non-empty proof from size 0: got %d, want 422 (body %q)", code, body)
 	}
 }
 

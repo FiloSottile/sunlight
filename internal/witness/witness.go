@@ -430,8 +430,14 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 		if known.N != oldSize {
 			return nil, &conflictError{known.N}
 		}
-		if err := tlog.CheckTree(proof, newSize, newHash, known.N, known.Hash); err != nil {
-			return nil, errProof
+		if oldSize != 0 {
+			if err := tlog.CheckTree(proof, newSize, newHash, known.N, known.Hash); err != nil {
+				return nil, errProof
+			}
+		} else {
+			if len(proof) != 0 {
+				return nil, errProof
+			}
 		}
 	}
 
