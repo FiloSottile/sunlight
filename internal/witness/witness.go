@@ -264,6 +264,7 @@ func (w *Witness) Handler() http.Handler {
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /add-checkpoint", addCheckpoint)
+	mux.Handle("OPTIONS /add-checkpoint", addCheckpoint)
 	return http.MaxBytesHandler(mux, 128*1024)
 }
 
