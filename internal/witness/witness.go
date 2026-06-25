@@ -277,6 +277,7 @@ var errUnknownLog = errors.New("unknown log")
 var errInvalidSignature = errors.New("invalid signature")
 var errBadRequest = errors.New("invalid input")
 var errBadCheckpoint = errors.New("invalid checkpoint")
+var errExtensions = errors.New("invalid checkpoint: extension lines are not supported")
 var errProof = errors.New("bad consistency proof")
 
 func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
@@ -307,7 +308,7 @@ func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 	case errInvalidSignature:
 		http.Error(rw, err.Error(), http.StatusForbidden)
 		return
-	case errBadRequest:
+	case errBadRequest, errBadCheckpoint, errExtensions:
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	case errProof:
@@ -374,6 +375,9 @@ func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) 
 	}
 	if origin != c.Origin {
 		return nil, errors.New("internal error: incoherent parsing")
+	}
+	if c.Extension != "" {
+		return nil, errExtensions
 	}
 	labels["progress"] = "false"
 	if c.N > oldSize {

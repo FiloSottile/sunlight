@@ -17,7 +17,9 @@ import (
 	"testing"
 
 	"filippo.io/sunlight/internal/ctlog"
+	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/note"
+	"golang.org/x/mod/sumdb/tlog"
 )
 
 // memLockBackend is an in-memory [ctlog.LockBackend] for tests.
@@ -266,6 +268,95 @@ QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=
 				t.Errorf("body %q does not contain %q", body, tt.wantBody)
 			}
 		})
+	}
+}
+
+// newTestLog returns a note signer for a log and the corresponding vkey, for
+// tests that need to sign their own checkpoints.
+func newTestLog(t *testing.T, origin string) (note.Signer, string) {
+	t.Helper()
+	skey, vkey, err := note.GenerateKey(rand.Reader, origin)
+	fatalIfErr(t, err)
+	signer, err := note.NewSigner(skey)
+	fatalIfErr(t, err)
+	return signer, vkey
+}
+
+// treeHash returns the RFC 6962 Merkle tree hash of the given leaves.
+func treeHash(t *testing.T, leaves [][]byte) tlog.Hash {
+	t.Helper()
+	var hashes []tlog.Hash
+	r := tlog.HashReaderFunc(func(indexes []int64) ([]tlog.Hash, error) {
+		out := make([]tlog.Hash, len(indexes))
+		for i, x := range indexes {
+			out[i] = hashes[x]
+		}
+		return out, nil
+	})
+	for i, leaf := range leaves {
+		h, err := tlog.StoredHashes(int64(i), leaf, r)
+		fatalIfErr(t, err)
+		hashes = append(hashes, h...)
+	}
+	h, err := tlog.TreeHash(int64(len(leaves)), r)
+	fatalIfErr(t, err)
+	return h
+}
+
+// signCheckpoint produces a checkpoint note for a tree over the given leaves,
+// signed by signer. extension, if non-empty, is appended as checkpoint
+// extension lines and must end with a newline.
+func signCheckpoint(t *testing.T, signer note.Signer, origin string, leaves [][]byte, extension string) []byte {
+	t.Helper()
+	text := torchwood.Checkpoint{
+		Origin:    origin,
+		Tree:      tlog.Tree{N: int64(len(leaves)), Hash: treeHash(t, leaves)},
+		Extension: extension,
+	}.String()
+	signed, err := note.Sign(&note.Note{Text: text}, signer)
+	fatalIfErr(t, err)
+	return signed
+}
+
+// request builds an add-checkpoint request body.
+func request(oldSize int64, proof []string, signedCheckpoint []byte) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "old %d\n", oldSize)
+	for _, p := range proof {
+		b.WriteString(p)
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	b.Write(signedCheckpoint)
+	return b.String()
+}
+
+// TestRejectsExtensions checks that checkpoints with extension lines are
+// rejected, rather than being cosigned with a signature that doesn't cover the
+// extension lines.
+func TestRejectsExtensions(t *testing.T) {
+	origin := "example.com/log"
+	logSigner, vkey := newTestLog(t, origin)
+	w := newTestWitness(t, origin, vkey)
+
+	cp := signCheckpoint(t, logSigner, origin, [][]byte{{1}, {2}, {3}}, "extra extension line\n")
+
+	// processAddCheckpointRequest must return errExtensions without signing.
+	cosig, err := w.processAddCheckpointRequest(context.Background(), []byte(request(0, nil, cp)))
+	if err != errExtensions {
+		t.Fatalf("got err %v, want errExtensions", err)
+	}
+	if cosig != nil {
+		t.Errorf("got cosignature %q, want none", cosig)
+	}
+
+	// Through the Handler, it must map to a 400 Bad Request.
+	code, body := addCheckpoint(t, w, request(0, nil, cp))
+	if code != http.StatusBadRequest {
+		t.Errorf("got status %d, want 400", code)
+	}
+	if !strings.Contains(body, "extension") {
+		t.Errorf("response body %q does not mention extensions", body)
 	}
 }
 
