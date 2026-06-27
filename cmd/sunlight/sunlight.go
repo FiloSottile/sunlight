@@ -29,6 +29,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
+	"html/template"
 	"io"
 	"log/slog"
 	"maps"
@@ -43,7 +44,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"text/template"
 	"time"
 
 	"filippo.io/keygen"
