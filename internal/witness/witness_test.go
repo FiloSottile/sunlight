@@ -344,6 +344,17 @@ func signCheckpoint(t *testing.T, signer note.Signer, origin string, leaves [][]
 	return signed
 }
 
+// signTree signs a checkpoint for an arbitrary tree (size and root hash),
+// allowing tests to construct otherwise-invalid checkpoints, such as a
+// size-zero tree with a non-empty root.
+func signTree(t *testing.T, signer note.Signer, origin string, tree tlog.Tree) []byte {
+	t.Helper()
+	text := torchwood.Checkpoint{Origin: origin, Tree: tree}.String()
+	signed, err := note.Sign(&note.Note{Text: text}, signer)
+	fatalIfErr(t, err)
+	return signed
+}
+
 // request builds an add-checkpoint request body.
 func request(oldSize int64, proof []string, signedCheckpoint []byte) string {
 	var b strings.Builder
@@ -464,6 +475,42 @@ func TestSizeZeroRejectsProof(t *testing.T) {
 	if code, body := addCheckpoint(t, w, request(0, []string{bogusHash}, cp5)); code != http.StatusUnprocessableEntity {
 		t.Fatalf("non-empty proof from size 0: got %d, want 422 (body %q)", code, body)
 	}
+}
+
+// TestSizeZeroRequiresEmptyRoot checks that the witness refuses to cosign a
+// size-zero checkpoint whose root is not the empty tree hash (the hash of the
+// empty string, RFC 6962 Section 2.1), both on the first submission for a log
+// and when a size-zero checkpoint is already stored. Otherwise a log could get
+// two different checkpoints cosigned at size zero. https://c2sp.org/tlog-witness
+func TestSizeZeroRequiresEmptyRoot(t *testing.T) {
+	origin := "example.com/log"
+	logSigner, vkey := newTestLog(t, origin)
+
+	// A validly log-signed size-zero checkpoint with a non-empty root.
+	var bogusRoot tlog.Hash
+	bogusRoot[0] = 1
+	bogus := signTree(t, logSigner, origin, tlog.Tree{N: 0, Hash: bogusRoot})
+
+	t.Run("first submission", func(t *testing.T) {
+		w := newTestWitness(t, origin, vkey)
+		if code, body := addCheckpoint(t, w, request(0, nil, bogus)); code != http.StatusUnprocessableEntity {
+			t.Fatalf("bogus size-0 root as first submission: got %d, want 422 (body %q)", code, body)
+		}
+	})
+
+	t.Run("with stored size 0", func(t *testing.T) {
+		w := newTestWitness(t, origin, vkey)
+		// First cosign the genuine empty tree, leaving a stored size-0 checkpoint.
+		cp0 := signCheckpoint(t, logSigner, origin, nil, "")
+		if code, body := addCheckpoint(t, w, request(0, nil, cp0)); code != http.StatusOK {
+			t.Fatalf("cosigning size 0: got %d, body %q", code, body)
+		}
+		// A second size-0 checkpoint with a different root must be rejected, not
+		// cosigned as a second valid view of the log at size zero.
+		if code, body := addCheckpoint(t, w, request(0, nil, bogus)); code != http.StatusUnprocessableEntity {
+			t.Fatalf("bogus size-0 root over stored size 0: got %d, want 422 (body %q)", code, body)
+		}
+	})
 }
 
 // forgeWitnessSigLine builds a signature line keyed to the witness's own name

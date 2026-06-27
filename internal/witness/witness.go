@@ -281,6 +281,10 @@ var errBadCheckpoint = errors.New("invalid checkpoint")
 var errExtensions = errors.New("invalid checkpoint: extension lines are not supported")
 var errProof = errors.New("bad consistency proof")
 
+// emptyTreeHash is the root hash of a tree of size zero: the hash of the empty
+// string, per RFC 6962, Section 2.1.
+var emptyTreeHash, _ = tlog.TreeHash(0, nil)
+
 func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 	rw.Header().Set("Access-Control-Allow-Origin", "*")
 	if r.Method == http.MethodOptions {
@@ -410,6 +414,9 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 
 	if oldSize > newSize {
 		return nil, errBadRequest
+	}
+	if newSize == 0 && newHash != emptyTreeHash {
+		return nil, errProof
 	}
 	if len(lock.Bytes()) == 0 {
 		if oldSize != 0 {
