@@ -77,8 +77,11 @@ func (l *Log) cacheGet(leaf *PendingLogEntry) (*sunlight.LogEntry, error) {
 	// second preimage attack would require 2⁹⁶ work.
 	//
 	// Anyway, for extra safety operators can optionally run cmd/recompute-cache
-	// to rebuild the cache from the backend storage. This is safe to run
-	// concurrently with the log.
+	// to rebuild the cache from the backend storage, and then run
+	//
+	//    sqlite3 <cache.db> "ALTER TABLE cache RENAME TO cache_legacy;"
+	//
+	// This is safe to run concurrently with the log.
 	if se == nil && l.cacheLegacy {
 		err = sqlitex.Exec(l.cacheRead, "SELECT timestamp, leaf_index FROM cache WHERE key = ?",
 			func(stmt *sqlite.Stmt) error {
