@@ -57,6 +57,8 @@ sqlite3 checkpoints.db "CREATE TABLE checkpoints (logID BLOB PRIMARY KEY, body B
 
 Sunlight can alternatively use DynamoDB or S3-compatible object storage with `ETag` and `If-Match` support (such as Tigris) as global lock backends.
 
+The global lock backend is trusted: an attacker who can modify it can cause Sunlight to sign a split view of the log.
+
 ### Per-log configuration
 
 Sunlight instances are multi-tenant: a single process hosts multiple logs, usually different *time shards* of the same log series.
@@ -116,6 +118,8 @@ Cache is the path to an SQLite database that keeps track of submitted certificat
 
 This generally doesn’t grow beyond 100 GB.
 
+The cache is trusted: an attacker who can modify it can cause Sunlight to sign an SCT for a certificate that is not actually in the log.
+
 ```yaml
     localdirectory: /tank/logs/example2025h2/data
 ```
@@ -133,6 +137,8 @@ There are two options for storing the actual Static CT assets: a regular POSIX f
 Each six-months shard will reach approximately 1.5 TB at current rates. It starts growing sharply 90 days *before* its `notafterstart` date, and slows down 90 days before its `notafterlimit` date. It can be deleted [a couple months after](https://groups.google.com/a/chromium.org/g/ct-policy/c/rWNwrxokqZ8/m/6I_Be8x6AQAJ) its `notafterlimit` date.
 
 You should consider a separate ZFS dataset or object storage bucket for each log, to make it easier to delete it once the log is retired. See, for example, [the Tuscolo ZFS configuration](https://gist.github.com/FiloSottile/989338e6ba8e03f2c699590ce83f537b). However, note that using separate AWS S3 buckets can cause [dynamic scaling issues when traffic moves naturally from one to another](https://groups.google.com/a/chromium.org/g/ct-policy/c/0R43Z58JuzA/m/raeusYYqAAAJ), so you should use a single bucket and delete logs with lifecycle rules if hosting on AWS S3.
+
+The storage backend is *not* trusted: an attacker who can modify it can at most cause Sunlight to stop working.
 
 ### Hosting the read path
 
