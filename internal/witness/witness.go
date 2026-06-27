@@ -384,12 +384,12 @@ func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) 
 	if c.N > oldSize {
 		labels["progress"] = "true"
 	}
-	return w.updateCheckpoint(ctx, c.Origin, oldSize, c.N, c.Hash, proof, noteBytes)
+	return w.updateCheckpoint(ctx, c.Origin, oldSize, c.N, c.Hash, proof, n)
 }
 
 func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 	oldSize, newSize int64, newHash tlog.Hash, proof tlog.TreeProof,
-	noteBytes []byte) ([]byte, error) {
+	submitted *note.Note) ([]byte, error) {
 
 	lock, ok := w.checkpointForOrigin(origin)
 	if !ok {
@@ -449,22 +449,23 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 	// If everything is working correctly, it will also be a valid signature on the
 	// original note. If not, this fails safe.
 	// https://bsky.app/profile/filippo.abyssdomain.expert/post/3lezjsf6wc2os
+	// Include the log's signature that we verified, but not any unverified
+	// signatures, which might be maliciously crafted to collide with our signature.
 	signed, err := note.Sign(&note.Note{Text: torchwood.Checkpoint{
 		Origin: origin, Tree: tlog.Tree{N: newSize, Hash: newHash},
-	}.String()}, w.s)
+	}.String(), Sigs: submitted.Sigs}, w.s)
 	if err != nil {
 		// Don't return the error here and below, to avoid leaking the signature
 		// before the backend compare-and-swap succeeds, which is the ultimate
 		// check against concurrent signers and locking bugs.
 		return nil, errors.New("internal error: failed to sign note")
 	}
-	sigs, err := splitSignatures(signed)
+	sigs, err := splitSignatures(signed, w.s.Verifier())
 	if err != nil {
 		return nil, errors.New("internal error: produced invalid note")
 	}
-	new := append(noteBytes[:len(noteBytes):len(noteBytes)], sigs...)
 
-	newLock, err := w.c.Backend.Replace(ctx, lock.LockedCheckpoint, new)
+	newLock, err := w.c.Backend.Replace(ctx, lock.LockedCheckpoint, signed)
 	if err != nil {
 		// We don't know if it was persisted, let it be re-fetched at the next update.
 		lock.LockedCheckpoint = nil
@@ -477,15 +478,18 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 	return sigs, nil
 }
 
-func splitSignatures(note []byte) ([]byte, error) {
-	var sigSplit = []byte("\n\n")
+func splitSignatures(note []byte, v note.Verifier) ([]byte, error) {
+	sigSplit := []byte("\n\n")
 	split := bytes.LastIndex(note, sigSplit)
 	if split < 0 {
 		return nil, errors.New("invalid note")
 	}
-	_, sigs := note[:split+1], note[split+2:]
-	if len(sigs) == 0 || sigs[len(sigs)-1] != '\n' {
-		return nil, errors.New("invalid note")
+	var sigs []byte
+	sigPrefix := []byte("— " + v.Name() + " ")
+	for _, line := range bytes.SplitAfter(note[split+2:], []byte("\n")) {
+		if bytes.HasPrefix(line, sigPrefix) {
+			sigs = append(sigs, line...)
+		}
 	}
 	return sigs, nil
 }

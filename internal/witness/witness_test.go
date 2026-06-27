@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -420,6 +421,31 @@ func TestGrowFromSizeZero(t *testing.T) {
 	}
 }
 
+// TestResponseIsOnlyWitnessCosignature checks that the add-checkpoint response
+// carries only the witness's own cosignature, not the log's signature, which the
+// witness verifies and stores alongside its own but must not echo back.
+func TestResponseIsOnlyWitnessCosignature(t *testing.T) {
+	origin := "example.com/log"
+	logSigner, vkey := newTestLog(t, origin)
+	w := newTestWitness(t, origin, vkey)
+
+	cp := signCheckpoint(t, logSigner, origin, [][]byte{{1}, {2}, {3}}, "")
+	code, body := addCheckpoint(t, w, request(0, nil, cp))
+	if code != http.StatusOK {
+		t.Fatalf("cosigning: got %d, body %q", code, body)
+	}
+
+	if n := strings.Count(body, "— "); n != 1 {
+		t.Errorf("response has %d signature lines, want 1 (only the witness's): %q", n, body)
+	}
+	if !strings.Contains(body, "— "+w.s.Verifier().Name()+" ") {
+		t.Errorf("response does not contain the witness's cosignature: %q", body)
+	}
+	if strings.Contains(body, "— "+origin+" ") {
+		t.Errorf("response echoes the log's signature: %q", body)
+	}
+}
+
 // TestSizeZeroRejectsProof checks that a non-empty proof is rejected when
 // growing from a stored size 0, since the consistency proof from size 0 must be
 // empty.
@@ -437,6 +463,70 @@ func TestSizeZeroRejectsProof(t *testing.T) {
 	bogusHash := base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
 	if code, body := addCheckpoint(t, w, request(0, []string{bogusHash}, cp5)); code != http.StatusUnprocessableEntity {
 		t.Fatalf("non-empty proof from size 0: got %d, want 422 (body %q)", code, body)
+	}
+}
+
+// forgeWitnessSigLine builds a signature line keyed to the witness's own name
+// and key hash but carrying a signature that cannot verify, as an attacker would
+// append to a submitted checkpoint. The witness's own verifier is not in the set
+// used at ingress (only the log's is), so note.Open treats this line as
+// unverified there; but it matches the witness's (name, key hash) if the
+// stored note is later re-opened with the witness's verifier.
+func forgeWitnessSigLine(t *testing.T, w *Witness) string {
+	t.Helper()
+	v := w.s.Verifier()
+	var blob [4 + ed25519.SignatureSize]byte
+	binary.BigEndian.PutUint32(blob[:4], v.KeyHash())
+	// blob[4:] is left as zeros: a signature that cannot verify.
+	return "— " + v.Name() + " " + base64.StdEncoding.EncodeToString(blob[:])
+}
+
+// TestForgedWitnessSigLineDoesNotPoisonState is a regression test for
+// ANT-2026-SAPGR4D6. An attacker who appends a bogus signature line keyed to the
+// witness's own name and key hash to an otherwise valid checkpoint must not be
+// able to wedge the witness. The forged line is unverified at ingress, but if it
+// were persisted verbatim it would make every later add-checkpoint request for
+// that log fail when the stored note is re-opened with the witness's verifier.
+func TestForgedWitnessSigLineDoesNotPoisonState(t *testing.T) {
+	origin := "example.com/log"
+	logSigner, vkey := newTestLog(t, origin)
+	w := newTestWitness(t, origin, vkey)
+
+	// A valid log-signed size-0 checkpoint, with a forged witness-keyed
+	// signature line appended by the attacker.
+	cp0 := signCheckpoint(t, logSigner, origin, nil, "")
+	poisoned := append(append([]byte{}, cp0...), []byte(forgeWitnessSigLine(t, w)+"\n")...)
+
+	// Ingress verifies only the log's signature, so the forged line is treated
+	// as unverified and the request is accepted and cosigned.
+	if code, body := addCheckpoint(t, w, request(0, nil, poisoned)); code != http.StatusOK {
+		t.Fatalf("cosigning checkpoint with forged witness line: got %d, want 200 (body %q)", code, body)
+	}
+
+	// The witness must have stored only the signatures it verified plus its own,
+	// so a subsequent legitimate request still succeeds. Before the fix the stored
+	// note carried the forged line and this failed with 500.
+	cp5 := signCheckpoint(t, logSigner, origin, [][]byte{{1}, {2}, {3}, {4}, {5}}, "")
+	if code, body := addCheckpoint(t, w, request(0, nil, cp5)); code != http.StatusOK {
+		t.Fatalf("growing after submit with forged witness line: got %d, want 200 (body %q)", code, body)
+	}
+
+	// The stored checkpoint must open under the witness's own verifier (so later
+	// requests can re-open it) and must still carry a valid log signature (so the
+	// witness can prove the checkpoint it cosigned was genuinely log-signed). The
+	// forged line must be gone.
+	lc, ok := w.checkpointForOrigin(origin)
+	if !ok {
+		t.Fatal("no stored checkpoint for origin")
+	}
+	stored := lc.Bytes()
+	if _, err := note.Open(stored, note.VerifierList(w.s.Verifier())); err != nil {
+		t.Errorf("stored checkpoint does not open with witness verifier: %v", err)
+	}
+	logVerifier, err := note.NewVerifier(vkey)
+	fatalIfErr(t, err)
+	if _, err := note.Open(stored, note.VerifierList(logVerifier)); err != nil {
+		t.Errorf("stored checkpoint does not retain a valid log signature: %v", err)
 	}
 }
 
