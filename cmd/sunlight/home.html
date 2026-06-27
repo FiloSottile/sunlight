@@ -72,16 +72,16 @@
             download="{{ .ShortName }}.der">key</a>
         <a href="{{ .SubmissionPrefix }}ct/v1/get-roots">get-roots</a>
         <a href="{{ .SubmissionPrefix }}log.v3.json">json</a><br>
-      {{ if .FinalTree.Size }}
+      {{ if eq .Status "active" }}
+      Ratelimit: {{ .PoolSize }} req/s
+      {{ else }}
       Final tree size: {{ .FinalTree.Size }} at {{ timestamp .FinalTree.Timestamp }}<br>
       Final tree hash: {{ printf "%x" .FinalTree.RootHash }}
-      {{ else }}
-      Ratelimit: {{ .PoolSize }} req/s
       {{ end }}
 
     <pre><code>{{ .PublicKeyPEM }}</code></pre>
 
-    {{ if not .FinalTree.Size }}
+    {{ if eq .Status "active" }}
     <h3>Submit a certificate chain (PEM or JSON)</h3>
       
     <input type="file" class="chain" data-prefix="{{ .SubmissionPrefix }}">
