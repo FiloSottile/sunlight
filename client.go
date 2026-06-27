@@ -44,7 +44,9 @@ type ClientConfig struct {
 	// MonitoringPrefix is the c2sp.org/static-ct-api monitoring prefix.
 	//
 	// If the MonitoringPrefix has schema "file://", Client will read tiles from
-	// the local filesystem, and most other settings will be ignored.
+	// the local filesystem, and the HTTPClient, UserAgent, ConcurrencyLimit, and
+	// Timeout settings will be ignored (the latter because local reads are not
+	// cancellable). Cache is not supported and must be unset.
 	//
 	// If it has schema "gzip+file://", the data tiles are expected to be
 	// gzip-compressed.
