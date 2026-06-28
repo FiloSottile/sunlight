@@ -253,6 +253,40 @@ func (c *Client) Entries(ctx context.Context, tree tlog.Tree, start int64) iter.
 	}
 }
 
+// AllEntries works like [Client.Entries], but fetches all entries up to the
+// size of the tree, including those in partial data tiles.
+//
+// Callers that are tailing a growing log should instead use [Client.Entries],
+// and fetch a new tree every time iteration stops.
+func (c *Client) AllEntries(ctx context.Context, tree tlog.Tree, start int64) iter.Seq2[int64, *LogEntry] {
+	c.err = nil
+	return func(yield func(int64, *LogEntry) bool) {
+		for i, e := range c.c.AllEntries(ctx, tree, start) {
+			var (
+				entry *LogEntry
+				rest  []byte
+				err   error
+			)
+			if c.cc.AllowRFC6962ArchivalLeafs {
+				entry, rest, err = ReadTileLeafMaybeArchival(e)
+			} else {
+				entry, rest, err = ReadTileLeaf(e)
+			}
+			if err != nil {
+				c.err = err
+				return
+			}
+			if len(rest) > 0 {
+				c.err = errors.New("internal error: unexpected trailing data in entry")
+				return
+			}
+			if !yield(i, entry) {
+				return
+			}
+		}
+	}
+}
+
 // Entry returns a log entry by its index, and an inclusion proof in the tree.
 //
 // The provided tree should have been verified by the caller, for example using
