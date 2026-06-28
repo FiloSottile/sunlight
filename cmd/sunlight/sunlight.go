@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"filippo.io/keygen"
+	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/keylog"
@@ -502,7 +503,7 @@ func main() {
 	type witnessInfo struct {
 		Name             string
 		SubmissionPrefix string
-		VerifierKey      string
+		VerifierKeys     []string
 		LogLists         []string
 		Logs             []string
 	}
@@ -573,11 +574,14 @@ func main() {
 			fatalError(logger, "failed to generate ECDSA key", "err", err)
 		}
 
-		ed25519Secret := make([]byte, ed25519.SeedSize)
-		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight"), []byte("Ed25519 log key")), ed25519Secret); err != nil {
-			fatalError(logger, "failed to derive Ed25519 key", "err", err)
+		mldsaSecret := make([]byte, mldsa.PrivateKeySize)
+		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight"), []byte("ML-DSA-44 log key")), mldsaSecret); err != nil {
+			fatalError(logger, "failed to derive ML-DSA-44 key", "err", err)
 		}
-		wk := ed25519.NewKeyFromSeed(ed25519Secret)
+		wk, err := mldsa.NewPrivateKey(mldsa.MLDSA44(), mldsaSecret)
+		if err != nil {
+			fatalError(logger, "failed to generate ML-DSA-44 key", "err", err)
+		}
 
 		// Compare the checkpoint from the Backend with the one accessible over
 		// the MonitoringPrefix, to catch misconfigurations. We ignore failures
@@ -787,11 +791,22 @@ func main() {
 		}
 		wk := ed25519.NewKeyFromSeed(ed25519Secret)
 
+		mldsaSecret := make([]byte, mldsa.PrivateKeySize)
+		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight ML-DSA-44 witness key"),
+			[]byte(c.Witness.Name)), mldsaSecret); err != nil {
+			fatalError(logger, "failed to derive ML-DSA-44 key", "err", err)
+		}
+		mk, err := mldsa.NewPrivateKey(mldsa.MLDSA44(), mldsaSecret)
+		if err != nil {
+			fatalError(logger, "failed to generate ML-DSA-44 key", "err", err)
+		}
+
 		w, err := witness.NewWitness(ctx, &witness.Config{
-			Name:    c.Witness.Name,
-			Key:     wk,
-			Backend: db,
-			Log:     logger,
+			Name:       c.Witness.Name,
+			KeyEd25519: wk,
+			KeyMLDSA44: mk,
+			Backend:    db,
+			Log:        logger,
 		})
 		if err != nil {
 			fatalError(logger, "failed to create witness", "err", err)
@@ -848,7 +863,7 @@ func main() {
 			return witnessInfo{
 				Name:             c.Witness.Name,
 				SubmissionPrefix: c.Witness.SubmissionPrefix,
-				VerifierKey:      w.VerifierKey(),
+				VerifierKeys:     w.VerifierKeys(),
 				LogLists:         c.Witness.LogLists,
 				Logs:             w.Logs(),
 			}

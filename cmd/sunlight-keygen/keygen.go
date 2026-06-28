@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -16,20 +17,21 @@ import (
 	"os"
 
 	"filippo.io/keygen"
+	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/immutable"
 	"filippo.io/torchwood"
 	"golang.org/x/crypto/hkdf"
-	"golang.org/x/mod/sumdb/note"
 )
 
 func main() {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
 	fileFlag := fs.String("f", "", "path to the seed file")
-	prefixFlag := fs.String("prefix", "", "submission prefix for the log, to output a witness verifier key")
-	witnessFlag := fs.String("witness", "", "witness name, for generating a witness secret instead")
+	logFlag := fs.String("log", "", "submission prefix for the log")
+	prefixFlag := fs.String("prefix", "", "legacy flag name for -log")
+	witnessFlag := fs.String("witness", "", "witness name")
 	fs.Parse(os.Args[1:])
 	if fs.NArg() != 0 || *fileFlag == "" {
-		fmt.Fprintln(os.Stderr, "usage: sunlight-keygen -f <seed file>")
+		fmt.Fprintln(os.Stderr, "usage: sunlight-keygen -f <seed file> [-log <submission prefix> | -witness <witness name>]")
 		fs.PrintDefaults()
 		os.Exit(2)
 	}
@@ -70,7 +72,23 @@ func main() {
 		if err != nil {
 			log.Fatal("failed to create witness signer:", err)
 		}
-		fmt.Printf("Witness vkey: %s\n", s.Verifier())
+		fmt.Printf("Witness vkey (Ed25519): %s\n", s.Verifier())
+
+		mldsaSecret := make([]byte, mldsa.PrivateKeySize)
+		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight ML-DSA-44 witness key"),
+			[]byte(*witnessFlag)), mldsaSecret); err != nil {
+			log.Fatal("failed to derive ML-DSA-44 key:", err)
+		}
+		mk, err := mldsa.NewPrivateKey(mldsa.MLDSA44(), mldsaSecret)
+		if err != nil {
+			log.Fatal("failed to generate ML-DSA-44 key:", err)
+		}
+		s, err = torchwood.NewCosignatureSigner(*witnessFlag, mk)
+		if err != nil {
+			log.Fatal("failed to create witness signer:", err)
+		}
+		fmt.Printf("Witness vkey (ML-DSA-44): %s\n", s.Verifier())
+
 		return
 	}
 
@@ -89,32 +107,34 @@ func main() {
 	}
 
 	logID := sha256.Sum256(spki)
+	fmt.Printf("Log ID: %s\n", base64.StdEncoding.EncodeToString(logID[:]))
 
 	ecPubKey := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki}))
+	fmt.Printf("ECDSA public key:\n%s", ecPubKey)
 
-	ed25519Secret := make([]byte, ed25519.SeedSize)
-	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight"), []byte("Ed25519 log key")), ed25519Secret); err != nil {
-		log.Fatal("failed to derive Ed25519 key:", err)
-	}
-	wk := ed25519.NewKeyFromSeed(ed25519Secret).Public().(ed25519.PublicKey)
+	if *prefixFlag != "" || *logFlag != "" {
+		mldsaSecret := make([]byte, mldsa.PrivateKeySize)
+		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight"), []byte("ML-DSA-44 log key")), mldsaSecret); err != nil {
+			log.Fatal("failed to derive ML-DSA-44 key:", err)
+		}
+		mldsaKey, err := mldsa.NewPrivateKey(mldsa.MLDSA44(), mldsaSecret)
+		if err != nil {
+			log.Fatal("failed to generate ML-DSA-44 key:", err)
+		}
+		wk := mldsaKey.PublicKey()
 
-	edPubKey := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: wk}))
-
-	fmt.Printf("Log ID: %s\n", base64.StdEncoding.EncodeToString(logID[:]))
-	if *prefixFlag != "" {
-		prefix, err := url.Parse(*prefixFlag)
+		prefix, err := url.Parse(cmp.Or(*logFlag, *prefixFlag))
 		if err != nil {
 			log.Fatal("failed to parse submission prefix:", err)
 		}
 		if prefix.Scheme == "" || prefix.Host == "" {
 			log.Fatal("submission prefix must be a valid URL with scheme and host")
 		}
-		v, err := note.NewEd25519VerifierKey(prefix.Host+prefix.Path, wk)
+
+		v, err := torchwood.NewCosignatureVerifierFromKey(prefix.Host+prefix.Path, wk)
 		if err != nil {
 			log.Fatal("failed to create verifier key:", err)
 		}
-		fmt.Printf("Verifier key: %s\n", v)
+		fmt.Printf("ML-DSA-44 verifier key: %s\n", v)
 	}
-	fmt.Printf("ECDSA public key:\n%s", ecPubKey)
-	fmt.Printf("Ed25519 public key:\n%s", edPubKey)
 }

@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -25,8 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/mldsa"
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
+	"filippo.io/torchwood"
 	"github.com/google/certificate-transparency-go/client"
 	"github.com/google/certificate-transparency-go/jsonclient"
 	"github.com/google/certificate-transparency-go/x509"
@@ -48,16 +49,17 @@ func NewEmptyTestLog(t testing.TB) *TestLog {
 	k, err := x509.MarshalPKCS8PrivateKey(key)
 	fatalIfErr(t, err)
 	t.Logf("ECDSA key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
-	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+	mldsaKey, err := mldsa.GenerateKey(mldsa.MLDSA44())
 	fatalIfErr(t, err)
-	k, err = x509.MarshalPKCS8PrivateKey(ed25519Key)
-	fatalIfErr(t, err)
-	t.Logf("Ed25519 key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
+	// k, err = x509.MarshalPKCS8PrivateKey(mldsaKey)
+	// fatalIfErr(t, err)
+	// t.Logf("ML-DSA key: %s", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: k}))
+	t.Logf("ML-DSA key: %x", mldsaKey.Bytes())
 	logHandler, logLevel := testLogHandler(t)
 	config := &ctlog.Config{
 		Name:          "example.com/TestLog",
 		Key:           key,
-		WitnessKey:    ed25519Key,
+		WitnessKey:    mldsaKey,
 		Cache:         filepath.Join(t.TempDir(), "cache.db"),
 		Backend:       NewMemoryBackend(t),
 		Lock:          NewMemoryLockBackend(t),
@@ -130,15 +132,7 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 
 	sth, err := tl.Config.Backend.Fetch(context.Background(), "checkpoint")
 	fatalIfErr(t, err)
-	v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
-	fatalIfErr(t, err)
-	n, err := note.Open(sth, note.VerifierList(v))
-	fatalIfErr(t, err)
-	if len(n.Sigs) != 1 {
-		t.Fatalf("expected 1 signature, got %d", len(n.Sigs))
-	}
-	sthTimestamp, err = sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
-	fatalIfErr(t, err)
+	n, sthTimestamp := openCheckpoint(t, tl.Config, sth)
 	c, err := sunlight.ParseCheckpoint(n.Text)
 	fatalIfErr(t, err)
 
@@ -154,15 +148,7 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 		fatalIfErr(t, err)
 		sth, err := tl.Config.Lock.Fetch(context.Background(), logID)
 		fatalIfErr(t, err)
-		v, err := sunlight.NewRFC6962Verifier("example.com/TestLog", tl.Config.Key.Public())
-		fatalIfErr(t, err)
-		n, err := note.Open(sth.Bytes(), note.VerifierList(v))
-		fatalIfErr(t, err)
-		if len(n.Sigs) != 1 {
-			t.Fatalf("expected 1 signature, got %d", len(n.Sigs))
-		}
-		sthTimestamp1, err := sunlight.RFC6962SignatureTimestamp(n.Sigs[0])
-		fatalIfErr(t, err)
+		n, sthTimestamp1 := openCheckpoint(t, tl.Config, sth.Bytes())
 		c1, err := sunlight.ParseCheckpoint(n.Text)
 		fatalIfErr(t, err)
 
@@ -274,6 +260,38 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 	}
 
 	return
+}
+
+func openCheckpoint(t testing.TB, config *ctlog.Config, b []byte) (*note.Note, int64) {
+	t.Helper()
+	v1, err := sunlight.NewRFC6962Verifier(config.Name, config.Key.Public())
+	fatalIfErr(t, err)
+	v2, err := torchwood.NewCosignatureVerifierFromKey(config.Name, config.WitnessKey.PublicKey())
+	fatalIfErr(t, err)
+	n, err := note.Open(b, note.VerifierList(v1, v2))
+	fatalIfErr(t, err)
+	if len(n.Sigs) != 2 {
+		t.Errorf("checkpoint has %d signatures, want 2", len(n.Sigs))
+	}
+	var v1Found, v2Found bool
+	var timestamp int64
+	for _, sig := range n.Sigs {
+		switch sig.Hash {
+		case v1.KeyHash():
+			v1Found = true
+			timestamp, err = sunlight.RFC6962SignatureTimestamp(sig)
+			fatalIfErr(t, err)
+		case v2.KeyHash():
+			v2Found = true
+		}
+	}
+	if !v1Found {
+		t.Error("checkpoint is missing the RFC6962 log signature")
+	}
+	if !v2Found {
+		t.Error("checkpoint is missing the ML-DSA-44 witness cosignature")
+	}
+	return n, timestamp
 }
 
 func logIDFromKey(key *ecdsa.PrivateKey) ([sha256.Size]byte, error) {

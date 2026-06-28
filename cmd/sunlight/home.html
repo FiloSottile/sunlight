@@ -102,9 +102,10 @@
       Submission prefix: <code>{{ .Witness.SubmissionPrefix }}</code>
 
     <p>
-      Verifier key:
+      Verifier keys:
 
-    <pre><code>{{ .Witness.VerifierKey }}</code></pre>
+    <pre><code>{{ range .Witness.VerifierKeys }}{{ . }}
+{{ end }}</code></pre>
 
     <p>
       Log list sources:

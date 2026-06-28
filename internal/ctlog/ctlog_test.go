@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/mldsa"
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
 	ct "github.com/google/certificate-transparency-go"
@@ -573,21 +573,28 @@ func TestReloadWrongKey(t *testing.T) {
 	fatalIfErr(t, err)
 	t.Cleanup(func() { fatalIfErr(t, log.CloseCache()) })
 
-	c := tl.Config
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	fatalIfErr(t, err)
-	c.Key = key
-	if _, err := ctlog.LoadLog(context.Background(), c); err == nil {
-		t.Error("expected loading to fail")
-	}
+	t.Run("Key", func(t *testing.T) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		fatalIfErr(t, err)
+		oldKey := tl.Config.Key
+		t.Cleanup(func() { tl.Config.Key = oldKey })
+		tl.Config.Key = key
+		if _, err := ctlog.LoadLog(context.Background(), tl.Config); err == nil {
+			t.Error("expected loading to fail")
+		}
+	})
 
-	c = tl.Config
-	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
-	fatalIfErr(t, err)
-	c.WitnessKey = ed25519Key
-	if _, err := ctlog.LoadLog(context.Background(), c); err == nil {
-		t.Error("expected loading to fail")
-	}
+	t.Run("WitnessKey", func(t *testing.T) {
+		t.Skip("for now, the (potentially new) ML-DSA key is not chekced on reload")
+		mldsaKey, err := mldsa.GenerateKey(mldsa.MLDSA44())
+		fatalIfErr(t, err)
+		oldWitnessKey := tl.Config.WitnessKey
+		t.Cleanup(func() { tl.Config.WitnessKey = oldWitnessKey })
+		tl.Config.WitnessKey = mldsaKey
+		if _, err := ctlog.LoadLog(context.Background(), tl.Config); err == nil {
+			t.Error("expected loading to fail")
+		}
+	})
 }
 
 func TestStagingCollision(t *testing.T) {

@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -26,7 +25,9 @@ import (
 	"time"
 
 	"crawshaw.io/sqlite"
+	"filippo.io/mldsa"
 	"filippo.io/sunlight"
+	"filippo.io/torchwood"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
@@ -97,7 +98,7 @@ func (t tileWithBytes) String() string {
 type Config struct {
 	Name       string
 	Key        *ecdsa.PrivateKey
-	WitnessKey ed25519.PrivateKey
+	WitnessKey *mldsa.PrivateKey
 	PoolSize   int
 	Cache      string
 
@@ -342,13 +343,9 @@ func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error
 	if err != nil {
 		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct verifier: %w", err)
 	}
-	vk, err := note.NewEd25519VerifierKey(config.Name, config.WitnessKey.Public().(ed25519.PublicKey))
+	v2, err := torchwood.NewCosignatureVerifierFromKey(config.Name, config.WitnessKey.PublicKey())
 	if err != nil {
-		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct verifier key: %w", err)
-	}
-	v2, err := note.NewVerifier(vk)
-	if err != nil {
-		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct Ed25519 verifier: %w", err)
+		return sunlight.Checkpoint{}, 0, fmt.Errorf("couldn't construct ML-DSA verifier: %w", err)
 	}
 	n, err := note.Open(b, note.VerifierList(v1, v2))
 	if err != nil {
@@ -368,7 +365,10 @@ func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error
 			v2Found = true
 		}
 	}
-	if !v1Found || !v2Found {
+	// For one release cycle, don't require the ML-DSA signature, to allow
+	// existing logs to upgrade without downtime. TODO: remove this.
+	_ = v2Found
+	if !v1Found { // || !v2Found {
 		return sunlight.Checkpoint{}, 0, errors.New("missing verifier signature")
 	}
 	c, err := sunlight.ParseCheckpoint(n.Text)
@@ -1201,9 +1201,9 @@ func signTreeHead(c *Config, tree treeWithTimestamp) (checkpoint []byte, err err
 		return nil, fmtErrorf("couldn't encode RFC6962NoteSignature: %w", err)
 	}
 
-	ws, err := newEd25519Signer(c.Name, c.WitnessKey)
+	ws, err := torchwood.NewCosignatureSigner(c.Name, c.WitnessKey)
 	if err != nil {
-		return nil, fmtErrorf("couldn't construct Ed25519 signer: %w", err)
+		return nil, fmtErrorf("couldn't construct ML-DSA signer: %w", err)
 	}
 
 	signers := []note.Signer{rs, ws}
@@ -1265,29 +1265,6 @@ func greaseSignatures(name string) []note.Signature {
 	mathrand.Shuffle(len(signatures), func(i, j int) { signatures[i], signatures[j] = signatures[j], signatures[i] })
 	return signatures
 }
-
-// newEd25519Signer can be removed once note.NewEd25519SignerKey is added.
-func newEd25519Signer(name string, key ed25519.PrivateKey) (note.Signer, error) {
-	vk, err := note.NewEd25519VerifierKey(name, key.Public().(ed25519.PublicKey))
-	if err != nil {
-		return nil, err
-	}
-	v, err := note.NewVerifier(vk)
-	if err != nil {
-		return nil, err
-	}
-	return &ed25519Signer{v, key}, nil
-}
-
-type ed25519Signer struct {
-	v note.Verifier
-	k ed25519.PrivateKey
-}
-
-func (s *ed25519Signer) Sign(msg []byte) ([]byte, error) { return ed25519.Sign(s.k, msg), nil }
-func (s *ed25519Signer) Name() string                    { return s.v.Name() }
-func (s *ed25519Signer) KeyHash() uint32                 { return s.v.KeyHash() }
-func (s *ed25519Signer) Verifier() note.Verifier         { return s.v }
 
 // hashReader returns hashes from l.edgeTiles and from overlay.
 func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {

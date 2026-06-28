@@ -18,6 +18,7 @@ import (
 	"sync"
 	"testing"
 
+	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/note"
@@ -82,13 +83,16 @@ func (b *memLockBackend) Replace(ctx context.Context, old ctlog.LockedCheckpoint
 func newTestWitness(t *testing.T, origin, vkey string) *Witness {
 	t.Helper()
 	ctx := context.Background()
-	_, key, err := ed25519.GenerateKey(rand.Reader)
+	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+	fatalIfErr(t, err)
+	mldsaKey, err := mldsa.GenerateKey(mldsa.MLDSA44())
 	fatalIfErr(t, err)
 	config := &Config{
-		Name:    "example.com/witness",
-		Key:     key,
-		Backend: newMemLockBackend(),
-		Log:     slog.New(testLogHandler(t)),
+		Name:       "example.com/witness",
+		KeyEd25519: ed25519Key,
+		KeyMLDSA44: mldsaKey,
+		Backend:    newMemLockBackend(),
+		Log:        slog.New(testLogHandler(t)),
 	}
 	// Seed the stored config and the empty checkpoint entry, as PullLogList
 	// would, so NewWitness picks up the log.
@@ -421,7 +425,7 @@ func TestGrowFromSizeZero(t *testing.T) {
 	// The returned cosignature must verify against the submitted checkpoint and
 	// cover the whole size-5 tree.
 	full := append(append([]byte{}, cp5...), body...)
-	n, err := note.Open(full, note.VerifierList(w.s.Verifier()))
+	n, err := note.Open(full, note.VerifierList(w.s1.Verifier()))
 	if err != nil {
 		t.Fatalf("witness cosignature does not verify: %v", err)
 	}
@@ -446,14 +450,33 @@ func TestResponseIsOnlyWitnessCosignature(t *testing.T) {
 		t.Fatalf("cosigning: got %d, body %q", code, body)
 	}
 
-	if n := strings.Count(body, "— "); n != 1 {
-		t.Errorf("response has %d signature lines, want 1 (only the witness's): %q", n, body)
+	if n := strings.Count(body, "— "); n != 2 {
+		t.Errorf("response has %d signature lines, want 2 (only the witness's): %q", n, body)
 	}
-	if !strings.Contains(body, "— "+w.s.Verifier().Name()+" ") {
+	if !strings.Contains(body, "— "+w.s1.Verifier().Name()+" ") {
 		t.Errorf("response does not contain the witness's cosignature: %q", body)
 	}
 	if strings.Contains(body, "— "+origin+" ") {
 		t.Errorf("response echoes the log's signature: %q", body)
+	}
+
+	full := append(append([]byte{}, cp...), body...)
+	n, err := note.Open(full, note.VerifierList(w.s1.Verifier(), w.s2.Verifier()))
+	fatalIfErr(t, err)
+	var s1Found, s2Found bool
+	for _, sig := range n.Sigs {
+		switch sig.Hash {
+		case w.s1.Verifier().KeyHash():
+			s1Found = true
+		case w.s2.Verifier().KeyHash():
+			s2Found = true
+		}
+	}
+	if !s1Found {
+		t.Error("missing Ed25519 witness cosignature")
+	}
+	if !s2Found {
+		t.Error("missing ML-DSA-44 witness cosignature")
 	}
 }
 
@@ -521,7 +544,7 @@ func TestSizeZeroRequiresEmptyRoot(t *testing.T) {
 // stored note is later re-opened with the witness's verifier.
 func forgeWitnessSigLine(t *testing.T, w *Witness) string {
 	t.Helper()
-	v := w.s.Verifier()
+	v := w.s1.Verifier()
 	var blob [4 + ed25519.SignatureSize]byte
 	binary.BigEndian.PutUint32(blob[:4], v.KeyHash())
 	// blob[4:] is left as zeros: a signature that cannot verify.
@@ -567,7 +590,7 @@ func TestForgedWitnessSigLineDoesNotPoisonState(t *testing.T) {
 		t.Fatal("no stored checkpoint for origin")
 	}
 	stored := lc.Bytes()
-	if _, err := note.Open(stored, note.VerifierList(w.s.Verifier())); err != nil {
+	if _, err := note.Open(stored, note.VerifierList(w.s1.Verifier())); err != nil {
 		t.Errorf("stored checkpoint does not open with witness verifier: %v", err)
 	}
 	logVerifier, err := note.NewVerifier(vkey)

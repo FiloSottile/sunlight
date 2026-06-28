@@ -3,7 +3,6 @@ package witness
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/asn1"
@@ -19,6 +18,7 @@ import (
 	"strings"
 	"sync"
 
+	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/torchwood"
 	"github.com/prometheus/client_golang/prometheus"
@@ -28,8 +28,9 @@ import (
 )
 
 type Config struct {
-	Name string
-	Key  crypto.Signer
+	Name       string
+	KeyEd25519 ed25519.PrivateKey
+	KeyMLDSA44 *mldsa.PrivateKey
 
 	Backend ctlog.LockBackend
 	Log     *slog.Logger
@@ -52,8 +53,10 @@ func backendKeyForCheckpoint(config *Config, origin string) [sha256.Size]byte {
 	// their own view of the state of each log they witness.
 	//
 	// Use the key instead of the name to prevent multiple witnesses from being
-	// erroneously configured with the same key.
-	h.Write(config.Key.Public().(ed25519.PublicKey))
+	// erroneously configured with the same key. Using just the Ed25519 public
+	// key is sufficient to avoid collisions even if Ed25519 was broken, and
+	// avoids a migration.
+	h.Write(config.KeyEd25519.Public().(ed25519.PublicKey))
 
 	h.Write([]byte(origin))
 	return [32]byte(h.Sum(nil))
@@ -68,14 +71,14 @@ func backendKeyForConfig(config *Config) [sha256.Size]byte {
 	h.Write(asn1.NullBytes)
 	h.Write([]byte("witness config\n"))
 
-	h.Write(config.Key.Public().(ed25519.PublicKey))
+	h.Write(config.KeyEd25519.Public().(ed25519.PublicKey))
 	return [32]byte(h.Sum(nil))
 }
 
 type Witness struct {
-	c *Config
-	s *torchwood.CosignatureSigner
-	m metrics
+	c      *Config
+	s1, s2 *torchwood.CosignatureSigner
+	m      metrics
 
 	// verifiers and checkpoints are indexed by log origin. They must be
 	// accessed and updated under logsMu. The list of origins and their verifier
@@ -120,12 +123,16 @@ type lockedCheckpoint struct {
 }
 
 func NewWitness(ctx context.Context, config *Config) (*Witness, error) {
-	s, err := torchwood.NewCosignatureSigner(config.Name, config.Key)
+	s1, err := torchwood.NewCosignatureSigner(config.Name, config.KeyEd25519)
 	if err != nil {
-		return nil, fmt.Errorf("couldn't create signer: %w", err)
+		return nil, fmt.Errorf("couldn't create Ed25519 signer: %w", err)
+	}
+	s2, err := torchwood.NewCosignatureSigner(config.Name, config.KeyMLDSA44)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't create ML-DSA-44 signer: %w", err)
 	}
 
-	w := &Witness{c: config, s: s, m: initMetrics()}
+	w := &Witness{c: config, s1: s1, s2: s2, m: initMetrics()}
 
 	logs, err := config.Backend.Fetch(ctx, backendKeyForConfig(config))
 	if errors.Is(err, ctlog.ErrLogNotFound) {
@@ -152,7 +159,7 @@ func NewWitness(ctx context.Context, config *Config) (*Witness, error) {
 		config.Log.DebugContext(ctx, "configured to witness log", "origin", log.Origin, "vkeys", log.VerifierKeys)
 		var verifiers []note.Verifier
 		for _, k := range log.VerifierKeys {
-			v, err := note.NewVerifier(k)
+			v, err := newLogVerifier(k)
 			if err != nil {
 				return nil, fmt.Errorf("couldn't parse vkey %q for log %q: %w", k, log.Origin, err)
 			}
@@ -168,8 +175,8 @@ func NewWitness(ctx context.Context, config *Config) (*Witness, error) {
 	return w, nil
 }
 
-func (w *Witness) VerifierKey() string {
-	return w.s.Verifier().String()
+func (w *Witness) VerifierKeys() []string {
+	return []string{w.s1.Verifier().String(), w.s2.Verifier().String()}
 }
 
 func (w *Witness) PullLogList(ctx context.Context, url string) error {
@@ -205,7 +212,7 @@ func (w *Witness) PullLogList(ctx context.Context, url string) error {
 			// Already known, skip.
 			continue
 		}
-		v, err := note.NewVerifier(vkey)
+		v, err := newLogVerifier(vkey)
 		if err != nil {
 			return fmt.Errorf("couldn't parse vkey %q for log %q: %w", vkey, origin, err)
 		}
@@ -426,7 +433,9 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 			return nil, errProof
 		}
 	} else {
-		n, err := note.Open(lock.Bytes(), note.VerifierList(w.s.Verifier()))
+		// For now, use the Ed25519 verifier to verify the stored checkpoint,
+		// not to break existing witnesses. TODO: switch to ML-DSA-44.
+		n, err := note.Open(lock.Bytes(), note.VerifierList(w.s1.Verifier()))
 		if err != nil {
 			return nil, errors.New("internal error: can't verify stored checkpoint")
 		}
@@ -460,14 +469,14 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 	// signatures, which might be maliciously crafted to collide with our signature.
 	signed, err := note.Sign(&note.Note{Text: torchwood.Checkpoint{
 		Origin: origin, Tree: tlog.Tree{N: newSize, Hash: newHash},
-	}.String(), Sigs: submitted.Sigs}, w.s)
+	}.String(), Sigs: submitted.Sigs}, w.s1, w.s2)
 	if err != nil {
 		// Don't return the error here and below, to avoid leaking the signature
 		// before the backend compare-and-swap succeeds, which is the ultimate
 		// check against concurrent signers and locking bugs.
 		return nil, errors.New("internal error: failed to sign note")
 	}
-	sigs, err := splitSignatures(signed, w.s.Verifier())
+	sigs, err := splitSignatures(signed, w.s1.Verifier().Name())
 	if err != nil {
 		return nil, errors.New("internal error: produced invalid note")
 	}
@@ -485,14 +494,14 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 	return sigs, nil
 }
 
-func splitSignatures(note []byte, v note.Verifier) ([]byte, error) {
+func splitSignatures(note []byte, name string) ([]byte, error) {
 	sigSplit := []byte("\n\n")
 	split := bytes.LastIndex(note, sigSplit)
 	if split < 0 {
 		return nil, errors.New("invalid note")
 	}
 	var sigs []byte
-	sigPrefix := []byte("— " + v.Name() + " ")
+	sigPrefix := []byte("— " + name + " ")
 	for _, line := range bytes.SplitAfter(note[split+2:], []byte("\n")) {
 		if bytes.HasPrefix(line, sigPrefix) {
 			sigs = append(sigs, line...)
@@ -514,7 +523,7 @@ func parseLogList(logList []byte) (map[string]string, error) {
 			vkey = ""
 			origin = ""
 		}()
-		v, err := note.NewVerifier(vkey)
+		v, err := newLogVerifier(vkey)
 		if err != nil {
 			// Invalid vkey, skip.
 			return
@@ -565,4 +574,30 @@ func parseLogList(logList []byte) (map[string]string, error) {
 	}
 	finalizeLogEntry()
 	return logs, nil
+}
+
+// newLogVerifier returns a note.Verifier for the given vkey string, or an error
+// if the vkey is invalid.
+//
+// It supports regular (not cosignature) Ed25519 keys, and ML-DSA-44 cosignature
+// keys, which are the ones that logs can be expected to use. (Ed25519 log
+// signatures and cosignatures were split because we did not have the foresight
+// to include a timestamp in the original Ed25519 signatures.)
+func newLogVerifier(vkey string) (note.Verifier, error) {
+	v1, err1 := note.NewVerifier(vkey)
+	if err1 == nil {
+		return v1, nil
+	}
+	v2, err2 := torchwood.NewCosignatureVerifier(vkey)
+	if err2 != nil {
+		return nil, fmt.Errorf("invalid vkey: %v / %v", err1, err2)
+	}
+	switch v2.PublicKey().(type) {
+	case *mldsa.PublicKey:
+		return v2, nil
+	case ed25519.PublicKey:
+		return nil, fmt.Errorf("Ed25519 cosignature keys are not supported for logs")
+	default:
+		return nil, fmt.Errorf("unsupported cosignature key type: %T", v2.PublicKey())
+	}
 }
