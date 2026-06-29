@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -29,12 +30,38 @@ func main() {
 	logFlag := fs.String("log", "", "submission prefix for the log")
 	prefixFlag := fs.String("prefix", "", "legacy flag name for -log")
 	witnessFlag := fs.String("witness", "", "witness name")
+	jsonFlag := fs.Bool("json", false, "output JSON instead of text")
 	fs.Parse(os.Args[1:])
 	if fs.NArg() != 0 || *fileFlag == "" {
-		fmt.Fprintln(os.Stderr, "usage: sunlight-keygen -f <seed file> [-log <submission prefix> | -witness <witness name>]")
+		fmt.Fprintln(os.Stderr, "usage: sunlight-keygen [-json] -f <seed file> [-log <submission prefix> | -witness <witness name>]")
 		fs.PrintDefaults()
 		os.Exit(2)
 	}
+
+	type outputLine struct {
+		JSONKey      string
+		PlaintextKey string
+		Value        string
+	}
+	var results []outputLine
+
+	defer func() {
+		if *jsonFlag {
+			output := make(map[string]string)
+			for _, line := range results {
+				output[line.JSONKey] = line.Value
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(output); err != nil {
+				log.Fatal("failed to encode JSON:", err)
+			}
+		} else {
+			for _, line := range results {
+				fmt.Printf("%s: %s\n", line.PlaintextKey, line.Value)
+			}
+		}
+	}()
 
 	if _, err := os.Stat(*fileFlag); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Creating new immutable seed file at: %s\n", *fileFlag)
@@ -72,7 +99,11 @@ func main() {
 		if err != nil {
 			log.Fatal("failed to create witness signer:", err)
 		}
-		fmt.Printf("Witness vkey (Ed25519): %s\n", s.Verifier())
+		results = append(results, outputLine{
+			JSONKey:      "witness_vkey_ed25519",
+			PlaintextKey: "Witness vkey (Ed25519)",
+			Value:        s.Verifier().String(),
+		})
 
 		mldsaSecret := make([]byte, mldsa.PrivateKeySize)
 		if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight ML-DSA-44 witness key"),
@@ -87,7 +118,11 @@ func main() {
 		if err != nil {
 			log.Fatal("failed to create witness signer:", err)
 		}
-		fmt.Printf("Witness vkey (ML-DSA-44): %s\n", s.Verifier())
+		results = append(results, outputLine{
+			JSONKey:      "witness_vkey_mldsa44",
+			PlaintextKey: "Witness vkey (ML-DSA-44)",
+			Value:        s.Verifier().String(),
+		})
 
 		return
 	}
@@ -107,10 +142,18 @@ func main() {
 	}
 
 	logID := sha256.Sum256(spki)
-	fmt.Printf("Log ID: %s\n", base64.StdEncoding.EncodeToString(logID[:]))
+	results = append(results, outputLine{
+		JSONKey:      "log_id",
+		PlaintextKey: "Log ID",
+		Value:        base64.StdEncoding.EncodeToString(logID[:]),
+	})
 
 	ecPubKey := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki}))
-	fmt.Printf("ECDSA public key:\n%s", ecPubKey)
+	results = append(results, outputLine{
+		JSONKey:      "public_key_ecdsa_spki_pem",
+		PlaintextKey: "ECDSA public key",
+		Value:        ecPubKey,
+	})
 
 	if *prefixFlag != "" || *logFlag != "" {
 		mldsaSecret := make([]byte, mldsa.PrivateKeySize)
@@ -135,6 +178,10 @@ func main() {
 		if err != nil {
 			log.Fatal("failed to create verifier key:", err)
 		}
-		fmt.Printf("ML-DSA-44 verifier key: %s\n", v)
+		results = append(results, outputLine{
+			JSONKey:      "vkey_mldsa44",
+			PlaintextKey: "ML-DSA-44 verifier key",
+			Value:        v.String(),
+		})
 	}
 }
