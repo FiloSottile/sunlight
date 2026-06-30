@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -180,22 +181,34 @@ func (w *Witness) VerifierKeys() []string {
 }
 
 func (w *Witness) PullLogList(ctx context.Context, url string) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create log list request: %w", err)
-	}
-	req.Header.Set("User-Agent", "+https://filippo.io/sunlight")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to fetch log list: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to fetch log list: %s", resp.Status)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read log list response: %w", err)
+	var body []byte
+	switch {
+	case strings.HasPrefix(url, "https://"):
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create log list request: %w", err)
+		}
+		req.Header.Set("User-Agent", "+https://filippo.io/sunlight")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to fetch log list: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("failed to fetch log list: %s", resp.Status)
+		}
+		body, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read log list response: %w", err)
+		}
+	case strings.Contains(url, "://"):
+		return fmt.Errorf("unsupported log list scheme (must be HTTPS): %q", url)
+	default:
+		var err error
+		body, err = os.ReadFile(url)
+		if err != nil {
+			return fmt.Errorf("failed to read log list file: %w", err)
+		}
 	}
 	logs, err := parseLogList(body)
 	if err != nil {

@@ -160,10 +160,11 @@ type Config struct {
 		//
 		Secret string
 
-		// LogList are the URLs of witness network log list.
+		// LogLists are the HTTPS URLs or file paths of witness network log lists.
 		//
-		// Logs are pulled from the lists on startup and every 15 minutes. The
-		// lists can only add logs, never remove them or change their public key.
+		// Logs are pulled from the lists on startup, every 15 minutes, and on
+		// SIGHUP. The lists can only add logs, never remove them or change
+		// their public key.
 		LogLists []string
 	}
 
