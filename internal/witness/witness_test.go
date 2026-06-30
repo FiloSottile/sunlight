@@ -21,6 +21,7 @@ import (
 	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/torchwood"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -77,6 +78,42 @@ func (b *memLockBackend) Replace(ctx context.Context, old ctlog.LockedCheckpoint
 	return &memCheckpoint{logID: oldc.logID, data: new}, nil
 }
 
+// memBackend is an in-memory [ctlog.Backend] for tests.
+type memBackend struct {
+	mu sync.Mutex
+	m  map[string][]byte
+}
+
+func newMemBackend() *memBackend {
+	return &memBackend{m: make(map[string][]byte)}
+}
+
+func (b *memBackend) Upload(ctx context.Context, key string, data []byte, opts *ctlog.UploadOptions) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.m[key] = bytes.Clone(data)
+	return nil
+}
+
+func (b *memBackend) Fetch(ctx context.Context, key string) ([]byte, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	data, ok := b.m[key]
+	if !ok {
+		return nil, fmt.Errorf("key %q not found", key)
+	}
+	return bytes.Clone(data), nil
+}
+
+func (b *memBackend) Discard(ctx context.Context, key string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.m, key)
+	return nil
+}
+
+func (b *memBackend) Metrics() []prometheus.Collector { return nil }
+
 // newTestWitness returns a Witness named example.com/witness, already configured
 // to witness origin with the given log verifier key and an empty stored
 // checkpoint.
@@ -91,14 +128,15 @@ func newTestWitness(t *testing.T, origin, vkey string) *Witness {
 		Name:       "example.com/witness",
 		KeyEd25519: ed25519Key,
 		KeyMLDSA44: mldsaKey,
-		Backend:    newMemLockBackend(),
+		Backend:    newMemBackend(),
+		Lock:       newMemLockBackend(),
 		Log:        slog.New(testLogHandler(t)),
 	}
 	// Seed the stored config and the empty checkpoint entry, as PullLogList
 	// would, so NewWitness picks up the log.
 	configJSON := fmt.Appendf(nil, `{"logs":[{"origin":%q,"verifierKeys":[%q]}]}`, origin, vkey)
-	fatalIfErr(t, config.Backend.Create(ctx, backendKeyForConfig(config), configJSON))
-	fatalIfErr(t, config.Backend.Create(ctx, backendKeyForCheckpoint(config, origin), nil))
+	fatalIfErr(t, config.Lock.Create(ctx, backendKeyForConfig(config), configJSON))
+	fatalIfErr(t, config.Lock.Create(ctx, backendKeyForCheckpoint(config, origin), nil))
 	w, err := NewWitness(ctx, config)
 	fatalIfErr(t, err)
 	return w
@@ -296,6 +334,19 @@ KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 			}
 			if !strings.Contains(body, tt.wantBody) {
 				t.Errorf("body %q does not contain %q", body, tt.wantBody)
+			}
+			if tt.wantCode == http.StatusOK {
+				// A successful cosignature must be uploaded to the Backend at
+				// <origin hash>/checkpoint, byte-identical to the checkpoint
+				// held by the lock backend.
+				key := OriginHash(sigsumOrigin) + "/checkpoint"
+				got, err := w.c.Backend.Fetch(context.Background(), key)
+				fatalIfErr(t, err)
+				lock, err := w.c.Lock.Fetch(context.Background(), backendKeyForCheckpoint(w.c, sigsumOrigin))
+				fatalIfErr(t, err)
+				if !bytes.Equal(got, lock.Bytes()) {
+					t.Errorf("backend checkpoint does not match locked checkpoint:\n backend: %q\n locked:  %q", got, lock.Bytes())
+				}
 			}
 		})
 	}

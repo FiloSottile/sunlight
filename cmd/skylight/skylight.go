@@ -21,6 +21,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -85,9 +86,24 @@ type Config struct {
 	// HomeRedirect is the 302 destination of the root. Optional.
 	HomeRedirect string
 
+	// LogsJSONPrefix is the full URL prefix of the /logs.json endpoint.
+	// Optional. If empty, /logs.json will be served at the root of all hosts.
+	// If ACME is enabled, Skylight will obtain a certificate for the host of
+	// this URL.
+	LogsJSONPrefix string
+
 	// OperatorName is the human-readable name of the CT log operator,
 	// served at /logs.json per the operator-list-v1 schema. Optional.
 	OperatorName string
+
+	// WitnessPrefix is the full URL of the c2sp.org/tlog-witness monitoring
+	// prefix of the witness. Optional. If ACME is enabled, Skylight will obtain
+	// a certificate for the host of this URL.
+	WitnessPrefix string
+
+	// WitnessDirectory is the path to a local directory where the witness
+	// stores its data. Required if WitnessPrefix is set.
+	WitnessDirectory string
 
 	Logs []LogConfig
 }
@@ -168,6 +184,13 @@ type kindContextKey struct{}
 
 func kindFromContext(ctx context.Context) string {
 	k, _ := ctx.Value(kindContextKey{}).(string)
+	return k
+}
+
+type originContextKey struct{}
+
+func originFromContext(ctx context.Context) string {
+	k, _ := ctx.Value(originContextKey{}).(string)
 	return k
 }
 
@@ -314,18 +337,9 @@ func main() {
 			slog.String("log", lc.ShortName),
 		}))
 
-		lc.MonitoringPrefix = strings.TrimSuffix(lc.MonitoringPrefix, "/")
-		prefix, err := url.Parse(lc.MonitoringPrefix)
+		prefix, err := parsePrefix(lc.MonitoringPrefix)
 		if err != nil {
-			fatalError(logger, "failed to parse MonitoringPrefix", "err", err)
-		}
-		if prefix.Scheme != "https" {
-			fatalError(logger, "MonitoringPrefix must use https scheme",
-				"prefix", lc.MonitoringPrefix)
-		}
-		if prefix.Host == "" {
-			fatalError(logger, "MonitoringPrefix must have a host",
-				"prefix", lc.MonitoringPrefix)
+			fatalError(logger, "invalid MonitoringPrefix", "err", err)
 		}
 
 		acmeHosts = append(acmeHosts, prefix.Hostname())
@@ -429,7 +443,72 @@ func main() {
 		})
 	}
 
-	mux.HandleFunc("/logs.json", func(w http.ResponseWriter, r *http.Request) {
+	if c.WitnessPrefix != "" {
+		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
+			slog.String("witness", c.WitnessPrefix),
+		}))
+
+		prefix, err := parsePrefix(c.WitnessPrefix)
+		if err != nil {
+			fatalError(logger, "invalid WitnessPrefix", "err", err)
+		}
+
+		acmeHosts = append(acmeHosts, prefix.Hostname())
+
+		root, err := os.OpenRoot(c.WitnessDirectory)
+		if err != nil {
+			fatalError(logger, "failed to open witness directory", "err", err)
+		}
+		handler := http.StripPrefix(prefix.Path, http.FileServerFS(root.FS()))
+
+		handler = promhttp.InstrumentHandlerDuration(reqDuration, handler,
+			promhttp.WithLabelFromCtx("log", originFromContext),
+			promhttp.WithLabelFromCtx("kind", kindFromContext))
+		handler = promhttp.InstrumentHandlerResponseSize(resSize, handler,
+			promhttp.WithLabelFromCtx("log", originFromContext),
+			promhttp.WithLabelFromCtx("kind", kindFromContext))
+		handler = promhttp.InstrumentHandlerCounter(reqCount, handler,
+			promhttp.WithLabelFromCtx("log", originFromContext),
+			promhttp.WithLabelFromCtx("kind", kindFromContext),
+			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
+			promhttp.WithLabelFromCtx("client", clientFromContext))
+
+		// No rate limit for the witness, which only serves small checkpoints.
+
+		patternPrefix := "GET " + prefix.Host + prefix.Path
+		mux.HandleFunc(patternPrefix+"/", func(w http.ResponseWriter, r *http.Request) {
+			path := strings.TrimPrefix(r.URL.Path, prefix.Path)
+			path = strings.TrimPrefix(path, "/")
+			hash, rest, ok := strings.Cut(path, "/")
+			if !ok || rest != "checkpoint" || !isOriginHash(hash) {
+				reused := reused.LabelFromContext(r.Context())
+				client := clientFromContext(r.Context())
+				reqCount.WithLabelValues("", "witness", client, reused, "404").Inc()
+				w.Header().Del("Content-Encoding")
+				w.Header().Del("Cache-Control")
+				http.Error(w, "invalid path", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "witness:checkpoint"))
+			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, hash))
+			handler.ServeHTTP(w, r)
+		})
+	}
+
+	var logsJSONPrefix string
+	if c.LogsJSONPrefix != "" {
+		logsJSONPrefix = strings.TrimSuffix(c.LogsJSONPrefix, "/")
+		prefix, err := parsePrefix(logsJSONPrefix)
+		if err != nil {
+			fatalError(logger, "invalid LogsJSONPrefix", "err", err)
+		}
+		logsJSONPrefix = prefix.Host + prefix.Path
+		acmeHosts = append(acmeHosts, prefix.Hostname())
+	}
+	mux.HandleFunc("GET "+logsJSONPrefix+"/logs.json", func(w http.ResponseWriter, r *http.Request) {
 		reused := reused.LabelFromContext(r.Context())
 		client := clientFromContext(r.Context())
 		reqCount.WithLabelValues("", "logs.json", client, reused, "200").Inc()
@@ -439,7 +518,8 @@ func main() {
 
 		var logs []string
 		for log := range roots {
-			logs = append(logs, log.MonitoringPrefix+"/log.v3.json")
+			prefix := strings.TrimSuffix(log.MonitoringPrefix, "/")
+			logs = append(logs, prefix+"/log.v3.json")
 		}
 		slices.Sort(logs)
 		json.NewEncoder(w).Encode(struct {
@@ -557,6 +637,35 @@ func main() {
 	}
 
 	os.Exit(1)
+}
+
+func parsePrefix(prefix string) (*url.URL, error) {
+	prefix = strings.TrimSuffix(prefix, "/")
+	p, err := url.Parse(prefix)
+	if err != nil {
+		return nil, err
+	}
+	if p.Scheme != "https" {
+		return nil, fmt.Errorf("must use https scheme: %s", prefix)
+	}
+	if p.Host == "" {
+		return nil, fmt.Errorf("must have a host: %s", prefix)
+	}
+	return p, nil
+}
+
+// isOriginHash reports whether s is a lowercase hex-encoded SHA-256, the origin
+// hash that addresses a witnessed log's checkpoint per c2sp.org/tlog-witness.
+func isOriginHash(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	for _, c := range s {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type logInfo struct {

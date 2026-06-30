@@ -70,5 +70,5 @@ func (w *Witness) Metrics() []prometheus.Collector {
 	for i := 0; i < reflect.ValueOf(w.m).NumField(); i++ {
 		collectors = append(collectors, reflect.ValueOf(w.m).Field(i).Interface().(prometheus.Collector))
 	}
-	return collectors
+	return append(collectors, w.c.Backend.Metrics()...)
 }

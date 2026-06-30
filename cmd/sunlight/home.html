@@ -119,7 +119,9 @@
       Known logs:
       <ul>
         {{ range .Witness.Logs }}
-        <li><code>{{ . }}</code></li>
+        <li><a href="{{ $.Witness.MonitoringPrefix }}/{{ originhash . }}/checkpoint">
+          <code>{{ . }}</code>
+        </a></li>
         {{ end }}
       </ul>
     {{ end }}

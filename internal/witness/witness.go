@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/asn1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,7 +34,8 @@ type Config struct {
 	KeyEd25519 ed25519.PrivateKey
 	KeyMLDSA44 *mldsa.PrivateKey
 
-	Backend ctlog.LockBackend
+	Backend ctlog.Backend
+	Lock    ctlog.LockBackend
 	Log     *slog.Logger
 }
 
@@ -76,6 +78,16 @@ func backendKeyForConfig(config *Config) [sha256.Size]byte {
 	return [32]byte(h.Sum(nil))
 }
 
+// OriginHash returns the lowercase hex-encoded SHA-256 of the log origin, which
+// identifies the log in the witness monitoring URL space per
+// c2sp.org/tlog-witness:
+//
+//	GET <monitoring prefix>/<origin hash>/checkpoint
+func OriginHash(origin string) string {
+	h := sha256.Sum256([]byte(origin))
+	return hex.EncodeToString(h[:])
+}
+
 type Witness struct {
 	c      *Config
 	s1, s2 *torchwood.CosignatureSigner
@@ -83,7 +95,7 @@ type Witness struct {
 
 	// verifiers and checkpoints are indexed by log origin. They must be
 	// accessed and updated under logsMu. The list of origins and their verifier
-	// keys are stored in Backend, and are updated additively by PullLogList.
+	// keys are stored in LockBackend, and are updated additively by PullLogList.
 	logsMu      sync.RWMutex
 	verifiers   map[string]note.Verifiers
 	checkpoints map[string]*lockedCheckpoint
@@ -135,13 +147,13 @@ func NewWitness(ctx context.Context, config *Config) (*Witness, error) {
 
 	w := &Witness{c: config, s1: s1, s2: s2, m: initMetrics()}
 
-	logs, err := config.Backend.Fetch(ctx, backendKeyForConfig(config))
+	logs, err := config.Lock.Fetch(ctx, backendKeyForConfig(config))
 	if errors.Is(err, ctlog.ErrLogNotFound) {
 		config.Log.WarnContext(ctx, "witness config not found in backend; creating new empty config")
-		if err := config.Backend.Create(ctx, backendKeyForConfig(config), []byte("{}")); err != nil {
+		if err := config.Lock.Create(ctx, backendKeyForConfig(config), []byte("{}")); err != nil {
 			return nil, fmt.Errorf("couldn't create witness config in backend: %w", err)
 		}
-		logs, err = config.Backend.Fetch(ctx, backendKeyForConfig(config))
+		logs, err = config.Lock.Fetch(ctx, backendKeyForConfig(config))
 	}
 	if err != nil {
 		return nil, fmt.Errorf("couldn't fetch witness config from backend: %w", err)
@@ -232,8 +244,8 @@ func (w *Witness) PullLogList(ctx context.Context, url string) error {
 		w.c.Log.InfoContext(ctx, "adding new log to witness config", "origin", origin, "vkey", vkey, "source", url)
 		// Create() might fail if the log was previously configured and removed,
 		// or if a previous PullLogList crashed before persisting the new config.
-		createErr := w.c.Backend.Create(ctx, backendKeyForCheckpoint(w.c, origin), nil)
-		ch, err := w.c.Backend.Fetch(ctx, backendKeyForCheckpoint(w.c, origin))
+		createErr := w.c.Lock.Create(ctx, backendKeyForCheckpoint(w.c, origin), nil)
+		ch, err := w.c.Lock.Fetch(ctx, backendKeyForCheckpoint(w.c, origin))
 		if err != nil {
 			return fmt.Errorf("couldn't fetch empty checkpoint for new log %q: %w (Create() error: %q)", origin, err, createErr)
 		}
@@ -244,7 +256,7 @@ func (w *Witness) PullLogList(ctx context.Context, url string) error {
 
 	// We don't actually need the compare-and-swap semantics to update the list
 	// of verifier keys, a rollback of that would not cause a checkpoint rollback.
-	oldLogs, err := w.c.Backend.Fetch(ctx, backendKeyForConfig(w.c))
+	oldLogs, err := w.c.Lock.Fetch(ctx, backendKeyForConfig(w.c))
 	if err != nil {
 		return fmt.Errorf("couldn't fetch existing witness config from backend: %w", err)
 	}
@@ -265,7 +277,7 @@ func (w *Witness) PullLogList(ctx context.Context, url string) error {
 	if err != nil {
 		return fmt.Errorf("couldn't marshal updated witness config: %w", err)
 	}
-	if _, err := w.c.Backend.Replace(ctx, oldLogs, newConfigBytes); err != nil {
+	if _, err := w.c.Lock.Replace(ctx, oldLogs, newConfigBytes); err != nil {
 		return fmt.Errorf("couldn't store updated witness config: %w", err)
 	}
 	w.verifiers = verifiers
@@ -425,7 +437,7 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 	if lock.LockedCheckpoint == nil {
 		// Might not have been fetched yet, do it now. It must exist because it
 		// is created (empty) when the log is added to the witness config.
-		c, err := w.c.Backend.Fetch(ctx, backendKeyForCheckpoint(w.c, origin))
+		c, err := w.c.Lock.Fetch(ctx, backendKeyForCheckpoint(w.c, origin))
 		if err != nil {
 			return nil, errors.New("internal error: couldn't fetch checkpoint for known log")
 		}
@@ -494,13 +506,25 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 		return nil, errors.New("internal error: produced invalid note")
 	}
 
-	newLock, err := w.c.Backend.Replace(ctx, lock.LockedCheckpoint, signed)
+	newLock, err := w.c.Lock.Replace(ctx, lock.LockedCheckpoint, signed)
 	if err != nil {
 		// We don't know if it was persisted, let it be re-fetched at the next update.
 		lock.LockedCheckpoint = nil
 		return nil, errors.New("internal error: failed to store new checkpoint")
 	}
 	lock.LockedCheckpoint = newLock
+
+	backendKey := OriginHash(origin) + "/checkpoint"
+	if err := w.c.Backend.Upload(ctx, backendKey, signed, &ctlog.UploadOptions{
+		ContentType: "text/plain; charset=utf-8",
+	}); err != nil {
+		// Uploading the checkpoint to the public bucket failed, but we already
+		// persisted it to the LockBackend, so witnessing can continue. Still
+		// return an error instead of the signature, to avoid handing the client
+		// a signed checkpoint that monitors might not get to see. Clients can
+		// hit the 409 path to get the signature again.
+		return nil, fmt.Errorf("internal error: failed to upload new checkpoint to backend: %w", err)
+	}
 
 	w.m.LogSize.WithLabelValues(origin).Set(float64(newSize))
 

@@ -150,11 +150,19 @@ type Config struct {
 		// enabled, Sunlight will obtain a certificate for the host of this URL.
 		SubmissionPrefix string
 
+		// MonitoringPrefix is the full URL of the c2sp.org/tlog-witness
+		// monitoring prefix of the witness.
+		//
+		// The HTTP server does NOT serve this endpoint. Instead, it must be
+		// served from the S3 bucket or local directory, for example with
+		// Skylight.
+		MonitoringPrefix string
+
 		// Secret is the path to a file containing a secret seed from which the
 		// witness's private key is derived. The file contents are used as HKDF
 		// input and mixed with the Name. It must be exactly 32 bytes long.
 		//
-		// To generate a new seed, run:
+		// To generate a new seed or display the public key, run:
 		//
 		//   $ sunlight-keygen -f seed.bin -witness <name>
 		//
@@ -166,6 +174,30 @@ type Config struct {
 		// SIGHUP. The lists can only add logs, never remove them or change
 		// their public key.
 		LogLists []string
+
+		// S3Region is the AWS region for the S3 bucket.
+		S3Region string
+
+		// S3Bucket is the name of the S3 bucket. The S3Bucket + S3KeyPrefix
+		// combination must be dedicated to this witness instance.
+		//
+		// Only one of S3Bucket or LocalDirectory can be set at the same time.
+		S3Bucket string
+
+		// S3Endpoint is the base URL the AWS SDK will use to connect to S3. Optional.
+		S3Endpoint string
+
+		// S3KeyPrefix is a prefix on all keys written to S3. Optional.
+		//
+		// S3 doesn't have directories, but using a prefix ending in a "/" is
+		// going to be treated like a directory in many tools using S3.
+		S3KeyPrefix string
+
+		// LocalDirectory is the path to a local directory where the witness will
+		// store its public data. It will be created if it doesn't already exist.
+		//
+		// Only one of S3Bucket or LocalDirectory can be set at the same time.
+		LocalDirectory string
 	}
 
 	Logs []LogConfig
@@ -252,7 +284,7 @@ type LogConfig struct {
 	// log's private keys are derived. The file contents are used as HKDF input.
 	// It must be exactly 32 bytes long.
 	//
-	// To generate a new seed, run:
+	// To generate a new seed or display the public key, run:
 	//
 	//   $ sunlight-keygen -f seed.bin
 	//
@@ -278,8 +310,8 @@ type LogConfig struct {
 	// S3Region is the AWS region for the S3 bucket.
 	S3Region string
 
-	// S3Bucket is the name of the S3 bucket. This bucket must be dedicated to
-	// this specific log instance.
+	// S3Bucket is the name of the S3 bucket. The S3Bucket + S3KeyPrefix
+	// combination must be dedicated to this log instance.
 	//
 	// Only one of S3Bucket or LocalDirectory can be set at the same time.
 	S3Bucket string
@@ -371,7 +403,8 @@ type PlannedChange struct {
 //go:embed home.html
 var homeHTML string
 var homeTmpl = template.Must(template.New("home").Funcs(template.FuncMap{
-	"timestamp": func(ms int64) string { return time.UnixMilli(ms).UTC().Format(time.RFC3339) },
+	"timestamp":  func(ms int64) string { return time.UnixMilli(ms).UTC().Format(time.RFC3339) },
+	"originhash": witness.OriginHash,
 }).Parse(homeHTML))
 
 func main() {
@@ -504,6 +537,7 @@ func main() {
 	type witnessInfo struct {
 		Name             string
 		SubmissionPrefix string
+		MonitoringPrefix string
 		VerifierKeys     []string
 		LogLists         []string
 		Logs             []string
@@ -772,10 +806,32 @@ func main() {
 		})
 	}
 
-	if c.Witness.Name != "" {
+	if c.Witness.Name != "" && c.Witness.LocalDirectory == "" && c.Witness.S3Bucket == "" {
+		// The witness backend was added later, don't make it a fatal error if
+		// it's missing, for now.
+		logger.Warn("missing witness backend, turning witness off")
+	} else if c.Witness.Name != "" {
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("witness", c.Witness.Name),
 		}))
+
+		var b ctlog.Backend
+		switch {
+		case c.Witness.S3Bucket != "" && c.Witness.LocalDirectory != "":
+			fatalError(logger, "only one of S3Bucket or LocalDirectory can be set at the same time")
+		case c.Witness.S3Bucket != "":
+			b, err = ctlog.NewS3Backend(ctx, c.Witness.S3Region, c.Witness.S3Bucket, c.Witness.S3Endpoint, c.Witness.S3KeyPrefix, logger)
+			if err != nil {
+				fatalError(logger, "failed to create backend", "err", err)
+			}
+		case c.Witness.LocalDirectory != "":
+			b, err = ctlog.NewLocalBackend(ctx, c.Witness.LocalDirectory, logger)
+			if err != nil {
+				fatalError(logger, "failed to create backend", "err", err)
+			}
+		default:
+			fatalError(logger, "neither S3Bucket nor LocalDirectory are set, one must be used")
+		}
 
 		seed, err := os.ReadFile(c.Witness.Secret)
 		if err != nil {
@@ -806,7 +862,8 @@ func main() {
 			Name:       c.Witness.Name,
 			KeyEd25519: wk,
 			KeyMLDSA44: mk,
-			Backend:    db,
+			Backend:    b,
+			Lock:       db,
 			Log:        logger,
 		})
 		if err != nil {
@@ -857,6 +914,11 @@ func main() {
 
 		acmeHosts = append(acmeHosts, prefix.Host)
 
+		if c.Witness.MonitoringPrefix == "" {
+			fatalError(logger, "missing witness MonitoringPrefix")
+		}
+		c.Witness.MonitoringPrefix = strings.TrimSuffix(c.Witness.MonitoringPrefix, "/")
+
 		witnessMetrics := prometheus.WrapRegistererWithPrefix("witness_", sunlightMetrics)
 		witnessMetrics.MustRegister(w.Metrics()...)
 
@@ -864,6 +926,7 @@ func main() {
 			return witnessInfo{
 				Name:             c.Witness.Name,
 				SubmissionPrefix: c.Witness.SubmissionPrefix,
+				MonitoringPrefix: c.Witness.MonitoringPrefix,
 				VerifierKeys:     w.VerifierKeys(),
 				LogLists:         c.Witness.LogLists,
 				Logs:             w.Logs(),
