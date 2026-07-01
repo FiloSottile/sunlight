@@ -64,6 +64,9 @@ type Log struct {
 	inSequencing map[cacheHash]waitEntryFunc
 	// cacheRead is used to check the deduplication cache under poolMu.
 	cacheRead *sqlite.Conn
+	// cacheLegacy reports whether the legacy 128-bit cache table is present, in
+	// which case cacheGet falls back to it on a cache256 miss.
+	cacheLegacy bool
 
 	// issuers is a cache of issuers that have been uploaded or checked since
 	// the log started. There might be more in the backend.
@@ -234,6 +237,10 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	if err != nil {
 		return nil, fmt.Errorf("couldn't initialize cache database: %w", err)
 	}
+	cacheLegacy, err := cacheLegacy(cacheRead)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't check for legacy cache table: %w", err)
+	}
 
 	// Fetch the tiles on the right edge, and verify them against the checkpoint.
 	edgeTiles := make(map[int]tileWithBytes)
@@ -330,6 +337,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		lockCheckpoint: lock,
 		edgeTiles:      edgeTiles,
 		cacheRead:      cacheRead,
+		cacheLegacy:    cacheLegacy,
 		currentPool:    newPool(),
 		cacheWrite:     cacheWrite,
 		issuers:        make(map[[32]byte]bool),
@@ -566,7 +574,7 @@ func (e *PendingLogEntry) asLogEntry(idx, timestamp int64) *sunlight.LogEntry {
 	}
 }
 
-type cacheHash [16]byte // birthday bound of 2⁴⁸ entries with collision chance 2⁻³²
+type cacheHash [32]byte
 
 func computeCacheHash(Certificate []byte, IsPrecert bool, IssuerKeyHash [32]byte) cacheHash {
 	b := &cryptobyte.Builder{}
@@ -582,8 +590,7 @@ func computeCacheHash(Certificate []byte, IsPrecert bool, IssuerKeyHash [32]byte
 			b.AddBytes(Certificate)
 		})
 	}
-	h := sha256.Sum256(b.BytesOrPanic())
-	return cacheHash(h[:16])
+	return cacheHash(sha256.Sum256(b.BytesOrPanic()))
 }
 
 type pool struct {
