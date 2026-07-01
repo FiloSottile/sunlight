@@ -116,10 +116,45 @@
       </ul>
 
     <p>
-      Known logs:
+      Witnessed logs:
       <ul>
         {{ range .Witness.Logs }}
         <li><a href="{{ $.Witness.MonitoringPrefix }}/{{ originhash . }}/checkpoint">
+          <code>{{ . }}</code>
+        </a></li>
+        {{ end }}
+      </ul>
+    {{ end }}
+
+    {{ if .Witness.MirrorName }}
+    <hr>
+
+    <p>
+      The following mirror is active.
+    
+    <h2>{{ .Witness.MirrorName }}</h2>
+
+    <p>
+      Submission prefix: <code>{{ .Witness.SubmissionPrefix }}</code>
+    
+    <p>
+      Verifier key:
+
+    <pre><code>{{ .Witness.MirrorVerifierKey }}</code></pre>
+
+    <p>
+      Log list sources:
+      <ul>
+        {{ range .Witness.MirrorLogLists }}
+        <li><a href="{{ . }}">{{ . }}</a></li>
+        {{ end }}
+      </ul>
+
+    <p>
+      Mirrored logs:
+      <ul>
+        {{ range .Witness.MirroredLogs }}
+        <li><a href="{{ $.Witness.MonitoringPrefix }}/mirror/{{ originhash . }}/checkpoint">
           <code>{{ . }}</code>
         </a></li>
         {{ end }}

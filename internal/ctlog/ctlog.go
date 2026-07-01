@@ -875,8 +875,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	if t, ok := edgeTiles[-2]; ok && t.W < sunlight.TileWidth {
 		namesTile = bytes.Clone(t.B)
 	}
-	newHashes := make(map[int64]tlog.Hash)
-	hashReader := l.hashReader(newHashes)
+	hashReader := torchwood.NewHashReaderOverlay(l.tree.N, l.edgeTilesHashReader())
 	n := l.tree.N
 	var sequencedLeaves []*sunlight.LogEntry
 	for _, leaf := range p.pendingLeaves {
@@ -898,13 +897,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		// Compute the new tree hashes and add them to the hashReader overlay
 		// (we will use them later to insert more leaves and finally to produce
 		// the new tiles).
-		hashes, err := tlog.StoredHashes(n, leaf.MerkleTreeLeaf(), hashReader)
-		if err != nil {
+		if err := hashReader.AppendRecordHash(tlog.RecordHash(leaf.MerkleTreeLeaf())); err != nil {
 			return fmtErrorf("couldn't compute new hashes for leaf %d: %w", n, err)
-		}
-		for i, h := range hashes {
-			id := tlog.StoredHashIndex(0, n) + int64(i)
-			newHashes[id] = h
 		}
 
 		n++
@@ -1273,19 +1267,15 @@ func greaseSignatures(name string) []note.Signature {
 	return signatures
 }
 
-// hashReader returns hashes from l.edgeTiles and from overlay.
-func (l *Log) hashReader(overlay map[int64]tlog.Hash) tlog.HashReaderFunc {
+// edgeTilesHashReader returns hashes from l.edgeTiles.
+func (l *Log) edgeTilesHashReader() tlog.HashReaderFunc {
 	return func(indexes []int64) ([]tlog.Hash, error) {
 		list := make([]tlog.Hash, 0, len(indexes))
 		for _, id := range indexes {
-			if h, ok := overlay[id]; ok {
-				list = append(list, h)
-				continue
-			}
 			t := l.edgeTiles[tlog.TileForIndex(sunlight.TileHeight, id).L]
 			h, err := tlog.HashFromTile(t.Tile, t.B, id)
 			if err != nil {
-				return nil, fmt.Errorf("index %d not in overlay and %w", id, err)
+				return nil, fmt.Errorf("index %d not in edge tiles: %w", id, err)
 			}
 			list = append(list, h)
 		}
@@ -1317,5 +1307,12 @@ func fetchAndDecompress(ctx context.Context, backend Backend, key string) ([]byt
 		return nil, err
 	}
 	maxSize := int64(len(data)) * maxCompressRatio
-	return io.ReadAll(io.LimitReader(r, maxSize))
+	b, err := io.ReadAll(io.LimitReader(r, maxSize))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) == int(maxSize) {
+		return nil, fmtErrorf("decompressed data hit maximum size of %d bytes", maxSize)
+	}
+	return b, nil
 }

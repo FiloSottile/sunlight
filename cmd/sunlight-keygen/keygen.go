@@ -30,10 +30,11 @@ func main() {
 	logFlag := fs.String("log", "", "submission prefix for the log")
 	prefixFlag := fs.String("prefix", "", "legacy flag name for -log")
 	witnessFlag := fs.String("witness", "", "witness name")
+	mirrorFlag := fs.String("mirror", "", "mirror name, if -witness is set")
 	jsonFlag := fs.Bool("json", false, "output JSON instead of text")
 	fs.Parse(os.Args[1:])
 	if fs.NArg() != 0 || *fileFlag == "" {
-		fmt.Fprintln(os.Stderr, "usage: sunlight-keygen [-json] -f <seed file> [-log <submission prefix> | -witness <witness name>]")
+		fmt.Fprintln(os.Stderr, "usage: sunlight-keygen [-json] -f <seed file> [-log <submission prefix> | -witness <witness name> [-mirror <mirror name>]]")
 		fs.PrintDefaults()
 		os.Exit(2)
 	}
@@ -124,7 +125,35 @@ func main() {
 			Value:        s.Verifier().String(),
 		})
 
+		if *mirrorFlag != "" {
+			if *mirrorFlag == *witnessFlag {
+				log.Fatal("mirror name must be different from witness name")
+			}
+			mirrorSecret := make([]byte, mldsa.PrivateKeySize)
+			if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight ML-DSA-44 mirror key"),
+				[]byte(*mirrorFlag)), mirrorSecret); err != nil {
+				log.Fatal("failed to derive mirror ML-DSA-44 key:", err)
+			}
+			mirrorKey, err := mldsa.NewPrivateKey(mldsa.MLDSA44(), mirrorSecret)
+			if err != nil {
+				log.Fatal("failed to generate mirror ML-DSA-44 key:", err)
+			}
+			s, err := torchwood.NewCosignatureSigner(*mirrorFlag, mirrorKey)
+			if err != nil {
+				log.Fatal("failed to create mirror signer:", err)
+			}
+			results = append(results, outputLine{
+				JSONKey:      "mirror_vkey_mldsa44",
+				PlaintextKey: "Mirror vkey (ML-DSA-44)",
+				Value:        s.Verifier().String(),
+			})
+		}
+
 		return
+	}
+
+	if *mirrorFlag != "" {
+		log.Fatal("mirror name can only be set when generating a witness key")
 	}
 
 	ecdsaSecret := make([]byte, 32)

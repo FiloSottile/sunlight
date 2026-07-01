@@ -156,6 +156,11 @@ type Config struct {
 		// The HTTP server does NOT serve this endpoint. Instead, it must be
 		// served from the S3 bucket or local directory, for example with
 		// Skylight.
+		//
+		// If the mirror is enabled, its monitoring prefix will be
+		//
+		//    MonitoringPrefix + "/mirror/"
+		//
 		MonitoringPrefix string
 
 		// Secret is the path to a file containing a secret seed from which the
@@ -198,6 +203,22 @@ type Config struct {
 		//
 		// Only one of S3Bucket or LocalDirectory can be set at the same time.
 		LocalDirectory string
+
+		// MirrorName is the cosigner name used for the mirror. If set, the
+		// witness will also act as a c2sp.org/tlog-mirror.
+		MirrorName string
+
+		// MirrorLogLists are the HTTPS URLs or file paths of witness network
+		// log lists. Logs in these lists are allowed to use the mirror
+		// endpoints.
+		//
+		// Logs are pulled from the lists on startup, every 15 minutes, and on
+		// SIGHUP. The lists can only add logs, never remove them or change
+		// their public key.
+		//
+		// Logs can appear in both these lists and LogLists, but their details
+		// must be consistent.
+		MirrorLogLists []string
 	}
 
 	Logs []LogConfig
@@ -535,12 +556,16 @@ func main() {
 		logs[shortName] = li
 	}
 	type witnessInfo struct {
-		Name             string
-		SubmissionPrefix string
-		MonitoringPrefix string
-		VerifierKeys     []string
-		LogLists         []string
-		Logs             []string
+		Name              string
+		MirrorName        string
+		SubmissionPrefix  string
+		MonitoringPrefix  string
+		VerifierKeys      []string
+		MirrorVerifierKey string
+		LogLists          []string
+		MirrorLogLists    []string
+		MirroredLogs      []string
+		Logs              []string
 	}
 	homeWitnessInfo := func() witnessInfo { return witnessInfo{} }
 	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -858,10 +883,31 @@ func main() {
 			fatalError(logger, "failed to generate ML-DSA-44 key", "err", err)
 		}
 
+		if c.Witness.MirrorName == "" && len(c.Witness.MirrorLogLists) > 0 {
+			fatalError(logger, "mirror log lists configured without mirror name")
+		}
+		var mirrorKey *mldsa.PrivateKey
+		if c.Witness.MirrorName != "" {
+			if c.Witness.MirrorName == c.Witness.Name {
+				fatalError(logger, "mirror name must be different from witness name")
+			}
+			mirrorSecret := make([]byte, mldsa.PrivateKeySize)
+			if _, err := io.ReadFull(hkdf.New(sha256.New, seed, []byte("sunlight ML-DSA-44 mirror key"),
+				[]byte(c.Witness.MirrorName)), mirrorSecret); err != nil {
+				fatalError(logger, "failed to derive mirror ML-DSA-44 key", "err", err)
+			}
+			mirrorKey, err = mldsa.NewPrivateKey(mldsa.MLDSA44(), mirrorSecret)
+			if err != nil {
+				fatalError(logger, "failed to generate mirror ML-DSA-44 key", "err", err)
+			}
+		}
+
 		w, err := witness.NewWitness(ctx, &witness.Config{
 			Name:       c.Witness.Name,
+			MirrorName: c.Witness.MirrorName,
 			KeyEd25519: wk,
 			KeyMLDSA44: mk,
+			KeyMirror:  mirrorKey,
 			Backend:    b,
 			Lock:       db,
 			Log:        logger,
@@ -874,8 +920,13 @@ func main() {
 		signal.Notify(reloadChan, syscall.SIGHUP)
 		serveGroup.Go(func() error {
 			for _, url := range c.Witness.LogLists {
-				if err := w.PullLogList(ctx, url); err != nil {
+				if err := w.PullLogList(ctx, url, false); err != nil {
 					logger.Error("failed to pull log list", "list", url, "err", err)
+				}
+			}
+			for _, url := range c.Witness.MirrorLogLists {
+				if err := w.PullLogList(ctx, url, true); err != nil {
+					logger.Error("failed to pull mirror log list", "list", url, "err", err)
 				}
 			}
 			ticker := time.NewTicker(15 * time.Minute)
@@ -887,8 +938,13 @@ func main() {
 				case <-ticker.C:
 				}
 				for _, url := range c.Witness.LogLists {
-					if err := w.PullLogList(ctx, url); err != nil {
+					if err := w.PullLogList(ctx, url, false); err != nil {
 						logger.Error("failed to pull log list", "list", url, "err", err)
+					}
+				}
+				for _, url := range c.Witness.MirrorLogLists {
+					if err := w.PullLogList(ctx, url, true); err != nil {
+						logger.Error("failed to pull mirror log list", "list", url, "err", err)
 					}
 				}
 			}
@@ -923,13 +979,19 @@ func main() {
 		witnessMetrics.MustRegister(w.Metrics()...)
 
 		homeWitnessInfo = func() witnessInfo {
+			logs, mirrored := w.Logs()
+			mirrorVKey, _ := w.MirrorVerifierKey()
 			return witnessInfo{
-				Name:             c.Witness.Name,
-				SubmissionPrefix: c.Witness.SubmissionPrefix,
-				MonitoringPrefix: c.Witness.MonitoringPrefix,
-				VerifierKeys:     w.VerifierKeys(),
-				LogLists:         c.Witness.LogLists,
-				Logs:             w.Logs(),
+				Name:              c.Witness.Name,
+				MirrorName:        c.Witness.MirrorName,
+				SubmissionPrefix:  c.Witness.SubmissionPrefix,
+				MonitoringPrefix:  c.Witness.MonitoringPrefix,
+				VerifierKeys:      w.VerifierKeys(),
+				MirrorVerifierKey: mirrorVKey,
+				LogLists:          c.Witness.LogLists,
+				MirrorLogLists:    c.Witness.MirrorLogLists,
+				MirroredLogs:      mirrored,
+				Logs:              logs,
 			}
 		}
 	}

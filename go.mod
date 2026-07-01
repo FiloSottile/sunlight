@@ -6,7 +6,7 @@ require (
 	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
 	filippo.io/keygen v1.0.0
 	filippo.io/mldsa v0.0.0-20260215214346-43d0283efc3e
-	filippo.io/torchwood v0.9.1-0.20260628201057-6b83027424b9
+	filippo.io/torchwood v0.9.1-0.20260703132741-2e8f9837190e
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.59.0

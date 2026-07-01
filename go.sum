@@ -12,6 +12,8 @@ filippo.io/mldsa v0.0.0-20260215214346-43d0283efc3e h1:VsUbObBMxXlc23Eb9VeeJYE4j
 filippo.io/mldsa v0.0.0-20260215214346-43d0283efc3e/go.mod h1:32qQ5yj3R24Eu03iWFWchdC3OB653wPvoepWejkefbY=
 filippo.io/torchwood v0.9.1-0.20260628201057-6b83027424b9 h1:F/IsmQatt1zKXBXiKKSVhec33UQeAnkXCxnpSophFRw=
 filippo.io/torchwood v0.9.1-0.20260628201057-6b83027424b9/go.mod h1:0PCbID7CT1MlVWx2upf6qN9QFHV1k9lR7PFXAYeExMk=
+filippo.io/torchwood v0.9.1-0.20260703132741-2e8f9837190e h1:1ANBRw5NUEkSDMn74ztEdj90CvLnty6L/JgRw1fWyso=
+filippo.io/torchwood v0.9.1-0.20260703132741-2e8f9837190e/go.mod h1:0PCbID7CT1MlVWx2upf6qN9QFHV1k9lR7PFXAYeExMk=
 github.com/DATA-DOG/go-sqlmock v1.5.2 h1:OcvFkGmslmlZibjAjaHm3L//6LiuBgolP7OputlJIzU=
 github.com/DATA-DOG/go-sqlmock v1.5.2/go.mod h1:88MAG/4G7SMwSE3CeA0ZKzrT5CiOU3OJ+JlNzwDqpNU=
 github.com/aws/aws-sdk-go-v2 v1.42.0 h1:XvXMJTkFQtpBKIWZnmr9ZEOc2InWM2yldjXEJ/bymhA=

@@ -134,7 +134,7 @@ func newTestWitness(t *testing.T, origin, vkey string) *Witness {
 	}
 	// Seed the stored config and the empty checkpoint entry, as PullLogList
 	// would, so NewWitness picks up the log.
-	configJSON := fmt.Appendf(nil, `{"logs":[{"origin":%q,"verifierKeys":[%q]}]}`, origin, vkey)
+	configJSON := fmt.Appendf(nil, `{"log_meta":{%q:{"Verifiers":[%q]}}}`, origin, vkey)
 	fatalIfErr(t, config.Lock.Create(ctx, backendKeyForConfig(config), configJSON))
 	fatalIfErr(t, config.Lock.Create(ctx, backendKeyForCheckpoint(config, origin), nil))
 	w, err := NewWitness(ctx, config)
@@ -636,11 +636,11 @@ func TestForgedWitnessSigLineDoesNotPoisonState(t *testing.T) {
 	// requests can re-open it) and must still carry a valid log signature (so the
 	// witness can prove the checkpoint it cosigned was genuinely log-signed). The
 	// forged line must be gone.
-	lc, ok := w.checkpointForOrigin(origin)
+	lc, ok := w.stateForOrigin(origin)
 	if !ok {
 		t.Fatal("no stored checkpoint for origin")
 	}
-	stored := lc.Bytes()
+	stored := lc.checkpoint.Bytes()
 	if _, err := note.Open(stored, note.VerifierList(w.s1.Verifier())); err != nil {
 		t.Errorf("stored checkpoint does not open with witness verifier: %v", err)
 	}
