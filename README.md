@@ -134,6 +134,38 @@ Each six-months shard will reach approximately 1.5 TB at current rates. It start
 
 You should consider a separate ZFS dataset or object storage bucket for each log, to make it easier to delete it once the log is retired. See, for example, [the Tuscolo ZFS configuration](https://gist.github.com/FiloSottile/989338e6ba8e03f2c699590ce83f537b). However, note that using separate AWS S3 buckets can cause [dynamic scaling issues when traffic moves naturally from one to another](https://groups.google.com/a/chromium.org/g/ct-policy/c/0R43Z58JuzA/m/raeusYYqAAAJ), so you should use a single bucket and delete logs with lifecycle rules if hosting on AWS S3.
 
+### Accepted roots and certificate profiles
+
+By default, Sunlight operates as a TLS Certificate Transparency log. It fetches accepted roots from CCADB, accepts chains for certificates with the `serverAuth` EKU, and publishes `intended_use` in `log.v3.json` according to the configured CCADB root set.
+
+```yaml
+    ccadbroots: trusted # default if roots is not set
+```
+
+For logs with a custom accepted root set, use a PEM file. The file is loaded on startup and reloaded on SIGHUP, and its contents are uploaded to the storage backend as the log's accepted roots.
+
+```yaml
+    roots: /tank/logs/example2025h2/roots.pem
+```
+
+Sunlight can also operate a mark certificate CT log. Mark certificate logs are not TLS server authentication logs: they do not require the `serverAuth` EKU, and instead require the Verified Mark Certificate EKU (`1.3.6.1.5.5.7.3.31`) on submitted leaves. Mark logs intentionally omit `intended_use` from `log.v3.json` to avoid being classified as TLS production or test logs by consumers.
+
+```yaml
+    certificateprofile: mark
+    markrootsurl: https://example.org/ct/v1/get-roots
+```
+
+`markrootsurl` must point at an RFC 6962 `get-roots` endpoint. Sunlight fetches it on startup and every 15 minutes, and reloads it on SIGHUP. If the initial fetch fails and no cached roots exist in the storage backend, startup fails. After roots have been cached, refresh failures keep using the last-known-good root set. A successful refresh treats `markrootsurl` as the source of truth and replaces the persisted roots, including removals.
+
+Public mark certificate logs should usually rely on the VMC EKU plus accepted roots. For private or restricted deployments, `markcertificatepolicies` can require one or more certificate policy OIDs on submitted leaves.
+
+```yaml
+    certificateprofile: mark
+    markrootsurl: https://example.org/ct/v1/get-roots
+    markcertificatepolicies:
+      - 1.2.3.4
+```
+
 ### Hosting the read path
 
 The [Static CT monitoring API](https://github.com/C2SP/C2SP/blob/static-ct-api/v1.0.0/static-ct-api.md#monitoring-apis) can be implemented by simply serving the files uploaded to or stored in the storage backend by Sunlight.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -27,6 +28,22 @@ func loadRoots(ctx context.Context, lc LogConfig, l *ctlog.Log) error {
 		return err
 	}
 	return nil
+}
+
+func loadMarkRoots(ctx context.Context, lc LogConfig, l *ctlog.Log) (newRoots bool, err error) {
+	rootsPEM, err := FetchRFC6962Roots(ctx, lc.MarkRootsURL)
+	if err != nil {
+		return false, err
+	}
+	if bytes.Equal(rootsPEM, l.RootsPEM()) {
+		return false, nil
+	}
+	// MarkRootsURL is treated as the source of truth, so a successful refresh
+	// replaces the persisted root set, including removals from the source.
+	if err := l.SetRootsFromPEM(ctx, rootsPEM); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func loadCCADBRoots(ctx context.Context, lc LogConfig, l *ctlog.Log) (newRoots bool, err error) {
@@ -91,6 +108,51 @@ func loadCCADBRoots(ctx context.Context, lc LogConfig, l *ctlog.Log) (newRoots b
 
 var CCADBClient = &http.Client{
 	Timeout: 10 * time.Second,
+}
+
+var RFC6962RootsClient = &http.Client{
+	Timeout: 10 * time.Second,
+}
+
+func FetchRFC6962Roots(ctx context.Context, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "+https://filippo.io/sunlight")
+	resp, err := RFC6962RootsClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch RFC 6962 roots: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch RFC 6962 roots: %s", resp.Status)
+	}
+
+	var roots struct {
+		Certificates [][]byte `json:"certificates"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&roots); err != nil {
+		return nil, fmt.Errorf("failed to parse RFC 6962 roots response: %w", err)
+	}
+	if len(roots.Certificates) == 0 {
+		return nil, fmt.Errorf("no certificates found in RFC 6962 roots response")
+	}
+	var buf bytes.Buffer
+	for _, der := range roots.Certificates {
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse RFC 6962 root certificate: %w", err)
+		}
+		fmt.Fprintf(&buf, "# %s\n%s\n",
+			cert.Subject.String(),
+			pem.EncodeToMemory(&pem.Block{
+				Type:  "CERTIFICATE",
+				Bytes: cert.Raw,
+			}),
+		)
+	}
+	return buf.Bytes(), nil
 }
 
 func CCADBRoots(ctx context.Context, url string) ([]*x509.Certificate, error) {

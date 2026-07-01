@@ -28,6 +28,7 @@ import (
 	"crawshaw.io/sqlite"
 	"filippo.io/sunlight"
 	ct "github.com/google/certificate-transparency-go"
+	ctasn1 "github.com/google/certificate-transparency-go/asn1"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/cryptobyte"
@@ -107,7 +108,15 @@ type Config struct {
 
 	NotAfterStart time.Time
 	NotAfterLimit time.Time
+
+	CertificateProfile      string
+	MarkCertificatePolicies []ctasn1.ObjectIdentifier
 }
+
+const (
+	CertificateProfileTLS  = "tls"
+	CertificateProfileMark = "mark"
+)
 
 var ErrLogExists = errors.New("checkpoint already exist, refusing to initialize log")
 
