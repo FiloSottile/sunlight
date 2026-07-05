@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -19,8 +21,10 @@ import (
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/immutable"
 	"filippo.io/sunlight/internal/stdlog"
+	"filippo.io/sunlight/internal/witness"
 	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/note"
+	"golang.org/x/mod/sumdb/tlog"
 	"gopkg.in/yaml.v3"
 )
 
@@ -45,7 +49,12 @@ func main() {
 		fatalError(logger, "failed to read config file", "err", err)
 	}
 	var c struct {
-		Logs []LogConfig
+		Logs    []LogConfig
+		Witness struct {
+			// LocalDirectory is the path to a local directory where the witness
+			// will store its public data.
+			LocalDirectory string
+		}
 	}
 	if err := yaml.Unmarshal(yml, &c); err != nil {
 		fatalError(logger, "failed to parse config file", "err", err)
@@ -86,10 +95,64 @@ func main() {
 		}
 		for _, level := range levels {
 			name := filepath.Join("tile", level.Name())
-			if err := cleanDir(ctx, logger, root, name, size); err != nil {
+			if err := cleanDir(ctx, logger, root, name, size, sunlight.ParseTilePath); err != nil {
 				logger.Error("failed to clean directory", "name", name, "err", err)
 				exitCode = 1
 				break
+			}
+		}
+	}
+
+	if c.Witness.LocalDirectory != "" {
+		dir, err := os.ReadDir(filepath.Join(c.Witness.LocalDirectory, "mirror"))
+		if os.IsNotExist(err) {
+			logger.DebugContext(ctx, "witness mirror directory does not exist, skipping")
+		} else if err != nil {
+			fatalError(logger, "failed to read witness mirror directory", "err", err)
+		}
+		for _, entry := range dir {
+			if !entry.IsDir() {
+				continue
+			}
+			logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
+				slog.String("log", entry.Name()),
+			}))
+
+			root, err := os.OpenRoot(filepath.Join(c.Witness.LocalDirectory, "mirror", entry.Name()))
+			if err != nil {
+				logger.Error("failed to open witness mirror directory", "err", err)
+				exitCode = 1
+				continue
+			}
+
+			size, err := mirroredLogSize(root, entry.Name())
+			if errors.Is(err, fs.ErrNotExist) {
+				logger.DebugContext(ctx, "mirror checkpoint does not exist yet, skipping")
+				continue
+			}
+			if err != nil {
+				logger.Error("failed to get mirrored log size", "err", err)
+				exitCode = 1
+				continue
+			}
+
+			levels, err := fs.ReadDir(root.FS(), "tile")
+			if os.IsNotExist(err) {
+				logger.DebugContext(ctx, "tile directory does not exist, skipping")
+				continue
+			}
+			if err != nil {
+				logger.Error("failed to read tile directory", "err", err)
+				exitCode = 1
+				continue
+			}
+			for _, level := range levels {
+				name := filepath.Join("tile", level.Name())
+				if err := cleanDir(ctx, logger, root, name, size, torchwood.ParseTilePath); err != nil {
+					logger.Error("failed to clean directory", "name", name, "err", err)
+					exitCode = 1
+					break
+				}
 			}
 		}
 	}
@@ -102,7 +165,7 @@ var removedFiles int64
 var removedDirs int64
 var removedBytes int64
 
-func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix string, size int64) error {
+func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix string, size int64, parseTilePath func(path string) (tlog.Tile, error)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -118,7 +181,7 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 		name := filepath.Join(prefix, entry.Name())
 
 		if strings.HasPrefix(entry.Name(), "x") {
-			if err := cleanDir(ctx, logger, root, name, size); err != nil {
+			if err := cleanDir(ctx, logger, root, name, size, parseTilePath); err != nil {
 				return err
 			}
 			continue
@@ -136,7 +199,7 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 
 		// Second level of safety: never delete a partial tile at the right edge
 		// of the tree.
-		t, err := sunlight.ParseTilePath(strings.TrimSuffix(name, ".p"))
+		t, err := parseTilePath(strings.TrimSuffix(name, ".p"))
 		if err != nil {
 			return fmt.Errorf("failed to parse tile path %s: %w", name, err)
 		}
@@ -153,7 +216,7 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 			name := filepath.Join(prefix, entry.Name(), partial.Name())
 
 			// Third level of safety: never delete a non-partial tile.
-			t, err := sunlight.ParseTilePath(name)
+			t, err := parseTilePath(name)
 			if err != nil {
 				return fmt.Errorf("failed to parse tile path %s: %w", name, err)
 			}
@@ -251,6 +314,25 @@ func logSize(root *os.Root) (int64, error) {
 	}
 	if checkpoint.Origin != log.Name {
 		return 0, fmt.Errorf("origin mismatch: %q != %q", checkpoint.Origin, log.Name)
+	}
+	return checkpoint.N, nil
+}
+
+func mirroredLogSize(root *os.Root, originHash string) (int64, error) {
+	signedCheckpoint, err := fs.ReadFile(root.FS(), "checkpoint")
+	if err != nil {
+		return 0, fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	sep := bytes.Index(signedCheckpoint, []byte("\n\n"))
+	if sep == -1 {
+		return 0, fmt.Errorf("invalid checkpoint format")
+	}
+	checkpoint, err := torchwood.ParseCheckpoint(string(signedCheckpoint[:sep+1]))
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse checkpoint: %w", err)
+	}
+	if exp := witness.OriginHash(checkpoint.Origin); exp != originHash {
+		return 0, fmt.Errorf("origin hash mismatch: %q != %q", exp, originHash)
 	}
 	return checkpoint.N, nil
 }
