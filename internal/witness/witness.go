@@ -171,7 +171,7 @@ func (w *Witness) nextEntryForOrigin(origin string) (int64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.nextEntry == -1 {
-		return 0, errors.New("internal error: mirror checkpoint not fetched yet")
+		return 0, fmtErrorf("internal error: mirror checkpoint not fetched yet")
 	}
 	return l.nextEntry, nil
 }
@@ -270,7 +270,7 @@ func (l *logState) checkpointLocked(ctx context.Context, w *Witness) (*parsedChe
 		// added to the witness config.
 		lock, err := w.c.Lock.Fetch(ctx, backendKeyForCheckpoint(w.c, l.origin))
 		if err != nil {
-			return nil, errors.New("internal error: couldn't fetch checkpoint for known log")
+			return nil, fmtErrorf("internal error: couldn't fetch checkpoint for known log")
 		}
 		l.checkpoint = lock
 	}
@@ -287,7 +287,7 @@ func (l *logState) mirrorCheckpointLocked(ctx context.Context, w *Witness) (*par
 	if l.mirrorCheckpoint == nil {
 		lock, err := w.c.Lock.Fetch(ctx, backendKeyForMirrorCheckpoint(w.c, l.origin))
 		if err != nil {
-			return nil, 0, errors.New("internal error: couldn't fetch mirror checkpoint for known log")
+			return nil, 0, fmtErrorf("internal error: couldn't fetch mirror checkpoint for known log")
 		}
 		l.mirrorCheckpoint = lock
 	}
@@ -295,8 +295,10 @@ func (l *logState) mirrorCheckpointLocked(ctx context.Context, w *Witness) (*par
 	if err != nil {
 		return nil, 0, err
 	}
+	w.m.MirrorSize.WithLabelValues(l.origin).Set(float64(p.N))
 	if l.nextEntry == -1 {
 		l.nextEntry = p.N
+		w.m.MirrorNextEntry.WithLabelValues(l.origin).Set(float64(p.N))
 	}
 	return p, l.nextEntry, nil
 }
@@ -320,14 +322,14 @@ func (w *Witness) openCheckpoint(origin string, lock ctlog.LockedCheckpoint, v n
 
 	n, err := note.Open(checkpoint, v)
 	if err != nil {
-		return nil, errors.New("internal error: can't open stored checkpoint")
+		return nil, fmtErrorf("internal error: can't open stored checkpoint")
 	}
 	c, err := torchwood.ParseCheckpoint(n.Text)
 	if err != nil {
-		return nil, errors.New("internal error: can't parse stored checkpoint")
+		return nil, fmtErrorf("internal error: can't parse stored checkpoint")
 	}
 	if c.Origin != origin {
-		return nil, errors.New("internal error: incoherent stored checkpoint")
+		return nil, fmtErrorf("internal error: incoherent stored checkpoint")
 	}
 	return &parsedCheckpoint{
 		Checkpoint:     c,
@@ -396,6 +398,7 @@ func NewWitness(ctx context.Context, config *Config) (*Witness, error) {
 	}
 
 	w.m.KnownLogs.Set(float64(len(stored.Logs)))
+	w.m.MirroredLogs.Set(float64(countMirrored(w.meta)))
 	config.Log.InfoContext(ctx, "starting witness", "name", config.Name, "logs", len(stored.Logs))
 	return w, nil
 }
@@ -411,7 +414,25 @@ func (w *Witness) MirrorVerifierKey() (string, bool) {
 	return w.sm.Verifier().String(), true
 }
 
-func (w *Witness) PullLogList(ctx context.Context, url string, mirror bool) error {
+func countMirrored(meta map[string]logMeta) int {
+	var mirrored int
+	for _, l := range meta {
+		if l.Mirror {
+			mirrored++
+		}
+	}
+	return mirrored
+}
+
+func (w *Witness) PullLogList(ctx context.Context, url string, mirror bool) (err error) {
+	defer func() {
+		if err != nil {
+			w.m.ListPullErrors.WithLabelValues(url).Inc()
+		} else {
+			w.m.ListPullTime.WithLabelValues(url).SetToCurrentTime()
+		}
+	}()
+
 	if mirror && w.sm == nil {
 		return fmt.Errorf("mirror log list provided but mirror is not configured")
 	}
@@ -527,6 +548,7 @@ func (w *Witness) PullLogList(ctx context.Context, url string, mirror bool) erro
 	}
 	w.meta = newMeta
 	w.m.KnownLogs.Set(float64(len(newMeta)))
+	w.m.MirroredLogs.Set(float64(countMirrored(newMeta)))
 	return nil
 }
 
@@ -542,6 +564,7 @@ func (w *Witness) Handler() http.Handler {
 	addEntries := http.Handler(http.HandlerFunc(w.serveAddEntries))
 	addEntries = promhttp.InstrumentHandlerCounter(w.m.ReqCount.MustCurryWith(addEntriesLabels), addEntries)
 	addEntries = promhttp.InstrumentHandlerDuration(w.m.ReqDuration.MustCurryWith(addEntriesLabels), addEntries)
+	addEntries = promhttp.InstrumentHandlerRequestSize(w.m.ReqSize.MustCurryWith(addEntriesLabels), addEntries)
 	addEntries = promhttp.InstrumentHandlerInFlight(w.m.ReqInFlight.With(addEntriesLabels), addEntries)
 	// One worst-case entry package is 256 * 64 KiB plus the proof.
 	addEntries = http.MaxBytesHandler(addEntries, 20*1024*1024)
@@ -569,16 +592,16 @@ func (*mirrorConflictError) Error() string {
 	return "mirror log state doesn't match provided start/end"
 }
 
-var errUnknownLog = errors.New("unknown log")
-var errInvalidSignature = errors.New("invalid signature")
-var errBadRequest = errors.New("invalid input")
-var errBadCheckpoint = errors.New("invalid checkpoint")
-var errExtensions = errors.New("invalid checkpoint: extension lines are not supported")
-var errProof = errors.New("bad consistency proof")
-var errNotMirrored = errors.New("log is not mirrored")
-var errNoPendingCheckpoint = errors.New("no pending checkpoint for log")
-var errInvalidProof = errors.New("invalid proof")
-var errMissingBody = errors.New("missing or truncated request body")
+var errUnknownLog = fmtErrorf("unknown log")
+var errInvalidSignature = fmtErrorf("invalid signature")
+var errBadRequest = fmtErrorf("invalid input")
+var errBadCheckpoint = fmtErrorf("invalid checkpoint")
+var errExtensions = fmtErrorf("invalid checkpoint: extension lines are not supported")
+var errProof = fmtErrorf("bad consistency proof")
+var errNotMirrored = fmtErrorf("log is not mirrored")
+var errNoPendingCheckpoint = fmtErrorf("no pending checkpoint for log")
+var errInvalidProof = fmtErrorf("invalid proof")
+var errMissingBody = fmtErrorf("missing or truncated request body")
 
 // emptyTreeHash is the root hash of a tree of size zero: the hash of the empty
 // string, per RFC 6962, Section 2.1.
@@ -636,7 +659,7 @@ func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) 
 	labels := prometheus.Labels{"error": "", "origin": "", "progress": ""}
 	defer func() {
 		if err != nil {
-			labels["error"] = err.Error()
+			labels["error"] = errorLabel(err)
 		}
 		w.m.AddCheckpointCount.With(labels).Inc()
 	}()
@@ -682,7 +705,7 @@ func (w *Witness) processAddCheckpointRequest(ctx context.Context, body []byte) 
 		return nil, errBadCheckpoint
 	}
 	if origin != c.Origin {
-		return nil, errors.New("internal error: incoherent parsing")
+		return nil, fmtErrorf("internal error: incoherent parsing")
 	}
 	if c.Extension != "" {
 		return nil, errExtensions
@@ -700,7 +723,7 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 
 	l, ok := w.stateForOrigin(origin)
 	if !ok {
-		return nil, errors.New("internal error: lock not found for known log")
+		return nil, fmtErrorf("internal error: lock not found for known log")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -741,11 +764,11 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 		// Don't return the error here and below, to avoid leaking the signature
 		// before the backend compare-and-swap succeeds, which is the ultimate
 		// check against concurrent signers and locking bugs.
-		return nil, errors.New("internal error: failed to sign note")
+		return nil, fmtErrorf("internal error: failed to sign note")
 	}
 	sigs, err := splitSignatures(signed, w.s1.Verifier().Name())
 	if err != nil {
-		return nil, errors.New("internal error: produced invalid note")
+		return nil, fmtErrorf("internal error: produced invalid note")
 	}
 
 	// It is utterly impossible for l.checkpoint to be different from known,
@@ -753,13 +776,13 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 	// Still, defend against the worst possible bug and avoid weakening the
 	// compare-and-swap semantics.
 	if !bytes.Equal(l.checkpoint.Bytes(), known.Bytes) {
-		return nil, errors.New("internal error: checkpoint changed while holding lock")
+		return nil, fmtErrorf("internal error: checkpoint changed while holding lock")
 	}
 	newLock, err := w.c.Lock.Replace(ctx, l.checkpoint, signed)
 	if err != nil {
 		// We don't know if it was persisted, let it be re-fetched at the next update.
 		l.checkpoint = nil
-		return nil, errors.New("internal error: failed to store new checkpoint")
+		return nil, fmtErrorf("internal error: failed to store new checkpoint")
 	}
 	l.checkpoint = newLock
 
@@ -772,7 +795,7 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 		// the outside world, because it would not be visible to monitors.
 		//
 		// Clients can hit the 409 path to get the signature again.
-		return nil, fmt.Errorf("internal error: failed to upload new checkpoint to backend: %w", err)
+		return nil, fmtErrorf("internal error: failed to upload new checkpoint to backend: %w", err)
 	}
 
 	w.m.LogSize.WithLabelValues(origin).Set(float64(newSize))
@@ -811,8 +834,17 @@ var testingOnlyBeforeAddEntriesPackage func(start int64)
 const addEntriesTimeout = 5 * time.Minute
 
 func (w *Witness) serveAddEntries(rw http.ResponseWriter, r *http.Request) {
+	labels := prometheus.Labels{"error": "", "origin": ""}
+	defer func() {
+		w.m.AddEntriesCount.With(labels).Inc()
+	}()
+	httpError := func(error string, code int) {
+		labels["error"] = error
+		http.Error(rw, error, code)
+	}
+
 	if r.Header.Get("Content-Type") != "application/octet-stream" {
-		http.Error(rw, "invalid content type", http.StatusUnsupportedMediaType)
+		httpError("invalid content type", http.StatusUnsupportedMediaType)
 		return
 	}
 
@@ -833,7 +865,7 @@ func (w *Witness) serveAddEntries(rw http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Content-Encoding") == "gzip" {
 		gz, err := gzip.NewReader(r.Body)
 		if err != nil {
-			http.Error(rw, "failed to create gzip reader", http.StatusBadRequest)
+			httpError("failed to create gzip reader", http.StatusBadRequest)
 			return
 		}
 		defer gz.Close()
@@ -842,30 +874,37 @@ func (w *Witness) serveAddEntries(rw http.ResponseWriter, r *http.Request) {
 
 	origin, err := readUint16LengthPrefixed(body)
 	if err != nil || len(origin) == 0 {
-		http.Error(rw, "failed to read origin", http.StatusBadRequest)
+		httpError("failed to read origin", http.StatusBadRequest)
 		return
 	}
 	uploadStart, err := readUint64(body)
 	if err != nil {
-		http.Error(rw, "failed to read upload start", http.StatusBadRequest)
+		httpError("failed to read upload start", http.StatusBadRequest)
 		return
 	}
 	uploadEnd, err := readUint64(body)
 	if err != nil {
-		http.Error(rw, "failed to read upload end", http.StatusBadRequest)
+		httpError("failed to read upload end", http.StatusBadRequest)
 		return
 	}
 	if uploadEnd < uploadStart {
-		http.Error(rw, "upload end must be >= upload start", http.StatusBadRequest)
+		httpError("upload end must be >= upload start", http.StatusBadRequest)
 		return
 	}
 	ticket, err := readUint16LengthPrefixed(body)
 	if err != nil {
-		http.Error(rw, "failed to read ticket", http.StatusBadRequest)
+		httpError("failed to read ticket", http.StatusBadRequest)
 		return
 	}
 
 	pending, err := w.processAddEntriesMetadata(ctx, string(origin), uploadStart, uploadEnd, ticket)
+	if err != errUnknownLog {
+		// Known origins are a bounded label set, unknown ones are not.
+		labels["origin"] = string(origin)
+	}
+	if err != nil {
+		labels["error"] = errorLabel(err)
+	}
 	switch err {
 	case errUnknownLog, errNoPendingCheckpoint:
 		http.Error(rw, err.Error(), http.StatusNotFound)
@@ -885,6 +924,9 @@ func (w *Witness) serveAddEntries(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	err = w.processAddEntriesPackages(ctx, body, uploadStart, uploadEnd, pending)
+	if err != nil {
+		labels["error"] = errorLabel(err)
+	}
 	switch err {
 	case errMissingBody, errBadRequest:
 		http.Error(rw, err.Error(), http.StatusBadRequest)
@@ -907,6 +949,9 @@ func (w *Witness) serveAddEntries(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	sigs, err := w.processAddEntriesCommit(ctx, pending)
+	if err != nil {
+		labels["error"] = errorLabel(err)
+	}
 	if errors.As(err, &mirrorConflict) {
 		httpErrorMirrorInfo(rw, mirrorConflict, http.StatusConflict)
 		return
@@ -942,24 +987,24 @@ func (w *Witness) processAddEntriesMetadata(ctx context.Context, origin string, 
 
 	pendingCheckpoint, err := l.checkpointLocked(ctx, w)
 	if err != nil {
-		return nil, errors.New("internal error: couldn't fetch checkpoint for known log")
+		return nil, fmtErrorf("internal error: couldn't fetch checkpoint for known log")
 	}
 	if len(pendingCheckpoint.Bytes) == 0 {
 		return nil, errNoPendingCheckpoint
 	}
 	mirrorCheckpoint, nextEntry, err := l.mirrorCheckpointLocked(ctx, w)
 	if err != nil {
-		return nil, errors.New("internal error: couldn't fetch mirror checkpoint for known log")
+		return nil, fmtErrorf("internal error: couldn't fetch mirror checkpoint for known log")
 	}
 
 	if mirrorCheckpoint.N > pendingCheckpoint.N {
-		return nil, errors.New("internal error: mirror checkpoint is ahead of pending checkpoint")
+		return nil, fmtErrorf("internal error: mirror checkpoint is ahead of pending checkpoint")
 	}
 	if mirrorCheckpoint.N > nextEntry {
-		return nil, errors.New("internal error: mirror checkpoint is ahead of next entry")
+		return nil, fmtErrorf("internal error: mirror checkpoint is ahead of next entry")
 	}
 	if nextEntry > pendingCheckpoint.N {
-		return nil, errors.New("internal error: next entry is ahead of pending checkpoint")
+		return nil, fmtErrorf("internal error: next entry is ahead of pending checkpoint")
 	}
 
 	if uploadEnd < mirrorCheckpoint.N {
@@ -1016,12 +1061,12 @@ func (w *Witness) mirrorConflict(pending *parsedCheckpoint, nextEntry int64) err
 func (w *Witness) mirrorConflictNext(ctx context.Context, resolved *parsedCheckpoint) error {
 	l, ok := w.stateForOrigin(resolved.Origin)
 	if !ok {
-		return errors.New("internal error: lock not found for known log")
+		return fmtErrorf("internal error: lock not found for known log")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.nextEntry == -1 {
-		return errors.New("internal error: mirror checkpoint not fetched yet")
+		return fmtErrorf("internal error: mirror checkpoint not fetched yet")
 	}
 	if l.nextEntry <= resolved.N {
 		// The client can continue the upload with the proofs it computed.
@@ -1031,7 +1076,7 @@ func (w *Witness) mirrorConflictNext(ctx context.Context, resolved *parsedCheckp
 	// fresh pending checkpoint.
 	pending, err := l.checkpointLocked(ctx, w)
 	if err != nil {
-		return errors.New("internal error: couldn't fetch checkpoint for known log")
+		return fmtErrorf("internal error: couldn't fetch checkpoint for known log")
 	}
 	return w.mirrorConflict(pending, l.nextEntry)
 }
@@ -1071,7 +1116,7 @@ func (w *Witness) verifyTicket(origin string, ticket []byte) (*parsedCheckpoint,
 
 func (w *Witness) processAddEntriesPackages(ctx context.Context, r io.Reader, uploadStart, uploadEnd int64, pending *parsedCheckpoint) error {
 	if uploadEnd != pending.N {
-		return fmt.Errorf("internal error: upload end %d does not match pending checkpoint size %d", uploadEnd, pending.N)
+		return fmtErrorf("internal error: upload end does not match pending checkpoint size: %d != %d", uploadEnd, pending.N)
 	}
 
 	if uploadStart == uploadEnd {
@@ -1129,6 +1174,7 @@ func (w *Witness) processAddEntriesPackages(ctx context.Context, r io.Reader, up
 		}
 
 		var entries [][]byte
+		entryBytes := w.m.MirrorEntryBytes.WithLabelValues(pending.Origin)
 		for range end - start {
 			entry, err := readUint16LengthPrefixed(r)
 			if err != nil {
@@ -1138,6 +1184,7 @@ func (w *Witness) processAddEntriesPackages(ctx context.Context, r io.Reader, up
 					return w.mirrorConflictNext(ctx, pending)
 				}
 			}
+			entryBytes.Observe(float64(len(entry)))
 			entries = append(entries, entry)
 		}
 
@@ -1179,18 +1226,18 @@ func (w *Witness) processAddEntriesPackage(ctx context.Context, hashReader *torc
 		var err error
 		entries, err = w.completeTileFromBackend(ctx, pending.Origin, entries, tileStart, end)
 		if err != nil {
-			return fmt.Errorf("failed to complete tile from backend: %w", err)
+			return fmtErrorf("failed to complete tile from backend: %w", err)
 		}
 	}
 
 	for _, entry := range entries {
 		if err := hashReader.AppendRecordHash(tlog.RecordHash(entry)); err != nil {
-			return fmt.Errorf("failed to append record hash: %w", err)
+			return fmtErrorf("failed to append record hash: %w", err)
 		}
 	}
 	subtreeHash, err := torchwood.SubtreeHash(tileStart, end, hashReader)
 	if err != nil {
-		return fmt.Errorf("failed to produce subtree hash: %w", err)
+		return fmtErrorf("failed to produce subtree hash: %w", err)
 	}
 	if err := torchwood.CheckSubtree(proof, pending.N, pending.Hash,
 		tileStart, end, subtreeHash); err != nil {
@@ -1203,41 +1250,49 @@ func (w *Witness) processAddEntriesPackage(ctx context.Context, hashReader *torc
 			dataTile := tile
 			dataTile.L = -1
 			if dataTile.N != tileStart/256 || dataTile.W != len(entries) {
-				return fmt.Errorf("internal error: data tile %v does not match expected tile start %d and width %d", dataTile, tileStart/256, len(entries))
+				return fmtErrorf("internal error: data tile does not match expected tile start and width: %v, %d, %d", dataTile, tileStart/256, len(entries))
 			}
 			var data []byte
 			for _, entry := range entries {
 				data, err = torchwood.AppendTileEntry(data, entry)
 				if err != nil {
-					return fmt.Errorf("failed to append tile entry: %w", err)
+					return fmtErrorf("failed to append tile entry: %w", err)
 				}
 			}
 			backendKey := "mirror/" + OriginHash(pending.Origin) + "/" + torchwood.TilePath(dataTile)
+			w.m.MirrorDataTileSize.WithLabelValues(pending.Origin).Observe(float64(len(data)))
 			data, err = compress(data)
 			if err != nil {
-				return fmt.Errorf("failed to compress data tile: %w", err)
+				return fmtErrorf("failed to compress data tile: %w", err)
 			}
+			w.m.MirrorDataTileGzipSize.WithLabelValues(pending.Origin).Observe(float64(len(data)))
 			if err := w.c.Backend.Upload(ctx, backendKey, data, optsDataTile); err != nil {
-				return fmt.Errorf("failed to upload data tile %q: %w", backendKey, err)
+				return fmtErrorf("failed to upload data tile %q: %w", backendKey, err)
 			}
+			w.m.MirrorTiles.WithLabelValues(pending.Origin, "false").Inc()
 		}
 		data, err := tlog.ReadTileData(tile, hashReader)
 		if err != nil {
-			return fmt.Errorf("failed to read tile data: %w", err)
+			return fmtErrorf("failed to read tile data: %w", err)
 		}
 		backendKey := "mirror/" + OriginHash(pending.Origin) + "/" + torchwood.TilePath(tile)
 		if err := w.c.Backend.Upload(ctx, backendKey, data, optsHashTile); err != nil {
-			return fmt.Errorf("failed to upload tile %q: %w", backendKey, err)
+			return fmtErrorf("failed to upload tile %q: %w", backendKey, err)
 		}
+		w.m.MirrorTiles.WithLabelValues(pending.Origin, "false").Inc()
 	}
 
 	l, ok := w.stateForOrigin(pending.Origin)
 	if !ok {
-		return errors.New("internal error: lock not found for known log")
+		return fmtErrorf("internal error: lock not found for known log")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.nextEntry = max(l.nextEntry, end)
+	if end > l.nextEntry {
+		w.m.MirrorEntries.WithLabelValues(pending.Origin).Add(float64(end - l.nextEntry))
+		w.m.MirrorNextEntry.WithLabelValues(pending.Origin).Set(float64(end))
+		l.nextEntry = end
+	}
 
 	return nil
 }
@@ -1265,10 +1320,10 @@ func (w *Witness) completeTileFromBackend(ctx context.Context, origin string, en
 	// committed (which the next entry resets to on restart).
 	nextEntry, err := w.nextEntryForOrigin(origin)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get next entry for origin %q: %w", origin, err)
+		return nil, fmtErrorf("failed to get next entry for origin %q: %w", origin, err)
 	}
 	if nextEntry <= tileStart {
-		return nil, fmt.Errorf("internal error: next entry %d is not after tile start %d", nextEntry, tileStart)
+		return nil, fmtErrorf("internal error: next entry is not after tile start: %d <= %d", nextEntry, tileStart)
 	}
 	if nextEntry < tileStart+256 {
 		tile.W = int(nextEntry - tileStart)
@@ -1277,7 +1332,7 @@ func (w *Witness) completeTileFromBackend(ctx context.Context, origin string, en
 	backendKey := "mirror/" + OriginHash(origin) + "/" + torchwood.TilePath(tile)
 	data, err := fetchAndDecompress(ctx, w.c.Backend, backendKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch and decompress tile %q: %w", backendKey, err)
+		return nil, fmtErrorf("failed to fetch and decompress tile %q: %w", backendKey, err)
 	}
 
 	need := int(end-tileStart) - len(entries)
@@ -1286,7 +1341,7 @@ func (w *Witness) completeTileFromBackend(ctx context.Context, origin string, en
 		var entry []byte
 		entry, data, err = torchwood.ReadTileEntry(data)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read entry from tile %q: %w", backendKey, err)
+			return nil, fmtErrorf("failed to read entry from tile %q: %w", backendKey, err)
 		}
 		allEntries = append(allEntries, entry)
 	}
@@ -1297,31 +1352,31 @@ func (w *Witness) completeTileFromBackend(ctx context.Context, origin string, en
 func (w *Witness) processAddEntriesCommit(ctx context.Context, pending *parsedCheckpoint) ([]byte, error) {
 	l, ok := w.stateForOrigin(pending.Origin)
 	if !ok {
-		return nil, errors.New("internal error: lock not found for known log")
+		return nil, fmtErrorf("internal error: lock not found for known log")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	mirrorCheckpoint, nextEntry, err := l.mirrorCheckpointLocked(ctx, w)
 	if err != nil {
-		return nil, errors.New("internal error: couldn't fetch mirror checkpoint for known log")
+		return nil, fmtErrorf("internal error: couldn't fetch mirror checkpoint for known log")
 	}
 	if nextEntry < pending.N {
-		return nil, errors.New("internal error: next entry is behind upload end")
+		return nil, fmtErrorf("internal error: next entry is behind upload end")
 	}
 	if pending.Origin != mirrorCheckpoint.Origin || pending.Origin != l.origin {
-		return nil, errors.New("internal error: incoherent mirror checkpoint")
+		return nil, fmtErrorf("internal error: incoherent mirror checkpoint")
 	}
 	if pending.N < mirrorCheckpoint.N {
 		newPending, err := l.checkpointLocked(ctx, w)
 		if err != nil {
-			return nil, errors.New("internal error: couldn't fetch checkpoint for known log")
+			return nil, fmtErrorf("internal error: couldn't fetch checkpoint for known log")
 		}
 		return nil, w.mirrorConflict(newPending, nextEntry)
 	}
 
 	if err := w.ensureCutTiles(ctx, pending, nextEntry); err != nil {
-		return nil, fmt.Errorf("internal error: failed to ensure checkpoint cut tiles: %w", err)
+		return nil, fmtErrorf("internal error: failed to ensure checkpoint cut tiles: %w", err)
 	}
 
 	// Same as [Witness.updateCheckpoint], sign a re-encoding of what we
@@ -1331,11 +1386,11 @@ func (w *Witness) processAddEntriesCommit(ctx context.Context, pending *parsedCh
 	if err != nil {
 		// Same as [Witness.updateCheckpoint], avoid leaking the signature until
 		// we persisted the checkpoint.
-		return nil, errors.New("internal error: failed to sign note")
+		return nil, fmtErrorf("internal error: failed to sign note")
 	}
 	sigs, err := splitSignatures(signed, w.sm.Verifier().Name())
 	if err != nil {
-		return nil, errors.New("internal error: produced invalid note")
+		return nil, fmtErrorf("internal error: produced invalid note")
 	}
 
 	// Here we partially defeat the compare-and-swap semantics of the
@@ -1345,13 +1400,14 @@ func (w *Witness) processAddEntriesCommit(ctx context.Context, pending *parsedCh
 	if err != nil {
 		// We don't know if it was persisted, let it be re-fetched at the next update.
 		l.mirrorCheckpoint = nil
-		return nil, errors.New("internal error: failed to store new checkpoint")
+		return nil, fmtErrorf("internal error: failed to store new checkpoint")
 	}
 	l.mirrorCheckpoint = newLock
+	w.m.MirrorSize.WithLabelValues(pending.Origin).Set(float64(pending.N))
 
 	backendKey := "mirror/" + OriginHash(pending.Origin) + "/checkpoint"
 	if err := w.c.Backend.Upload(ctx, backendKey, signed, optsCheckpoint); err != nil {
-		return nil, fmt.Errorf("internal error: failed to upload new checkpoint to backend: %w", err)
+		return nil, fmtErrorf("internal error: failed to upload new checkpoint to backend: %w", err)
 	}
 
 	return sigs, nil
@@ -1380,18 +1436,18 @@ func (w *Witness) ensureCutTiles(ctx context.Context, pending *parsedCheckpoint,
 	widestKey := "mirror/" + OriginHash(pending.Origin) + "/" + torchwood.TilePath(widestTile)
 	data, err := fetchAndDecompress(ctx, w.c.Backend, widestKey)
 	if err != nil {
-		return fmt.Errorf("failed to fetch and decompress tile %q: %w", widestKey, err)
+		return fmtErrorf("failed to fetch and decompress tile %q: %w", widestKey, err)
 	}
 	var cutData, cutHashes []byte
 	for range cutW {
 		var entry []byte
 		entry, data, err = torchwood.ReadTileEntry(data)
 		if err != nil {
-			return fmt.Errorf("failed to read entry from tile %q: %w", widestKey, err)
+			return fmtErrorf("failed to read entry from tile %q: %w", widestKey, err)
 		}
 		cutData, err = torchwood.AppendTileEntry(cutData, entry)
 		if err != nil {
-			return fmt.Errorf("failed to append tile entry: %w", err)
+			return fmtErrorf("failed to append tile entry: %w", err)
 		}
 		h := tlog.RecordHash(entry)
 		cutHashes = append(cutHashes, h[:]...)
@@ -1399,18 +1455,22 @@ func (w *Witness) ensureCutTiles(ctx context.Context, pending *parsedCheckpoint,
 
 	dataTile := hashTile
 	dataTile.L = -1
+	w.m.MirrorDataTileSize.WithLabelValues(pending.Origin).Observe(float64(len(cutData)))
 	cutData, err = compress(cutData)
 	if err != nil {
-		return fmt.Errorf("failed to compress data tile: %w", err)
+		return fmtErrorf("failed to compress data tile: %w", err)
 	}
+	w.m.MirrorDataTileGzipSize.WithLabelValues(pending.Origin).Observe(float64(len(cutData)))
 	dataKey := "mirror/" + OriginHash(pending.Origin) + "/" + torchwood.TilePath(dataTile)
 	if err := w.c.Backend.Upload(ctx, dataKey, cutData, optsDataTile); err != nil {
-		return fmt.Errorf("failed to upload data tile %q: %w", dataKey, err)
+		return fmtErrorf("failed to upload data tile %q: %w", dataKey, err)
 	}
+	w.m.MirrorTiles.WithLabelValues(pending.Origin, "true").Inc()
 
 	if err := w.c.Backend.Upload(ctx, hashKey, cutHashes, optsHashTile); err != nil {
-		return fmt.Errorf("failed to upload tile %q: %w", hashKey, err)
+		return fmtErrorf("failed to upload tile %q: %w", hashKey, err)
 	}
+	w.m.MirrorTiles.WithLabelValues(pending.Origin, "true").Inc()
 
 	return nil
 }
