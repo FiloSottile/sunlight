@@ -560,6 +560,13 @@ func (w *Witness) Handler() http.Handler {
 	addCheckpoint = promhttp.InstrumentHandlerInFlight(w.m.ReqInFlight.With(addCheckpointLabels), addCheckpoint)
 	addCheckpoint = http.MaxBytesHandler(addCheckpoint, 128*1024)
 
+	signSubtreeLabels := prometheus.Labels{"endpoint": "sign-subtree"}
+	signSubtree := http.Handler(http.HandlerFunc(w.serveSignSubtree))
+	signSubtree = promhttp.InstrumentHandlerCounter(w.m.ReqCount.MustCurryWith(signSubtreeLabels), signSubtree)
+	signSubtree = promhttp.InstrumentHandlerDuration(w.m.ReqDuration.MustCurryWith(signSubtreeLabels), signSubtree)
+	signSubtree = promhttp.InstrumentHandlerInFlight(w.m.ReqInFlight.With(signSubtreeLabels), signSubtree)
+	signSubtree = http.MaxBytesHandler(signSubtree, 128*1024)
+
 	addEntriesLabels := prometheus.Labels{"endpoint": "add-entries"}
 	addEntries := http.Handler(http.HandlerFunc(w.serveAddEntries))
 	addEntries = promhttp.InstrumentHandlerCounter(w.m.ReqCount.MustCurryWith(addEntriesLabels), addEntries)
@@ -572,6 +579,8 @@ func (w *Witness) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /add-checkpoint", addCheckpoint)
 	mux.Handle("OPTIONS /add-checkpoint", addCheckpoint)
+	mux.Handle("POST /sign-subtree", signSubtree)
+	mux.Handle("OPTIONS /sign-subtree", signSubtree)
 	mux.Handle("POST /add-entries", addEntries)
 	return mux
 }
@@ -800,6 +809,160 @@ func (w *Witness) updateCheckpoint(ctx context.Context, origin string,
 
 	w.m.LogSize.WithLabelValues(origin).Set(float64(newSize))
 
+	return sigs, nil
+}
+
+func (w *Witness) serveSignSubtree(rw http.ResponseWriter, r *http.Request) {
+	rw.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == http.MethodOptions {
+		rw.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		rw.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.c.Log.DebugContext(r.Context(), "error reading request body", "error", err)
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cosig, err := w.processSignSubtreeRequest(r.Context(), body)
+	switch err {
+	case errUnknownLog:
+		http.Error(rw, err.Error(), http.StatusNotFound)
+		return
+	case errInvalidSignature:
+		http.Error(rw, err.Error(), http.StatusForbidden)
+		return
+	case errBadRequest, errBadCheckpoint, errExtensions:
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	case errProof:
+		http.Error(rw, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := rw.Write(cosig); err != nil {
+		w.c.Log.DebugContext(r.Context(), "error writing response", "error", err)
+	}
+}
+
+func (w *Witness) processSignSubtreeRequest(ctx context.Context, body []byte) (cosig []byte, err error) {
+	labels := prometheus.Labels{"error": "", "origin": ""}
+	defer func() {
+		if err != nil {
+			labels["error"] = errorLabel(err)
+		}
+		w.m.SignSubtreeCount.With(labels).Inc()
+	}()
+	body, noteBytes, ok := bytes.Cut(body, []byte("\n\n"))
+	if !ok {
+		return nil, errBadRequest
+	}
+	lines := strings.Split(string(body), "\n")
+	if len(lines) < 2 {
+		return nil, errBadRequest
+	}
+	startEnd, ok := strings.CutPrefix(lines[0], "subtree ")
+	if !ok {
+		return nil, errBadRequest
+	}
+	startString, endString, ok := strings.Cut(startEnd, " ")
+	if !ok {
+		return nil, errBadRequest
+	}
+	start, err := strconv.ParseInt(startString, 10, 64)
+	if err != nil || start < 0 || startString != strconv.FormatInt(start, 10) {
+		return nil, errBadRequest
+	}
+	end, err := strconv.ParseInt(endString, 10, 64)
+	if err != nil || end < 0 || endString != strconv.FormatInt(end, 10) {
+		return nil, errBadRequest
+	}
+	if !torchwood.ValidSubtree(start, end) {
+		return nil, errBadRequest
+	}
+	subtreeHash, err := tlog.ParseHash(lines[1])
+	if err != nil {
+		return nil, errBadRequest
+	}
+	proof := make(torchwood.SubtreeProof, len(lines[2:]))
+	for i, h := range lines[2:] {
+		proof[i], err = tlog.ParseHash(h)
+		if err != nil {
+			return nil, errBadRequest
+		}
+	}
+	origin, _, _ := strings.Cut(string(noteBytes), "\n")
+
+	if _, ok := w.metaForOrigin(origin); !ok {
+		return nil, errUnknownLog
+	}
+	labels["origin"] = origin
+
+	verifiers := []note.Verifier{w.s2.Verifier()}
+	if w.sm != nil {
+		verifiers = append(verifiers, w.sm.Verifier())
+	}
+	n, err := note.Open(noteBytes, note.VerifierList(verifiers...))
+	switch err.(type) {
+	case *note.UnverifiedNoteError, *note.InvalidSignatureError:
+		return nil, errInvalidSignature
+	}
+	if err != nil {
+		return nil, errBadRequest
+	}
+	c, err := torchwood.ParseCheckpoint(n.Text)
+	if err != nil {
+		return nil, errBadCheckpoint
+	}
+	if origin != c.Origin {
+		return nil, fmtErrorf("internal error: incoherent parsing")
+	}
+	if c.Extension != "" {
+		return nil, errExtensions
+	}
+	if c.N < end {
+		return nil, errBadRequest
+	}
+
+	if torchwood.CheckSubtree(proof, c.N, c.Hash, start, end, subtreeHash) != nil {
+		return nil, errProof
+	}
+
+	var signers []*torchwood.CosignatureSigner
+	for _, sig := range n.Sigs {
+		if w.s2.Name() == sig.Name && w.s2.KeyHash() == sig.Hash {
+			signers = append(signers, w.s2)
+		}
+		if w.sm != nil && w.sm.Name() == sig.Name && w.sm.KeyHash() == sig.Hash {
+			signers = append(signers, w.sm)
+		}
+	}
+	var sigs []byte
+	for _, s := range signers {
+		// Safety check, for each signer we are about to use, we re-verify the
+		// signature on the re-serialized checkpoint using only its verifier.
+		noteSigs, err := splitSignatures(noteBytes, s.Name())
+		if err != nil {
+			return nil, fmtErrorf("internal error: failed to split signatures for signer %q", s.Name())
+		}
+		n := []byte(c.String())
+		n = append(n, []byte("\n")...)
+		n = append(n, noteSigs...)
+		if _, err := note.Open(n, note.VerifierList(s.Verifier())); err != nil {
+			return nil, fmtErrorf("internal error: failed to re-verify signature for signer %q", s.Name())
+		}
+
+		sig, err := s.SignSubtree(c.Origin, start, end, subtreeHash)
+		if err != nil {
+			return nil, fmtErrorf("internal error: failed to sign subtree for signer %q", s.Name())
+		}
+		sigs = append(sigs, sig...)
+	}
 	return sigs, nil
 }
 

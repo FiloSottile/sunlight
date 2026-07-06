@@ -15,6 +15,7 @@ type metrics struct {
 	MirroredLogs       prometheus.Gauge
 	LogSize            *prometheus.GaugeVec
 	AddCheckpointCount *prometheus.CounterVec
+	SignSubtreeCount   *prometheus.CounterVec
 
 	MirrorSize      *prometheus.GaugeVec
 	MirrorNextEntry *prometheus.GaugeVec
@@ -58,6 +59,13 @@ func initMetrics() metrics {
 				Help: "Total number of add-checkpoint requests processed, by log origin.",
 			},
 			[]string{"error", "origin", "progress"},
+		),
+		SignSubtreeCount: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "sign_subtree_requests_total",
+				Help: "Total number of sign-subtree requests processed, by log origin.",
+			},
+			[]string{"error", "origin"},
 		),
 
 		MirrorSize: prometheus.NewGaugeVec(

@@ -460,6 +460,110 @@ func TestMirrorEndToEnd(t *testing.T) {
 	checkMirrorTree(t, w, log, 1200)
 }
 
+// TestSignSubtreeMirror checks the sign-subtree endpoint of a witness that
+// also provides a mirror service. Per c2sp.org/tlog-mirror, the subtree must
+// be signed with the same identities that signed the reference checkpoint: in
+// particular, a checkpoint signed only with the witness keys must not be
+// exchanged for a subtree signed by the mirror key.
+func TestSignSubtreeMirror(t *testing.T) {
+	log := newTestMirrorLog(t, "example.com/testlog")
+	w := newTestMirrorWitness(t, log)
+
+	log.grow(t, 600)
+	code, witnessSigs := addCheckpoint(t, w, log.addCheckpointBody(t, 0, 600))
+	if code != http.StatusOK {
+		t.Fatalf("add-checkpoint: got %d, body %q", code, witnessSigs)
+	}
+	code, body := postAddEntries(t, w, log.addEntriesBody(t, 0, 600, 600, nil, 0))
+	if code != http.StatusOK {
+		t.Fatalf("add-entries [0, 600): got %d, body %q", code, body)
+	}
+
+	ctx := context.Background()
+	pendingCheckpoint, err := w.c.Backend.Fetch(ctx, OriginHash(log.origin)+"/checkpoint")
+	fatalIfErr(t, err)
+	mirrorCheckpoint, err := w.c.Backend.Fetch(ctx, "mirror/"+OriginHash(log.origin)+"/checkpoint")
+	fatalIfErr(t, err)
+
+	hash, proof := proveSubtree(t, log.entries, 256, 512)
+
+	// checkSubtreeSigs verifies that body is exactly the subtree cosignatures
+	// of the given signers, in any order.
+	checkSubtreeSigs := func(t *testing.T, body string, signers ...*torchwood.CosignatureSigner) {
+		t.Helper()
+		var lines int
+		for line := range strings.Lines(body) {
+			lines++
+			verified := 0
+			for _, s := range signers {
+				if s.Verifier().VerifySubtree(log.origin, 256, 512, hash, []byte(line)) {
+					verified++
+				}
+			}
+			if verified != 1 {
+				t.Errorf("signature line verifies with %d of the expected signers: %q", verified, line)
+			}
+		}
+		if lines != len(signers) {
+			t.Errorf("response has %d signature lines, want %d: %q", lines, len(signers), body)
+		}
+	}
+
+	t.Run("mirror checkpoint", func(t *testing.T) {
+		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, string(mirrorCheckpoint)))
+		if code != http.StatusOK {
+			t.Fatalf("got status %d, body %q", code, body)
+		}
+		if strings.Contains(body, "— example.com/witness ") {
+			t.Errorf("mirror checkpoint was exchanged for a witness cosignature: %q", body)
+		}
+		checkSubtreeSigs(t, body, w.sm)
+	})
+
+	t.Run("pending checkpoint", func(t *testing.T) {
+		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, string(pendingCheckpoint)))
+		if code != http.StatusOK {
+			t.Fatalf("got status %d, body %q", code, body)
+		}
+		if strings.Contains(body, "— example.com/mirror ") {
+			t.Errorf("witness-signed checkpoint was exchanged for a mirror cosignature: %q", body)
+		}
+		checkSubtreeSigs(t, body, w.s2)
+	})
+
+	t.Run("mirror and witness signatures", func(t *testing.T) {
+		// The mirror checkpoint and the add-checkpoint cosignatures are over
+		// the same re-encoded checkpoint text, so they can be combined into a
+		// single note carrying both identities.
+		combined := string(mirrorCheckpoint) + witnessSigs
+		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, combined))
+		if code != http.StatusOK {
+			t.Fatalf("got status %d, body %q", code, body)
+		}
+		checkSubtreeSigs(t, body, w.s2, w.sm)
+	})
+
+	// The mirror moves on to size 1200, but the size-600 checkpoints remain
+	// exchangeable for subtree cosignatures.
+	log.grow(t, 600)
+	code, _ = addCheckpoint(t, w, log.addCheckpointBody(t, 600, 1200))
+	if code != http.StatusOK {
+		t.Fatalf("add-checkpoint 600->1200: got %d", code)
+	}
+	code, body = postAddEntries(t, w, log.addEntriesBody(t, 600, 1200, 1200, nil, 0))
+	if code != http.StatusOK {
+		t.Fatalf("add-entries [600, 1200): got %d, body %q", code, body)
+	}
+
+	t.Run("past mirror checkpoint", func(t *testing.T) {
+		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, string(mirrorCheckpoint)))
+		if code != http.StatusOK {
+			t.Fatalf("got status %d, body %q", code, body)
+		}
+		checkSubtreeSigs(t, body, w.sm)
+	})
+}
+
 func TestMirrorBadProof(t *testing.T) {
 	log := newTestMirrorLog(t, "example.com/testlog")
 	w := newTestMirrorWitness(t, log)

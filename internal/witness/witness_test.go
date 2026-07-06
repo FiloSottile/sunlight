@@ -152,6 +152,16 @@ func addCheckpoint(t *testing.T, w *Witness, body string) (int, string) {
 	return rec.Code, rec.Body.String()
 }
 
+// signSubtree posts a sign-subtree request body to the witness Handler and
+// returns the response status code and body.
+func signSubtree(t *testing.T, w *Witness, body string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/sign-subtree", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	w.Handler().ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
 // sigsumOrigin and sigsumKey are the log used by the add-checkpoint.hurl test
 // vectors in torchwood, reused here. The checkpoints and consistency proofs in
 // TestAddCheckpoint are signed by the corresponding (gentest) private key.
@@ -585,6 +595,222 @@ func TestSizeZeroRequiresEmptyRoot(t *testing.T) {
 			t.Fatalf("bogus size-0 root over stored size 0: got %d, want 422 (body %q)", code, body)
 		}
 	})
+}
+
+// proveSubtree returns the subtree hash and the subtree consistency proof for
+// [start, end) of the tree over the given leaves.
+func proveSubtree(t *testing.T, leaves [][]byte, start, end int64) (tlog.Hash, torchwood.SubtreeProof) {
+	t.Helper()
+	r := torchwood.NewHashReaderOverlay(0, nil)
+	for _, leaf := range leaves {
+		fatalIfErr(t, r.AppendRecordHash(tlog.RecordHash(leaf)))
+	}
+	hash, err := torchwood.SubtreeHash(start, end, r)
+	fatalIfErr(t, err)
+	proof, err := torchwood.ProveSubtree(int64(len(leaves)), start, end, r)
+	fatalIfErr(t, err)
+	return hash, proof
+}
+
+// subtreeRequest builds a sign-subtree request body.
+func subtreeRequest(start, end int64, subtreeHash tlog.Hash, proof torchwood.SubtreeProof, signedCheckpoint string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "subtree %d %d\n", start, end)
+	b.WriteString(subtreeHash.String() + "\n")
+	for _, h := range proof {
+		b.WriteString(h.String() + "\n")
+	}
+	b.WriteByte('\n')
+	b.WriteString(signedCheckpoint)
+	return b.String()
+}
+
+// witnessSigLines splits an add-checkpoint response body into the witness's
+// Ed25519 and ML-DSA-44 cosignature lines, identified by key hash. The
+// returned lines include the trailing newline.
+func witnessSigLines(t *testing.T, w *Witness, cosigs string) (ed25519Line, mldsaLine string) {
+	t.Helper()
+	for line := range strings.Lines(cosigs) {
+		rest, ok := strings.CutPrefix(strings.TrimSuffix(line, "\n"), "— "+w.s1.Verifier().Name()+" ")
+		if !ok {
+			continue
+		}
+		blob, err := base64.StdEncoding.DecodeString(rest)
+		fatalIfErr(t, err)
+		switch binary.BigEndian.Uint32(blob[:4]) {
+		case w.s1.Verifier().KeyHash():
+			ed25519Line = line
+		case w.s2.Verifier().KeyHash():
+			mldsaLine = line
+		}
+	}
+	if ed25519Line == "" || mldsaLine == "" {
+		t.Fatalf("missing witness cosignature lines in %q", cosigs)
+	}
+	return
+}
+
+// TestSignSubtree checks the sign-subtree endpoint of a witness with no mirror
+// configured, which must not be affected by the missing mirror signer.
+func TestSignSubtree(t *testing.T) {
+	origin := "example.com/log"
+	logSigner, vkey := newTestLog(t, origin)
+	w := newTestWitness(t, origin, vkey)
+
+	// Get the witness to cosign a size-5 checkpoint, and build the reference
+	// checkpoint carrying the log's signature and the witness's cosignatures.
+	leaves := [][]byte{{1}, {2}, {3}, {4}, {5}}
+	cp := signCheckpoint(t, logSigner, origin, leaves, "")
+	code, cosigs := addCheckpoint(t, w, request(0, nil, cp))
+	if code != http.StatusOK {
+		t.Fatalf("add-checkpoint: got %d, body %q", code, cosigs)
+	}
+	witnessed := string(cp) + cosigs
+	ed25519Line, mldsaLine := witnessSigLines(t, w, cosigs)
+	text := torchwood.Checkpoint{
+		Origin: origin, Tree: tlog.Tree{N: 5, Hash: treeHash(t, leaves)},
+	}.String()
+
+	otherSigner, _ := newTestLog(t, "example.com/other")
+	otherCp := signCheckpoint(t, otherSigner, "example.com/other", leaves, "")
+
+	hash45, proof45 := proveSubtree(t, leaves, 4, 5)
+	hash04, proof04 := proveSubtree(t, leaves, 0, 4)
+	hash05, proof05 := proveSubtree(t, leaves, 0, 5)
+	badHash04 := hash04
+	badHash04[0] ^= 1
+	badProof45 := append(torchwood.SubtreeProof{}, proof45...)
+	badProof45[0][0] ^= 1
+
+	tests := []struct {
+		name       string
+		body       string
+		wantCode   int
+		wantBody   string
+		start, end int64
+		hash       tlog.Hash
+	}{
+		{
+			name:     "leaf subtree",
+			body:     subtreeRequest(4, 5, hash45, proof45, witnessed),
+			wantCode: http.StatusOK,
+			wantBody: "— example.com/witness",
+			start:    4, end: 5, hash: hash45,
+		},
+		{
+			name:     "inner subtree",
+			body:     subtreeRequest(0, 4, hash04, proof04, witnessed),
+			wantCode: http.StatusOK,
+			wantBody: "— example.com/witness",
+			start:    0, end: 4, hash: hash04,
+		},
+		{
+			name:     "full tree subtree with empty proof",
+			body:     subtreeRequest(0, 5, hash05, proof05, witnessed),
+			wantCode: http.StatusOK,
+			wantBody: "— example.com/witness",
+			start:    0, end: 5, hash: hash05,
+		},
+		{
+			name:     "ML-DSA-44 witness cosignature only",
+			body:     subtreeRequest(4, 5, hash45, proof45, text+"\n"+mldsaLine),
+			wantCode: http.StatusOK,
+			wantBody: "— example.com/witness",
+			start:    4, end: 5, hash: hash45,
+		},
+		{
+			name:     "misaligned subtree range",
+			body:     subtreeRequest(1, 3, hash45, nil, witnessed),
+			wantCode: http.StatusBadRequest,
+			wantBody: "invalid input",
+		},
+		{
+			name:     "end past checkpoint size",
+			body:     subtreeRequest(4, 6, hash45, proof45, witnessed),
+			wantCode: http.StatusBadRequest,
+			wantBody: "invalid input",
+		},
+		{
+			name:     "non-canonical start",
+			body:     "subtree 04 5\n" + hash45.String() + "\n\n" + witnessed,
+			wantCode: http.StatusBadRequest,
+			wantBody: "invalid input",
+		},
+		{
+			name:     "missing checkpoint",
+			body:     "subtree 4 5\n" + hash45.String() + "\n",
+			wantCode: http.StatusBadRequest,
+			wantBody: "invalid input",
+		},
+		{
+			name:     "wrong subtree hash",
+			body:     subtreeRequest(0, 4, badHash04, proof04, witnessed),
+			wantCode: http.StatusUnprocessableEntity,
+			wantBody: "bad consistency proof",
+		},
+		{
+			name:     "wrong proof",
+			body:     subtreeRequest(4, 5, hash45, badProof45, witnessed),
+			wantCode: http.StatusUnprocessableEntity,
+			wantBody: "bad consistency proof",
+		},
+		{
+			name:     "unknown log",
+			body:     subtreeRequest(4, 5, hash45, proof45, string(otherCp)),
+			wantCode: http.StatusNotFound,
+			wantBody: "unknown log",
+		},
+		{
+			name:     "log signature only",
+			body:     subtreeRequest(4, 5, hash45, proof45, string(cp)),
+			wantCode: http.StatusForbidden,
+			wantBody: "invalid signature",
+		},
+		{
+			// The Ed25519 witness cosignature can't be exchanged for a subtree
+			// cosignature, which only the ML-DSA-44 key can produce. In
+			// particular, this must be an error, not an empty 200 response.
+			name:     "Ed25519 witness cosignature only",
+			body:     subtreeRequest(4, 5, hash45, proof45, text+"\n"+ed25519Line),
+			wantCode: http.StatusForbidden,
+			wantBody: "invalid signature",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, body := signSubtree(t, w, tt.body)
+			if code != tt.wantCode {
+				t.Errorf("got status %d, want %d (body %q)", code, tt.wantCode, body)
+			}
+			if !strings.Contains(body, tt.wantBody) {
+				t.Errorf("body %q does not contain %q", body, tt.wantBody)
+			}
+			if tt.wantCode != http.StatusOK {
+				return
+			}
+			// A success response must be exactly one subtree cosignature from
+			// the witness's ML-DSA-44 key, with a zero timestamp.
+			var lines int
+			for line := range strings.Lines(body) {
+				lines++
+				if !w.s2.Verifier().VerifySubtree(origin, tt.start, tt.end, tt.hash, []byte(line)) {
+					t.Errorf("cosignature does not verify over subtree [%d, %d): %q", tt.start, tt.end, line)
+				}
+				b64, ok := strings.CutPrefix(strings.TrimSuffix(line, "\n"), "— "+w.s2.Verifier().Name()+" ")
+				if !ok {
+					t.Fatalf("unexpected signature line: %q", line)
+				}
+				blob, err := base64.StdEncoding.DecodeString(b64)
+				fatalIfErr(t, err)
+				if ts := binary.BigEndian.Uint64(blob[4:12]); ts != 0 {
+					t.Errorf("cosignature timestamp is %d, want 0", ts)
+				}
+			}
+			if lines != 1 {
+				t.Errorf("response has %d signature lines, want 1: %q", lines, body)
+			}
+		})
+	}
 }
 
 // forgeWitnessSigLine builds a signature line keyed to the witness's own name
