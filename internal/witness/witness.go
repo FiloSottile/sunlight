@@ -1069,8 +1069,11 @@ func (w *Witness) serveAddEntries(rw http.ResponseWriter, r *http.Request) {
 		labels["error"] = errorLabel(err)
 	}
 	switch err {
-	case errUnknownLog, errNoPendingCheckpoint:
+	case errUnknownLog:
 		http.Error(rw, err.Error(), http.StatusNotFound)
+		return
+	case errNoPendingCheckpoint:
+		http.Error(rw, err.Error(), http.StatusUnprocessableEntity)
 		return
 	case errNotMirrored:
 		http.Error(rw, err.Error(), http.StatusForbidden)

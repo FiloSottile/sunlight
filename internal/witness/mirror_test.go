@@ -1040,10 +1040,10 @@ func TestMirrorDiscovery(t *testing.T) {
 	}
 
 	// Before the first add-checkpoint, there is no pending checkpoint to
-	// return in a mirror-info body, so the log is a 404.
+	// return in a mirror-info body, so the log is a 422.
 	code, body = postAddEntries(t, w, log.addEntriesBody(t, 0, 0, 0, nil, 0))
-	if code != http.StatusNotFound {
-		t.Errorf("no pending checkpoint: got %d, want 404 (body %q)", code, body)
+	if code != http.StatusUnprocessableEntity {
+		t.Errorf("no pending checkpoint: got %d, want 422 (body %q)", code, body)
 	}
 
 	log.grow(t, 600)
