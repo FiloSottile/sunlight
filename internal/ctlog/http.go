@@ -15,6 +15,7 @@ import (
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/reused"
 	ct "github.com/google/certificate-transparency-go"
+	ctasn1 "github.com/google/certificate-transparency-go/asn1"
 	"github.com/google/certificate-transparency-go/trillian/ctfe"
 	"github.com/google/certificate-transparency-go/x509"
 	"github.com/google/certificate-transparency-go/x509util"
@@ -143,8 +144,11 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		return nil, http.StatusBadRequest, fmtErrorf("empty chain")
 	}
 
-	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.rootPool(), time.Time{}, false, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
+	chain, err := ctfe.ValidateChain(req.Chain, l.certValidationOpts())
 	if err != nil {
+		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: %w", err)
+	}
+	if err := l.validateCertificateProfile(chain[0]); err != nil {
 		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: %w", err)
 	}
 	lowPriority := lowPriority(chain[0])
@@ -252,6 +256,34 @@ func lowPriority(c *x509.Certificate) bool {
 	// verify the signatures, but this check is meant for when we are under load
 	// and need to prioritize.
 	return len(c.SCTList.SCTList) > 0
+}
+
+func (l *Log) certValidationOpts() ctfe.CertValidationOpts {
+	var extKeyUsages []x509.ExtKeyUsage
+	if l.c.CertificateProfile != CertificateProfileMark {
+		extKeyUsages = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	}
+	return ctfe.NewCertValidationOpts(l.rootPool(), time.Time{}, false, false,
+		&l.c.NotAfterStart, &l.c.NotAfterLimit, false, extKeyUsages)
+}
+
+func (l *Log) validateCertificateProfile(leaf *x509.Certificate) error {
+	if l.c.CertificateProfile != CertificateProfileMark {
+		return nil
+	}
+	if !hasUnknownExtKeyUsage(leaf, markCertificateEKU) {
+		return fmt.Errorf("rejecting certificate without mark certificate EKU %s", markCertificateEKU.String())
+	}
+	return nil
+}
+
+func hasUnknownExtKeyUsage(cert *x509.Certificate, oid ctasn1.ObjectIdentifier) bool {
+	for _, eku := range cert.UnknownExtKeyUsage {
+		if eku.Equal(oid) {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {

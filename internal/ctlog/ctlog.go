@@ -29,6 +29,7 @@ import (
 	"filippo.io/sunlight"
 	"filippo.io/torchwood"
 	ct "github.com/google/certificate-transparency-go"
+	ctasn1 "github.com/google/certificate-transparency-go/asn1"
 	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/cryptobyte"
@@ -111,7 +112,16 @@ type Config struct {
 
 	NotAfterStart time.Time
 	NotAfterLimit time.Time
+
+	CertificateProfile string
 }
+
+const (
+	CertificateProfileTLS  = "tls"
+	CertificateProfileMark = "mark"
+)
+
+var markCertificateEKU = ctasn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 31}
 
 var ErrLogExists = errors.New("checkpoint already exist, refusing to initialize log")
 

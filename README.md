@@ -140,6 +140,27 @@ You should consider a separate ZFS dataset or object storage bucket for each log
 
 The storage backend is *not* trusted: an attacker who can modify it can at most cause Sunlight to stop working.
 
+### Accepted roots and certificate profiles
+
+By default, Sunlight operates as a TLS Certificate Transparency log. It fetches accepted roots from CCADB, accepts chains for certificates with the `serverAuth` EKU, and publishes `intended_use` in `log.v3.json` according to the configured CCADB root set.
+
+```yaml
+    ccadbroots: trusted # default if roots is not set
+```
+
+For logs with a custom accepted root set, use a PEM file. The file is loaded on startup and reloaded on SIGHUP, and its contents are uploaded to the storage backend as the log's accepted roots.
+
+```yaml
+    roots: /tank/logs/example2025h2/roots.pem
+```
+
+Sunlight can also operate a mark certificate CT log. Mark certificate logs are not TLS server authentication logs: they do not require the `serverAuth` EKU, and instead require the Verified Mark Certificate EKU (`1.3.6.1.5.5.7.3.31`) on submitted leaves. Mark logs intentionally omit `intended_use` from `log.v3.json` to avoid being classified as TLS production or test logs by consumers.
+
+```yaml
+    certificateprofile: mark
+    roots: /tank/logs/example2025h2/mark-roots.pem
+```
+
 ### Hosting the read path
 
 The [Static CT monitoring API](https://github.com/C2SP/C2SP/blob/static-ct-api/v1.0.0/static-ct-api.md#monitoring-apis) can be implemented by simply serving the files uploaded to or stored in the storage backend by Sunlight.
