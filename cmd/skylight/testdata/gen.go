@@ -37,6 +37,7 @@ import (
 
 const (
 	origin   = "rome2026h1.example.org"
+	origin2  = "milan2026h1.example.org"
 	treeSize = 300
 	// timestamp is 2025-12-31T00:00:00Z, before the log's NotAfterLimit of
 	// 2026-01-01T00:00:00Z. The log is sunset (past NotAfterLimit plus one
@@ -156,7 +157,14 @@ func main() {
 	write("witness/mirror/"+witnessed+"/tile/entries/000", gzipped("fake mirrored entry bundle\n"))
 	write("witness/mirror/"+witnessed+"/tile/entries/001.p/44", gzipped("fake mirrored partial entry bundle\n"))
 
+	// A second witness, observing a different log and not operating as a
+	// mirror, to exercise serving multiple witnesses from one Skylight.
+	origin2Hash := sha256.Sum256([]byte(origin2))
+	witnessed2 := hex.EncodeToString(origin2Hash[:])
+	write("witness2/"+witnessed2+"/checkpoint", []byte("fake checkpoint for "+origin2+"\n"))
+
 	fmt.Printf("origin hash: %s\n", witnessed)
+	fmt.Printf("origin2 hash: %s\n", witnessed2)
 	fmt.Printf("issuer hash: %s\n", hex.EncodeToString(issuerHash[:]))
 }
 

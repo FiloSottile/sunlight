@@ -3,8 +3,11 @@ listen:
 homeredirect: https://rome.example.org
 operatorname: Test Operator
 logsjsonprefix: https://logs.example.org/
-witnessprefix: https://witness.example.org
-witnessdirectory: testdata/witness
+witnesses:
+  - monitoringprefix: https://witness.example.org
+    localdirectory: testdata/witness
+  - monitoringprefix: https://witness2.example.org
+    localdirectory: testdata/witness2
 logs:
   - shortname: rome2026h1
     monitoringprefix: https://rome2026h1.example.org

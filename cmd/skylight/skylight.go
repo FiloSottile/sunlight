@@ -74,8 +74,8 @@ type Config struct {
 		Cache string
 
 		// Hosts are extra names for which Skylight will obtain a certificate,
-		// beyond those configured as part of the SubmissionPrefix of logs and
-		// witness. Optional.
+		// beyond those configured as part of the MonitoringPrefix of logs and
+		// witnesses. Optional.
 		Hosts []string
 
 		// Directory is an ACME directory URL to request a certificate from.
@@ -96,20 +96,26 @@ type Config struct {
 	// served at /logs.json per the operator-list-v1 schema. Optional.
 	OperatorName string
 
-	// WitnessPrefix is the full URL of the c2sp.org/tlog-witness monitoring
-	// prefix of the witness. Optional. If ACME is enabled, Skylight will obtain
-	// a certificate for the host of this URL.
-	//
-	// If the witness operates as a mirror, the c2sp.org/tlog-mirror monitoring
-	// prefix will be "{WitnessPrefix}/mirror/".
-	WitnessPrefix string
-
-	// WitnessDirectory is the path to a local directory where the witness
-	// stores its data. Required if WitnessPrefix is set. If the witness
-	// operates as a mirror, must contain a "mirror" subdirectory.
-	WitnessDirectory string
+	Witnesses []WitnessConfig
 
 	Logs []LogConfig
+}
+
+type WitnessConfig struct {
+	// MonitoringPrefix is the full URL of the c2sp.org/tlog-witness monitoring
+	// prefix of the witness.
+	//
+	// The HTTP server will serve the witness at this URL, and if ACME is
+	// enabled, Skylight will obtain a certificate for the host of this URL.
+	//
+	// If the witness operates as a mirror, the c2sp.org/tlog-mirror monitoring
+	// prefix will be "{MonitoringPrefix}/mirror/".
+	MonitoringPrefix string
+
+	// LocalDirectory is the path to a local directory where the witness stores
+	// its data. If the witness operates as a mirror, must contain a "mirror"
+	// subdirectory.
+	LocalDirectory string
 }
 
 type LogConfig struct {
@@ -474,19 +480,19 @@ func main() {
 		})
 	}
 
-	if c.WitnessPrefix != "" {
+	for _, wc := range c.Witnesses {
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
-			slog.String("witness", c.WitnessPrefix),
+			slog.String("witness", wc.MonitoringPrefix),
 		}))
 
-		prefix, err := parsePrefix(c.WitnessPrefix)
+		prefix, err := parsePrefix(wc.MonitoringPrefix)
 		if err != nil {
-			fatalError(logger, "invalid WitnessPrefix", "err", err)
+			fatalError(logger, "invalid witness MonitoringPrefix", "err", err)
 		}
 
 		acmeHosts = append(acmeHosts, prefix.Hostname())
 
-		root, err := os.OpenRoot(c.WitnessDirectory)
+		root, err := os.OpenRoot(wc.LocalDirectory)
 		if err != nil {
 			fatalError(logger, "failed to open witness directory", "err", err)
 		}
