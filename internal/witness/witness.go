@@ -1262,7 +1262,10 @@ func (w *Witness) verifyTicket(origin string, ticket []byte) (*parsedCheckpoint,
 		return nil, errors.New("invalid ticket: decryption failed")
 	}
 
-	n, err := note.Open(checkpointBytes, note.VerifierList(w.s1.Verifier(), w.s2.Verifier()))
+	// We could have stripped our own signatures from the checkpoint, but then
+	// we'd rely on XAES-256-GCM to prevent split-views, which would be a new
+	// critical dependency. Instead, re-verify the ML-DSA-44 signature.
+	n, err := note.Open(checkpointBytes, note.VerifierList(w.s2.Verifier()))
 	if err != nil {
 		return nil, errors.New("internal error: can't open ticket checkpoint")
 	}
@@ -1273,6 +1276,10 @@ func (w *Witness) verifyTicket(origin string, ticket []byte) (*parsedCheckpoint,
 	if c.Origin != origin {
 		return nil, errors.New("internal error: incoherent ticket checkpoint")
 	}
+	// Drop our Ed25519 signature. The ML-DSA-44 one is already in n.Sigs.
+	n.UnverifiedSigs = slices.DeleteFunc(n.UnverifiedSigs, func(s note.Signature) bool {
+		return s.Name == w.s1.Name() && s.Hash == w.s1.Verifier().KeyHash()
+	})
 	return &parsedCheckpoint{
 		Checkpoint:     c,
 		Bytes:          checkpointBytes,

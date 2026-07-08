@@ -69,7 +69,7 @@ func newTestMirrorWitness(t *testing.T, logs ...*testMirrorLog) *Witness {
 		mirrorKeys[backendKeyForMirrorCheckpoint(config, l.origin)] = l.origin
 	}
 	config.Lock = &mirrorCommitCheckingLock{LockBackend: config.Lock, t: t,
-		backend: config.Backend, mirrorKeys: mirrorKeys}
+		backend: config.Backend, mirrorKeys: mirrorKeys, mirrorName: config.MirrorName}
 	w, err := NewWitness(ctx, config)
 	fatalIfErr(t, err)
 	return w
@@ -83,11 +83,12 @@ type mirrorCommitCheckingLock struct {
 	t          *testing.T
 	backend    ctlog.Backend
 	mirrorKeys map[[sha256.Size]byte]string
+	mirrorName string
 }
 
 func (l *mirrorCommitCheckingLock) Replace(ctx context.Context, old ctlog.LockedCheckpoint, new []byte) (ctlog.LockedCheckpoint, error) {
 	if origin, ok := l.mirrorKeys[old.(*memCheckpoint).logID]; ok {
-		text, _, found := bytes.Cut(new, []byte("\n\n"))
+		text, sigs, found := bytes.Cut(new, []byte("\n\n"))
 		if !found {
 			l.t.Errorf("mirror checkpoint for %s being persisted is not a note:\n%s", origin, new)
 		} else if c, err := torchwood.ParseCheckpoint(string(text) + "\n"); err != nil {
@@ -95,10 +96,42 @@ func (l *mirrorCommitCheckingLock) Replace(ctx context.Context, old ctlog.Locked
 		} else if c.Origin != origin {
 			l.t.Errorf("mirror checkpoint being persisted has origin %q, want %q", c.Origin, origin)
 		} else {
+			checkMirrorCheckpointSigNames(l.t, origin, l.mirrorName, string(sigs))
 			checkMirrorTilesAvailable(l.t, l.backend, origin, c.N)
 		}
 	}
 	return l.LockBackend.Replace(ctx, old, new)
+}
+
+// checkMirrorCheckpointSigNames checks that the signature lines of a mirror
+// checkpoint are only from the log and the mirror, at least one each. In
+// particular, the witness's own cosignatures on the pending checkpoint must
+// not survive into the mirror checkpoint.
+func checkMirrorCheckpointSigNames(t *testing.T, origin, mirrorName, sigs string) {
+	t.Helper()
+	var logSigs, mirrorSigs int
+	for line := range strings.Lines(sigs) {
+		rest, ok := strings.CutPrefix(strings.TrimSuffix(line, "\n"), "— ")
+		if !ok {
+			t.Errorf("malformed mirror checkpoint signature line %q", line)
+			continue
+		}
+		name, _, _ := strings.Cut(rest, " ")
+		switch name {
+		case origin:
+			logSigs++
+		case mirrorName:
+			mirrorSigs++
+		default:
+			t.Errorf("mirror checkpoint has signature from %q, want only %q and %q", name, origin, mirrorName)
+		}
+	}
+	if logSigs == 0 {
+		t.Errorf("mirror checkpoint is missing the log signature")
+	}
+	if mirrorSigs == 0 {
+		t.Errorf("mirror checkpoint is missing the mirror cosignature")
+	}
 }
 
 // checkMirrorTilesAvailable checks the tlog-tiles serving invariant of the
@@ -261,8 +294,10 @@ func postAddEntriesGzip(t *testing.T, w *Witness, body []byte) (int, string) {
 }
 
 // checkAddEntriesResponse asserts invariants of every add-entries response:
-// the Accept-Encoding header advertising compression support, and the
-// mirror-info content type on "409 Conflict" and "202 Accepted" responses.
+// the Accept-Encoding header advertising compression support, the mirror-info
+// content type on "409 Conflict" and "202 Accepted" responses, and that "200
+// OK" responses consist only of mirror cosignature lines, never the witness's
+// own cosignatures or anything else.
 func checkAddEntriesResponse(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	if got := rec.Header().Get("Accept-Encoding"); !strings.Contains(got, "gzip") {
@@ -271,6 +306,13 @@ func checkAddEntriesResponse(t *testing.T, rec *httptest.ResponseRecorder) {
 	if rec.Code == http.StatusConflict || rec.Code == http.StatusAccepted {
 		if got := rec.Header().Get("Content-Type"); got != "text/x.tlog.mirror-info" {
 			t.Errorf("mirror-info response has Content-Type %q", got)
+		}
+	}
+	if rec.Code == http.StatusOK {
+		for line := range strings.Lines(rec.Body.String()) {
+			if !strings.HasPrefix(line, "— example.com/mirror ") {
+				t.Errorf("unexpected line in add-entries success response: %q", line)
+			}
 		}
 	}
 }
@@ -357,6 +399,11 @@ func checkMirrorTree(t *testing.T, w *Witness, log *testMirrorLog, size int64) {
 	}
 	if !mirrorSig {
 		t.Errorf("mirror checkpoint is missing the mirror cosignature:\n%s", checkpoint)
+	}
+	// Any signature not from the log or the mirror keys, such as the witness's
+	// own cosignatures on the pending checkpoint, ends up in UnverifiedSigs.
+	for _, sig := range n.UnverifiedSigs {
+		t.Errorf("mirror checkpoint has unexpected signature from %q:\n%s", sig.Name, checkpoint)
 	}
 	c, err := torchwood.ParseCheckpoint(n.Text)
 	fatalIfErr(t, err)
