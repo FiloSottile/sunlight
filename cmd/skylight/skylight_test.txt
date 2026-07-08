@@ -46,6 +46,7 @@ body contains fake issuer certificate
 
 GET https://rome2026h1.example.org/issuer/0000000000000000000000000000000000000000000000000000000000000000
 code == 404
+header cache-control ~ ^$
 
 # The {issuer} wildcard requires a non-empty segment.
 GET https://rome2026h1.example.org/issuer/
@@ -55,9 +56,14 @@ GET https://rome2026h1.example.org/tile/bogus
 code == 404
 
 # c2sp.org/tlog-tiles entry bundle paths parse through the torchwood fallback,
-# but CT logs store static-ct-api data tiles, so there is no such file.
+# but CT logs store static-ct-api data tiles, so there is no such file. The
+# optimistic tile content headers are dropped from error responses: the 404
+# must not claim to be gzip-encoded, or be cached by CDNs for a week.
 GET https://rome2026h1.example.org/tile/entries/000
 code == 404
+header content-encoding ~ ^$
+header cache-control ~ ^$
+header content-type == text/plain; charset=utf-8
 
 # Directories are hidden from the file server: no listings, and no redirects
 # to them.
@@ -197,9 +203,12 @@ header content-encoding == gzip
 GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/entries/001.p/44
 header content-encoding == gzip
 
-# Mirrors don't store static-ct-api data or names tiles.
+# Mirrors don't store static-ct-api data or names tiles. Like on the log
+# hosts, error responses lose the optimistic tile content headers.
 GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/data/000
 code == 404
+header content-encoding ~ ^$
+header cache-control ~ ^$
 
 GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/
 code == 404

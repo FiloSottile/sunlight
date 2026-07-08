@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +19,51 @@ import (
 )
 
 //go:generate go run testdata/gen.go
+
+// TestRateLimitErrorHeaders checks that rate limited responses lose the
+// content headers set optimistically before dispatch, while allowed responses
+// keep them. The webtest scripts can't cover the 429 path, because triggering
+// the rate limit over HTTP would be timing-dependent.
+func TestRateLimitErrorHeaders(t *testing.T) {
+	h := newRateLimitHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("fake tile"))
+	}))
+	var allowed, limited int
+	for range 2 * rateLimitBurst {
+		req := httptest.NewRequest("GET", "/tile/data/000", nil)
+		req = req.WithContext(context.WithValue(req.Context(), clientContextKey{}, "anonymous"))
+		rec := httptest.NewRecorder()
+		rec.Header().Set("Content-Encoding", "gzip")
+		rec.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+		h.ServeHTTP(rec, req)
+		switch rec.Code {
+		case http.StatusOK:
+			allowed++
+			if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
+				t.Errorf("allowed response Content-Encoding = %q, want gzip", got)
+			}
+			if got := rec.Header().Get("Cache-Control"); got == "" {
+				t.Error("allowed response is missing Cache-Control")
+			}
+		case http.StatusTooManyRequests:
+			limited++
+			if got := rec.Header().Get("Content-Encoding"); got != "" {
+				t.Errorf("429 response Content-Encoding = %q, want empty", got)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "" {
+				t.Errorf("429 response Cache-Control = %q, want empty", got)
+			}
+			if rec.Header().Get("Retry-After") == "" {
+				t.Error("429 response is missing Retry-After")
+			}
+		default:
+			t.Errorf("unexpected status code %d", rec.Code)
+		}
+	}
+	if allowed == 0 || limited == 0 {
+		t.Errorf("got %d allowed and %d rate limited responses, want some of each", allowed, limited)
+	}
+}
 
 // TestScripts builds and runs the production skylight binary against the
 // testdata configuration, and executes the webtest scripts against it.

@@ -180,6 +180,10 @@ func newRateLimitHandler(handler http.Handler) http.Handler {
 			allow, retryAfter := anonymousClientLimit.Allow(rateLimitInterval, rateLimitBurst)
 			if !allow {
 				w.Header().Set("Retry-After", retryAfter.Format(time.RFC1123))
+				// The content headers set optimistically before dispatch don't
+				// apply to the error body. The file server drops them from its
+				// own error responses (see serveError in net/http/fs.go), but
+				// http.Error doesn't, so drop them here.
 				w.Header().Del("Content-Encoding")
 				w.Header().Del("Cache-Control")
 				http.Error(w, msg, http.StatusTooManyRequests)
