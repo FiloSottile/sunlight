@@ -225,11 +225,14 @@ func unlimitedHandlerFromContext(ctx context.Context) http.Handler {
 	return h
 }
 
-type mirrorContextKey struct{}
+// filePrefixContextKey carries the on-disk path prefix ("/{origin}" or
+// "/mirror/{origin}") that the witness file handler puts back in front of the
+// request path after it was stripped for logMux routing.
+type filePrefixContextKey struct{}
 
-func mirrorFromContext(ctx context.Context) bool {
-	m, _ := ctx.Value(mirrorContextKey{}).(bool)
-	return m
+func filePrefixFromContext(ctx context.Context) string {
+	p, _ := ctx.Value(filePrefixContextKey{}).(string)
+	return p
 }
 
 func newClientContextHandler(next http.Handler) http.Handler {
@@ -500,10 +503,7 @@ func main() {
 
 		handler = func(h http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				p := "/" + originFromContext(r.Context()) + r.URL.Path
-				if mirrorFromContext(r.Context()) {
-					p = "/mirror" + p
-				}
+				p := filePrefixFromContext(r.Context()) + r.URL.Path
 
 				r2 := new(http.Request)
 				*r2 = *r
@@ -534,21 +534,33 @@ func main() {
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
 			promhttp.WithLabelFromCtx("client", clientFromContext))
 
+		// Cap the cardinality of the origin metric label by only recording ones
+		// that exist on the filesystem.
+		cappedOrigin := func(origin, prefix string) string {
+			if _, err := root.Stat(prefix + origin + "/checkpoint"); err != nil {
+				return ""
+			}
+			return origin
+		}
+
 		patternPrefix := "GET " + prefix.Host + prefix.Path
 		mux.HandleFunc(patternPrefix+"/{origin}/", func(w http.ResponseWriter, r *http.Request) {
-			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, r.PathValue("origin")))
+			origin := r.PathValue("origin")
+			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, cappedOrigin(origin, "")))
+			r = r.WithContext(context.WithValue(r.Context(), filePrefixContextKey{}, "/"+origin))
 			r = r.WithContext(context.WithValue(r.Context(), rateLimitedHandlerContextKey{}, rateLimitedHandler))
 			r = r.WithContext(context.WithValue(r.Context(), unlimitedHandlerContextKey{}, unlimitedHandler))
 			// We need to strip the origin from the path because logMux anchors
 			// at root. It will be put back before the FileServer Handler.
-			http.StripPrefix(prefix.Path+"/"+r.PathValue("origin"), logMux).ServeHTTP(w, r)
+			http.StripPrefix(prefix.Path+"/"+origin, logMux).ServeHTTP(w, r)
 		})
 		mux.HandleFunc(patternPrefix+"/mirror/{origin}/", func(w http.ResponseWriter, r *http.Request) {
-			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, r.PathValue("origin")))
+			origin := r.PathValue("origin")
+			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, cappedOrigin(origin, "mirror/")))
+			r = r.WithContext(context.WithValue(r.Context(), filePrefixContextKey{}, "/mirror/"+origin))
 			r = r.WithContext(context.WithValue(r.Context(), rateLimitedHandlerContextKey{}, rateLimitedHandler))
 			r = r.WithContext(context.WithValue(r.Context(), unlimitedHandlerContextKey{}, unlimitedHandler))
-			r = r.WithContext(context.WithValue(r.Context(), mirrorContextKey{}, true))
-			http.StripPrefix(prefix.Path+"/mirror/"+r.PathValue("origin"), logMux).ServeHTTP(w, r)
+			http.StripPrefix(prefix.Path+"/mirror/"+origin, logMux).ServeHTTP(w, r)
 		})
 	}
 

@@ -144,8 +144,18 @@ header content-type == text/plain; charset=utf-8
 header cache-control == no-store
 body contains rome2026h1.example.org
 
+# Unknown origins are served through to the file server, which 404s, but with
+# a capped metrics label (see the /metrics case below). The witness directory
+# root contains a decoy checkpoint file that must not be served: the unknown
+# origin stays in the file path, it is only dropped from the metrics label.
 GET https://witness.example.org/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/checkpoint
 code == 404
+body !contains decoy
+
+# The root of an unknown origin serves the home redirect, like every other
+# prefix root.
+GET https://witness.example.org/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/
+redirect == https://rome.example.org
 
 GET https://witness.example.org/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/0/000
 code == 404
@@ -197,8 +207,11 @@ code == 404
 GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/
 redirect == https://rome.example.org
 
+# As on the witness route, the unknown origin stays in the file path: the
+# decoy at mirror/checkpoint must not be served.
 GET https://witness.example.org/mirror/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/checkpoint
 code == 404
+body !contains decoy
 
 # "mirror" is not itself an origin: the more specific mirror pattern wins,
 # redirecting to a path that is then a 404.
@@ -300,3 +313,8 @@ body contains log="88ad7a28caeb0b2aa890fdf0304c2fcaf59fca2ee140134ff8c1300bac493
 body contains client="with-email"
 body contains client="anonymous"
 body contains code="404"
+# Unknown witness origins (the ffff... requests above) are counted with an
+# empty log label, so the label cardinality is bounded by the origins present
+# in the witness directories, not by client-chosen paths.
+body contains kind="checkpoint",log=""
+body !contains log="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"

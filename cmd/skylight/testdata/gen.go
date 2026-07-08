@@ -153,6 +153,10 @@ func main() {
 	witnessed := hex.EncodeToString(originHash[:])
 	write("witness/"+witnessed+"/checkpoint", checkpoint)
 	write("witness/mirror/"+witnessed+"/checkpoint", checkpoint)
+	// Decoy files that no request path should map to: the per-origin paths of
+	// unknown origins must not collapse to the directory roots.
+	write("witness/checkpoint", []byte("decoy, must never be served\n"))
+	write("witness/mirror/checkpoint", []byte("decoy, must never be served\n"))
 	write("witness/mirror/"+witnessed+"/tile/0/000", []byte("fake mirrored level 0 tile\n"))
 	write("witness/mirror/"+witnessed+"/tile/entries/000", gzipped("fake mirrored entry bundle\n"))
 	write("witness/mirror/"+witnessed+"/tile/entries/001.p/44", gzipped("fake mirrored partial entry bundle\n"))
