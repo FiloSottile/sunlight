@@ -1,0 +1,18 @@
+listen:
+  - ":443"
+homeredirect: https://rome.example.org
+operatorname: Test Operator
+logsjsonprefix: https://logs.example.org/
+witnessprefix: https://witness.example.org
+witnessdirectory: testdata/witness
+logs:
+  - shortname: rome2026h1
+    monitoringprefix: https://rome2026h1.example.org
+    localdirectory: testdata/tree
+  - shortname: rome2026h2
+    monitoringprefix: https://logs.example.org/rome2026h2
+    localdirectory: testdata/tree
+  - shortname: milan2026h1
+    monitoringprefix: https://logs.example.org/milan2026h1
+    localdirectory: testdata/tree
+    staging: true

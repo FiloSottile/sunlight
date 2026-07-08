@@ -1,4 +1,5 @@
-// Command skylight runs a Certificate Transparency log read-path server.
+// Command skylight runs a Certificate Transparency log and
+// c2sp.org/tlog-witness / c2sp.org/tlog-mirror read-path server.
 //
 // A YAML config file is required (specified with -c, by default skylight.yaml),
 // the keys are documented in the [Config] type.
@@ -6,8 +7,8 @@
 // If the command line flag -testcert is passed, ACME will be disabled and the
 // certificate will be loaded from skylight.pem and skylight-key.pem.
 //
-// Requests from clients that don't specify an email address in their
-// User-Agent will be globally rate-limited to 75 requests per second.
+// Requests from clients that don't specify an email address in their User-Agent
+// will be globally rate-limited to 75 requests per second.
 //
 // Metrics are exposed publicly at /metrics, and logs are written to stderr in
 // human-readable format, and to stdout in JSON format. /health reports the
@@ -21,7 +22,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -99,10 +99,14 @@ type Config struct {
 	// WitnessPrefix is the full URL of the c2sp.org/tlog-witness monitoring
 	// prefix of the witness. Optional. If ACME is enabled, Skylight will obtain
 	// a certificate for the host of this URL.
+	//
+	// If the witness operates as a mirror, the c2sp.org/tlog-mirror monitoring
+	// prefix will be "{WitnessPrefix}/mirror/".
 	WitnessPrefix string
 
 	// WitnessDirectory is the path to a local directory where the witness
-	// stores its data. Required if WitnessPrefix is set.
+	// stores its data. Required if WitnessPrefix is set. If the witness
+	// operates as a mirror, must contain a "mirror" subdirectory.
 	WitnessDirectory string
 
 	Logs []LogConfig
@@ -199,6 +203,27 @@ type clientContextKey struct{}
 func clientFromContext(ctx context.Context) string {
 	c, _ := ctx.Value(clientContextKey{}).(string)
 	return c
+}
+
+type rateLimitedHandlerContextKey struct{}
+
+func rateLimitedHandlerFromContext(ctx context.Context) http.Handler {
+	h, _ := ctx.Value(rateLimitedHandlerContextKey{}).(http.Handler)
+	return h
+}
+
+type unlimitedHandlerContextKey struct{}
+
+func unlimitedHandlerFromContext(ctx context.Context) http.Handler {
+	h, _ := ctx.Value(unlimitedHandlerContextKey{}).(http.Handler)
+	return h
+}
+
+type mirrorContextKey struct{}
+
+func mirrorFromContext(ctx context.Context) bool {
+	m, _ := ctx.Value(mirrorContextKey{}).(bool)
+	return m
 }
 
 func newClientContextHandler(next http.Handler) http.Handler {
@@ -324,6 +349,70 @@ func main() {
 	buildInfoGauge.WithLabelValues(buildVersion, buildCommit).Set(1)
 	skylightMetrics.MustRegister(buildInfoGauge)
 
+	homeRedirect := http.RedirectHandler(c.HomeRedirect, http.StatusFound)
+	homeRedirect = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(
+		prometheus.Labels{"log": "", "kind": "index"}), homeRedirect,
+		promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
+		promhttp.WithLabelFromCtx("client", clientFromContext))
+	if c.HomeRedirect != "" {
+		mux.Handle("/{$}", homeRedirect)
+	}
+
+	// logMux is a Handler that serves a tlog-tiles log at root, using the
+	// rate-limited and unlimited handlers in the request Context, specializing
+	// the request, setting headers and context keys.
+	logMux := http.NewServeMux()
+	if c.HomeRedirect != "" {
+		logMux.Handle("/{$}", homeRedirect)
+	}
+	logMux.HandleFunc("GET /checkpoint", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "checkpoint"))
+		unlimitedHandlerFromContext(r.Context()).ServeHTTP(w, r)
+	})
+	logMux.HandleFunc("GET /log.v3.json", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "log.v3.json"))
+		unlimitedHandlerFromContext(r.Context()).ServeHTTP(w, r)
+	})
+	logMux.HandleFunc("GET /issuer/{issuer}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/pkix-cert")
+		w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+		r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "issuer"))
+		rateLimitedHandlerFromContext(r.Context()).ServeHTTP(w, r)
+	})
+	logMux.HandleFunc("GET /tile/{tile...}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+		tilePath := "tile/" + r.PathValue("tile")
+		tile, err := sunlight.ParseTilePath(tilePath)
+		if err != nil {
+			tile, err = torchwood.ParseTilePath(tilePath)
+		}
+		_ = err // an invalid tile will take the default case below
+		switch tile.L {
+		case -1:
+			w.Header().Set("Content-Encoding", "gzip")
+			if tile.W < sunlight.TileWidth {
+				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "partial"))
+			} else {
+				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "data"))
+			}
+		case -2:
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Type", "application/jsonl; charset=utf-8")
+			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "names"))
+		default:
+			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "tile"))
+		}
+		rateLimitedHandlerFromContext(r.Context()).ServeHTTP(w, r)
+	})
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -349,7 +438,7 @@ func main() {
 			fatalError(logger, "failed to open local directory", "err", err)
 		}
 		roots[lc] = root
-		handler := http.StripPrefix(prefix.Path, http.FileServerFS(root.FS()))
+		handler := http.FileServerFS(filesOnlyFS{root.FS()})
 
 		// Wrap the file handler with duration and response size metrics.
 		// Avoid tracking the size and duration of errors or simple responses.
@@ -376,70 +465,12 @@ func main() {
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
 			promhttp.WithLabelFromCtx("client", clientFromContext))
 
-		// All paths that don't reach the instrumented handler need to observe
-		// their own request count metric.
-		httpError := func(w http.ResponseWriter, r *http.Request, kind, error string, code int) {
-			reused := reused.LabelFromContext(r.Context())
-			client := clientFromContext(r.Context())
-			reqCount.WithLabelValues(lc.ShortName, kind, client, reused, strconv.Itoa(code)).Inc()
-			w.Header().Del("Content-Encoding")
-			w.Header().Del("Cache-Control")
-			http.Error(w, error, code)
-		}
-
-		// Finally, the per-path mux handler that specialize the request,
-		// setting headers and context keys.
 		patternPrefix := "GET " + prefix.Host + prefix.Path
-		mux.HandleFunc(patternPrefix+"/checkpoint", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "checkpoint"))
-			unlimitedHandler.ServeHTTP(w, r)
-		})
-		mux.HandleFunc(patternPrefix+"/log.v3.json", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Content-Type", "application/json")
-			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "log.v3.json"))
-			unlimitedHandler.ServeHTTP(w, r)
-		})
-		mux.HandleFunc(patternPrefix+"/issuer/{issuer}", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Content-Type", "application/pkix-cert")
-			w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
-			if r.PathValue("issuer") == "" {
-				httpError(w, r, "issuer", "missing issuer", http.StatusBadRequest)
-				return
-			}
-			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "issuer"))
-			rateLimitedHandler.ServeHTTP(w, r)
-		})
-		mux.HandleFunc(patternPrefix+"/tile/{tile...}", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
-			tilePath := "tile/" + r.PathValue("tile")
-			tile, err := sunlight.ParseTilePath(tilePath)
-			if err != nil {
-				httpError(w, r, "tile", "invalid tile path", http.StatusBadRequest)
-				return
-			}
-			switch tile.L {
-			case -1:
-				w.Header().Set("Content-Encoding", "gzip")
-				if tile.W < sunlight.TileWidth {
-					r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "partial"))
-				} else {
-					r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "data"))
-				}
-			case -2:
-				w.Header().Set("Content-Encoding", "gzip")
-				w.Header().Set("Content-Type", "application/jsonl; charset=utf-8")
-				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "names"))
-			default:
-				r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "tile"))
-			}
-			rateLimitedHandler.ServeHTTP(w, r)
+		logMux := http.StripPrefix(prefix.Path, logMux)
+		mux.HandleFunc(patternPrefix+"/", func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(context.WithValue(r.Context(), rateLimitedHandlerContextKey{}, rateLimitedHandler))
+			r = r.WithContext(context.WithValue(r.Context(), unlimitedHandlerContextKey{}, unlimitedHandler))
+			logMux.ServeHTTP(w, r)
 		})
 	}
 
@@ -459,7 +490,25 @@ func main() {
 		if err != nil {
 			fatalError(logger, "failed to open witness directory", "err", err)
 		}
-		handler := http.StripPrefix(prefix.Path, http.FileServerFS(root.FS()))
+		handler := http.FileServerFS(filesOnlyFS{root.FS()})
+
+		handler = func(h http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				p := "/" + originFromContext(r.Context()) + r.URL.Path
+				if mirrorFromContext(r.Context()) {
+					p = "/mirror" + p
+				}
+
+				r2 := new(http.Request)
+				*r2 = *r
+				r2.URL = new(url.URL)
+				*r2.URL = *r.URL
+				r2.URL.Path = p
+				r2.URL.RawPath = ""
+
+				h.ServeHTTP(w, r2)
+			})
+		}(handler)
 
 		handler = promhttp.InstrumentHandlerDuration(reqDuration, handler,
 			promhttp.WithLabelFromCtx("log", originFromContext),
@@ -467,34 +516,33 @@ func main() {
 		handler = promhttp.InstrumentHandlerResponseSize(resSize, handler,
 			promhttp.WithLabelFromCtx("log", originFromContext),
 			promhttp.WithLabelFromCtx("kind", kindFromContext))
-		handler = promhttp.InstrumentHandlerCounter(reqCount, handler,
+
+		unlimitedHandler := promhttp.InstrumentHandlerCounter(reqCount, handler,
+			promhttp.WithLabelFromCtx("log", originFromContext),
+			promhttp.WithLabelFromCtx("kind", kindFromContext),
+			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
+			promhttp.WithLabelFromCtx("client", clientFromContext))
+		rateLimitedHandler := promhttp.InstrumentHandlerCounter(reqCount, newRateLimitHandler(handler),
 			promhttp.WithLabelFromCtx("log", originFromContext),
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
 			promhttp.WithLabelFromCtx("client", clientFromContext))
 
-		// No rate limit for the witness, which only serves small checkpoints.
-
 		patternPrefix := "GET " + prefix.Host + prefix.Path
-		mux.HandleFunc(patternPrefix+"/", func(w http.ResponseWriter, r *http.Request) {
-			path := strings.TrimPrefix(r.URL.Path, prefix.Path)
-			path = strings.TrimPrefix(path, "/")
-			hash, rest, ok := strings.Cut(path, "/")
-			if !ok || rest != "checkpoint" || !isOriginHash(hash) {
-				reused := reused.LabelFromContext(r.Context())
-				client := clientFromContext(r.Context())
-				reqCount.WithLabelValues("", "witness", client, reused, "404").Inc()
-				w.Header().Del("Content-Encoding")
-				w.Header().Del("Cache-Control")
-				http.Error(w, "invalid path", http.StatusNotFound)
-				return
-			}
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "witness:checkpoint"))
-			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, hash))
-			handler.ServeHTTP(w, r)
+		mux.HandleFunc(patternPrefix+"/{origin}/", func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, r.PathValue("origin")))
+			r = r.WithContext(context.WithValue(r.Context(), rateLimitedHandlerContextKey{}, rateLimitedHandler))
+			r = r.WithContext(context.WithValue(r.Context(), unlimitedHandlerContextKey{}, unlimitedHandler))
+			// We need to strip the origin from the path because logMux anchors
+			// at root. It will be put back before the FileServer Handler.
+			http.StripPrefix(prefix.Path+"/"+r.PathValue("origin"), logMux).ServeHTTP(w, r)
+		})
+		mux.HandleFunc(patternPrefix+"/mirror/{origin}/", func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, r.PathValue("origin")))
+			r = r.WithContext(context.WithValue(r.Context(), rateLimitedHandlerContextKey{}, rateLimitedHandler))
+			r = r.WithContext(context.WithValue(r.Context(), unlimitedHandlerContextKey{}, unlimitedHandler))
+			r = r.WithContext(context.WithValue(r.Context(), mirrorContextKey{}, true))
+			http.StripPrefix(prefix.Path+"/mirror/"+r.PathValue("origin"), logMux).ServeHTTP(w, r)
 		})
 	}
 
@@ -531,16 +579,6 @@ func main() {
 		})
 	})
 
-	if c.HomeRedirect != "" {
-		mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
-			reused := reused.LabelFromContext(r.Context())
-			client := clientFromContext(r.Context())
-			reqCount.WithLabelValues("", "index", client, reused, "302").Inc()
-
-			http.Redirect(w, r, c.HomeRedirect, http.StatusFound)
-		})
-	}
-
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusOK
 		buf := &bytes.Buffer{}
@@ -563,9 +601,9 @@ func main() {
 		client := clientFromContext(r.Context())
 		reqCount.WithLabelValues("", "health", client, reused, strconv.Itoa(status)).Inc()
 
-		w.WriteHeader(status)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(status)
 		io.Copy(w, buf)
 	})
 
@@ -639,6 +677,30 @@ func main() {
 	os.Exit(1)
 }
 
+// filesOnlyFS hides directories, so [http.FileServerFS] serves 404s instead
+// of directory listings (and of redirects to them). Directories are not part
+// of the tlog-tiles API surface.
+type filesOnlyFS struct {
+	fsys fs.FS
+}
+
+func (f filesOnlyFS) Open(name string) (fs.File, error) {
+	file, err := f.fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		file.Close()
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	return file, nil
+}
+
 func parsePrefix(prefix string) (*url.URL, error) {
 	prefix = strings.TrimSuffix(prefix, "/")
 	p, err := url.Parse(prefix)
@@ -652,20 +714,6 @@ func parsePrefix(prefix string) (*url.URL, error) {
 		return nil, fmt.Errorf("must have a host: %s", prefix)
 	}
 	return p, nil
-}
-
-// isOriginHash reports whether s is a lowercase hex-encoded SHA-256, the origin
-// hash that addresses a witnessed log's checkpoint per c2sp.org/tlog-witness.
-func isOriginHash(s string) bool {
-	if len(s) != sha256.Size*2 {
-		return false
-	}
-	for _, c := range s {
-		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 type logInfo struct {

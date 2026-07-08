@@ -1,0 +1,34 @@
+{
+    "description": "rome2026h1.example.org",
+    "final_tree_head": {
+        "sha256_root_hash": "lCkHUpkmVBEms2r2T1K6Og69+wUuuN3MIEW1/ezu2v0=",
+        "timestamp": 1767139200000,
+        "tree_size": 300
+    },
+    "friendly_name": "rome2026h1",
+    "intended_use": "test",
+    "key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEPIcer7RB32jt4bTEbhgUKLKvOctFD+I2hoDItFxUBlJiGFvftBuRk3fO7e1T7gC2ekyfL7XoO2oN/ObcZyc4EA==",
+    "log_id": "CKIDXIl+znJaHUyhzhNVaSxIUov59RCXLh3fJXJExnk=",
+    "log_software": {
+        "name": "sunlight",
+        "version": "test"
+    },
+    "log_spec": "static-ct-api",
+    "mmd": 60,
+    "mmd_seconds": 60,
+    "monitoring_endpoint": {
+        "url": "https://rome2026h1.example.org/"
+    },
+    "monitoring_url": "https://rome2026h1.example.org/",
+    "status": "readonly",
+    "status_timestamp": "2026-01-08T00:00:00Z",
+    "submission_endpoint": {
+        "url": "https://rome2026h1.example.org/"
+    },
+    "submission_url": "https://rome2026h1.example.org/",
+    "temporal_interval": {
+        "end_exclusive": "2026-01-01T00:00:00Z",
+        "start_inclusive": "2025-07-01T00:00:00Z"
+    },
+    "tls_only": true
+}

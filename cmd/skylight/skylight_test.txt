@@ -1,0 +1,282 @@
+# Host-only log.
+
+GET https://rome2026h1.example.org/checkpoint
+header content-type == text/plain; charset=utf-8
+header cache-control == no-store
+header access-control-allow-origin == *
+body contains rome2026h1.example.org
+body ~ ^300$
+
+GET https://rome2026h1.example.org/log.v3.json
+header content-type == application/json
+header access-control-allow-origin == *
+body contains "description": "rome2026h1.example.org"
+body contains "end_exclusive": "2026-01-01T00:00:00Z"
+
+GET https://rome2026h1.example.org/tile/0/000
+header content-type == application/octet-stream
+header cache-control == public, max-age=604800, immutable
+header access-control-allow-origin == *
+body contains fake full level 0 tile
+
+GET https://rome2026h1.example.org/tile/0/001.p/44
+header content-type == application/octet-stream
+body contains fake partial level 0 tile
+
+GET https://rome2026h1.example.org/tile/1/000.p/1
+body contains fake partial level 1 tile
+
+# Data and names tiles are stored gzip-compressed and served as-is with a
+# Content-Encoding header, so the response body here is compressed.
+GET https://rome2026h1.example.org/tile/data/000
+header content-type == application/octet-stream
+header content-encoding == gzip
+
+GET https://rome2026h1.example.org/tile/data/001.p/44
+header content-encoding == gzip
+
+GET https://rome2026h1.example.org/tile/names/000
+header content-type == application/jsonl; charset=utf-8
+header content-encoding == gzip
+
+GET https://rome2026h1.example.org/issuer/76a2d477b477d00f6fe635ec3faf0984b0584127ab6ea9c46b1dd569496b5c3d
+header content-type == application/pkix-cert
+header cache-control == public, max-age=604800, immutable
+body contains fake issuer certificate
+
+GET https://rome2026h1.example.org/issuer/0000000000000000000000000000000000000000000000000000000000000000
+code == 404
+
+# The {issuer} wildcard requires a non-empty segment.
+GET https://rome2026h1.example.org/issuer/
+code == 404
+
+GET https://rome2026h1.example.org/tile/bogus
+code == 404
+
+# c2sp.org/tlog-tiles entry bundle paths parse through the torchwood fallback,
+# but CT logs store static-ct-api data tiles, so there is no such file.
+GET https://rome2026h1.example.org/tile/entries/000
+code == 404
+
+# Directories are hidden from the file server: no listings, and no redirects
+# to them.
+GET https://rome2026h1.example.org/tile/
+code == 404
+
+GET https://rome2026h1.example.org/tile/data
+code == 404
+
+GET https://rome2026h1.example.org/tile/data/
+code == 404
+
+# The root of a log prefix serves the home redirect.
+GET https://rome2026h1.example.org/
+redirect == https://rome.example.org
+code == 302
+
+GET https://rome2026h1.example.org/unknown
+code == 404
+
+# A host-only log otherwise claims its entire host: the /metrics, /health,
+# and /logs.json handlers (see skylight.example.org below) don't appear on it.
+GET https://rome2026h1.example.org/metrics
+code == 404
+
+GET https://rome2026h1.example.org/health
+code == 404
+
+GET https://rome2026h1.example.org/logs.json
+code == 404
+
+POST https://rome2026h1.example.org/checkpoint
+code == 405
+
+HEAD https://rome2026h1.example.org/checkpoint
+header content-type == text/plain; charset=utf-8
+header cache-control == no-store
+
+# Two logs sharing a host under path prefixes.
+
+GET https://logs.example.org/rome2026h2/checkpoint
+header cache-control == no-store
+body contains rome2026h1.example.org
+body ~ ^300$
+
+GET https://logs.example.org/rome2026h2/log.v3.json
+header content-type == application/json
+body contains "description": "rome2026h1.example.org"
+
+GET https://logs.example.org/rome2026h2/tile/0/000
+header content-type == application/octet-stream
+body contains fake full level 0 tile
+
+GET https://logs.example.org/milan2026h1/checkpoint
+body contains rome2026h1.example.org
+
+GET https://logs.example.org/milan2026h1/tile/data/000
+header content-encoding == gzip
+
+GET https://logs.example.org/checkpoint
+code == 404
+
+GET https://logs.example.org/unknown/checkpoint
+code == 404
+
+# ServeMux redirects the bare log prefix to the subtree root, which serves
+# the home redirect like the host-only log root above.
+GET https://logs.example.org/rome2026h2
+redirect == /rome2026h2/
+
+GET https://logs.example.org/rome2026h2/
+redirect == https://rome.example.org
+code == 302
+
+# An encoded slash does not match the log prefix segment.
+GET https://logs.example.org/rome2026h2%2Fcheckpoint
+code == 404
+
+# Witness, per c2sp.org/tlog-witness: checkpoints are addressed by the
+# hex-encoded SHA-256 of the log origin.
+
+GET https://witness.example.org/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/checkpoint
+header content-type == text/plain; charset=utf-8
+header cache-control == no-store
+body contains rome2026h1.example.org
+
+GET https://witness.example.org/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/checkpoint
+code == 404
+
+GET https://witness.example.org/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/0/000
+code == 404
+
+# The witness read API only stores per-log checkpoints; the other tlog-tiles
+# paths are absent from the filesystem.
+GET https://witness.example.org/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/log.v3.json
+code == 404
+
+# An origin root serves the home redirect, like every other prefix root.
+GET https://witness.example.org/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/
+redirect == https://rome.example.org
+
+POST https://witness.example.org/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/checkpoint
+code == 405
+
+# The witness only claims /{origin}/ paths, so the host root falls through
+# to the hostless home redirect below.
+GET https://witness.example.org/
+redirect == https://rome.example.org
+
+# Mirror, per c2sp.org/tlog-mirror, under the witness prefix.
+
+GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/checkpoint
+header cache-control == no-store
+body contains rome2026h1.example.org
+
+GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/0/000
+header content-type == application/octet-stream
+body contains fake mirrored level 0 tile
+
+# Mirrors store c2sp.org/tlog-tiles entry bundles, which parse through the
+# torchwood fallback, gzip-compressed like data tiles.
+GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/entries/000
+header content-type == application/octet-stream
+header cache-control == public, max-age=604800, immutable
+header content-encoding == gzip
+
+GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/entries/001.p/44
+header content-encoding == gzip
+
+# Mirrors don't store static-ct-api data or names tiles.
+GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/data/000
+code == 404
+
+GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/tile/
+code == 404
+
+GET https://witness.example.org/mirror/000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/
+redirect == https://rome.example.org
+
+GET https://witness.example.org/mirror/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/checkpoint
+code == 404
+
+# "mirror" is not itself an origin: the more specific mirror pattern wins,
+# redirecting to a path that is then a 404.
+GET https://witness.example.org/mirror/checkpoint
+redirect == /mirror/checkpoint/
+
+# Path traversal is stopped at three independent layers: ServeMux cleans
+# literal dot-dot segments into a redirect, StripPrefix rejects requests whose
+# escaped path doesn't literally carry the origin prefix, and os.Root confines
+# the file server.
+
+GET https://witness.example.org/../checkpoint
+redirect == /checkpoint/
+
+GET https://witness.example.org/%2e%2e/checkpoint
+code == 404
+
+GET https://witness.example.org/..%2f../checkpoint
+code == 404
+
+GET https://witness.example.org/a%2Fb/checkpoint
+code == 404
+
+GET https://witness.example.org/mirror/..%2fmirror%2f000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706/checkpoint
+code == 404
+
+# logs.json, served only at the configured LogsJSONPrefix, which shares its
+# host with the path-prefixed logs.
+
+GET https://logs.example.org/logs.json
+header content-type == application/json
+header access-control-allow-origin == *
+body contains "operator_name":"Test Operator"
+body contains https://rome2026h1.example.org/log.v3.json
+body contains https://logs.example.org/rome2026h2/log.v3.json
+body contains https://logs.example.org/milan2026h1/log.v3.json
+
+GET https://other.example.org/logs.json
+code == 404
+
+# The home redirect and /health apply to any host without a more specific
+# handler.
+
+GET https://skylight.example.org/
+redirect == https://rome.example.org
+code == 302
+
+GET https://skylight.example.org/health
+header content-type == text/plain; charset=utf-8
+header x-content-type-options == nosniff
+body contains rome2026h1: read-only
+body contains rome2026h2: read-only
+body contains milan2026h1: read-only
+
+# An override of the default test User-Agent, minting the anonymous client
+# classification checked below. The checkpoint endpoint is not rate limited,
+# so this doesn't draw down the anonymous budget.
+GET https://rome2026h1.example.org/checkpoint
+reqheader User-Agent skylight-webtest-anonymous
+body contains rome2026h1.example.org
+
+# /metrics runs last, checking the labels minted by the requests above: the
+# kind classification of each endpoint, the per-log and per-origin log labels,
+# the User-Agent client classification, and that file server errors are
+# counted too.
+GET https://skylight.example.org/metrics
+body contains go_goroutines
+body contains skylight_build_info
+body contains kind="checkpoint"
+body contains kind="log.v3.json"
+body contains kind="issuer"
+body contains kind="tile"
+body contains kind="data"
+body contains kind="partial"
+body contains kind="names"
+body contains kind="index"
+body contains log="rome2026h1"
+body contains log="000de184301123b9278c086a7d9f68c9577e83872224c197058fd90784ea9706"
+body contains client="with-email"
+body contains client="anonymous"
+body contains code="404"
