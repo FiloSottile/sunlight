@@ -60,8 +60,6 @@ import (
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/crypto/hkdf"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 )
@@ -1026,7 +1024,10 @@ func main() {
 		}
 		s.TLSConfig = m.TLSConfig()
 	} else {
-		s.Handler = h2c.NewHandler(s.Handler, &http2.Server{})
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		s.Protocols = protocols
 	}
 
 	if s.TLSConfig != nil {
