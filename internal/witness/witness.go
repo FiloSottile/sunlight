@@ -478,6 +478,10 @@ func (w *Witness) PullLogList(ctx context.Context, url string, mirror bool) (err
 	newMeta := maps.Clone(w.meta)
 	w.logsMu.Unlock()
 	for origin, vkey := range logs {
+		if origin == w.c.Name || (w.c.MirrorName != "" && origin == w.c.MirrorName) {
+			return fmt.Errorf("log origin %q collides with the witness or mirror cosigner name", origin)
+		}
+
 		// If the log is already known, check that the key didn't change,
 		// potentially upgrade to a mirror, and skip.
 		if l, ok := newMeta[origin]; ok {
@@ -502,7 +506,7 @@ func (w *Witness) PullLogList(ctx context.Context, url string, mirror bool) (err
 			return fmt.Errorf("couldn't parse vkey %q for log %q: %w", vkey, origin, err)
 		}
 		w.c.Log.InfoContext(ctx, "adding new log to witness config", "origin", origin, "vkey", vkey,
-			"mirror", mirror, "source", url)
+			"mirror", mirror, "list", url)
 
 		// Create() might fail if the log was previously configured and removed,
 		// or if a previous PullLogList crashed before persisting the new config.

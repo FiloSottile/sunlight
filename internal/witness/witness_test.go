@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -874,6 +875,42 @@ func TestForgedWitnessSigLineDoesNotPoisonState(t *testing.T) {
 	fatalIfErr(t, err)
 	if _, err := note.Open(stored, note.VerifierList(logVerifier)); err != nil {
 		t.Errorf("stored checkpoint does not retain a valid log signature: %v", err)
+	}
+}
+
+func TestPullLogListRejectsNameCollision(t *testing.T) {
+	ctx := context.Background()
+	w := newTestMirrorWitness(t)
+
+	// A log list is trusted config, but a log whose origin collides with the
+	// witness's or mirror's own cosigner name would blur the boundary between
+	// the signatures the log asserts and the cosignatures the witness attests.
+	// PullLogList must reject the whole list rather than adopt such a log.
+	writeList := func(t *testing.T, name string) string {
+		t.Helper()
+		_, vkey, err := note.GenerateKey(rand.Reader, name)
+		fatalIfErr(t, err)
+		path := filepath.Join(t.TempDir(), "logs.txt")
+		fatalIfErr(t, os.WriteFile(path, fmt.Appendf(nil, "logs/v0\nvkey %s\n", vkey), 0o600))
+		return path
+	}
+
+	for _, name := range []string{"example.com/witness", "example.com/mirror"} {
+		err := w.PullLogList(ctx, writeList(t, name), false)
+		if err == nil || !strings.Contains(err.Error(), "collides") {
+			t.Errorf("PullLogList with origin %q: got %v, want collision error", name, err)
+		}
+		if _, ok := w.metaForOrigin(name); ok {
+			t.Errorf("colliding origin %q was adopted into the witness config", name)
+		}
+	}
+
+	// A non-colliding log is still accepted.
+	if err := w.PullLogList(ctx, writeList(t, "example.com/other"), false); err != nil {
+		t.Errorf("PullLogList with non-colliding origin: unexpected error %v", err)
+	}
+	if _, ok := w.metaForOrigin("example.com/other"); !ok {
+		t.Error("non-colliding origin was not adopted into the witness config")
 	}
 }
 
