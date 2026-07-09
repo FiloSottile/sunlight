@@ -1438,6 +1438,13 @@ func (w *Witness) processAddEntriesPackage(ctx context.Context, hashReader *torc
 			}
 			backendKey := "mirror/" + OriginHash(pending.Origin) + "/" + torchwood.TilePath(dataTile)
 			w.m.MirrorDataTileSize.WithLabelValues(pending.Origin).Observe(float64(len(data)))
+			// Known issue: full data tiles are uploaded as immutable (see
+			// optsDataTile), so a backend that enforces immutability rejects
+			// re-uploading one with different bytes. We recompress the entries
+			// on every add-entries, so if a crash-retry that re-uploads a full
+			// tile straddles a change to the compression output (e.g. a Go
+			// toolchain upgrade altering flate), the immutable comparison fails
+			// and the upload errors until the tile is manually deleted.
 			data, err = compress(data)
 			if err != nil {
 				return fmtErrorf("failed to compress data tile: %w", err)
