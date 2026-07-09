@@ -12,7 +12,9 @@
 //
 // Metrics are exposed publicly at /metrics, and logs are written to stderr in
 // human-readable format, and to stdout in JSON format. /health reports the
-// health of all logs, returning 500 if any non-staging log is stale.
+// health of all logs, returning 500 if any non-staging log is stale; it also
+// verifies the served checkpoints of any witness with a Key configured, and the
+// mirror checkpoints and right-edge tiles of any witness with a MirrorKey.
 //
 // A private HTTP debug server is also started on a random port on localhost. It
 // serves the net/http/pprof endpoints, the [heavyhitter] endpoints, the
@@ -22,8 +24,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -49,6 +53,7 @@ import (
 	"filippo.io/sunlight/internal/keylog"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/stdlog"
+	"filippo.io/sunlight/internal/witness"
 	"filippo.io/torchwood"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -114,6 +119,20 @@ type WitnessConfig struct {
 	// its data. If the witness operates as a mirror, must contain a "mirror"
 	// subdirectory.
 	LocalDirectory string
+
+	// Key is the c2sp.org/signed-note vkey of the witness cosigner. If set,
+	// /health verifies the served witness checkpoints. Required if MirrorKey is
+	// set.
+	Key string
+
+	// MirrorKey is the c2sp.org/signed-note vkey of the mirror cosigner. If set,
+	// /health verifies the served mirror checkpoints and tiles of every log
+	// found under the "mirror" subdirectory of LocalDirectory, and that each is
+	// behind the corresponding witness checkpoint.
+	MirrorKey string
+
+	// Staging indicates that this witness should not make /health fail.
+	Staging bool
 }
 
 type LogConfig struct {
@@ -485,6 +504,7 @@ func main() {
 		})
 	}
 
+	var witnessChecks []witnessHealth
 	for _, wc := range c.Witnesses {
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("witness", wc.MonitoringPrefix),
@@ -564,6 +584,39 @@ func main() {
 			r = r.WithContext(context.WithValue(r.Context(), unlimitedHandlerContextKey{}, unlimitedHandler))
 			http.StripPrefix(prefix.Path+"/mirror/"+origin, logMux).ServeHTTP(w, r)
 		})
+
+		if wc.Key != "" {
+			witnessVerifier, err := parseVerifier(wc.Key)
+			if err != nil {
+				fatalError(logger, "invalid witness Key", "err", err)
+			}
+			witnessChecks = append(witnessChecks, witnessHealth{
+				root:     root,
+				verifier: note.VerifierList(witnessVerifier),
+				staging:  wc.Staging,
+			})
+			if wc.MirrorKey != "" {
+				mirrorVerifier, err := parseVerifier(wc.MirrorKey)
+				if err != nil {
+					fatalError(logger, "invalid witness MirrorKey", "err", err)
+				}
+				mirrorRoot, err := root.OpenRoot("mirror")
+				if err != nil {
+					fatalError(logger, "failed to open witness mirror directory", "err", err)
+				}
+				witnessChecks = append(witnessChecks, witnessHealth{
+					root:            mirrorRoot,
+					verifier:        note.VerifierList(mirrorVerifier),
+					pendingRoot:     root,
+					mirror:          true,
+					witnessVerifier: note.VerifierList(witnessVerifier),
+					staging:         wc.Staging,
+				})
+			}
+		}
+		if wc.MirrorKey != "" && wc.Key == "" {
+			fatalError(logger, "witness with MirrorKey must also set Key")
+		}
 	}
 
 	var logsJSONPrefix string
@@ -614,6 +667,42 @@ func main() {
 				}
 			} else {
 				fmt.Fprintf(buf, "%s: OK\n", log.ShortName)
+			}
+		}
+
+		for _, wh := range witnessChecks {
+			kind := "witness"
+			if wh.mirror {
+				kind = "mirror"
+			}
+			hashes, err := wh.hashes()
+			if err != nil {
+				if wh.staging {
+					fmt.Fprintf(buf, "%s: %v (ignored)\n", kind, err)
+				} else {
+					status = http.StatusInternalServerError
+					fmt.Fprintf(buf, "%s: %v\n", kind, err)
+				}
+				continue
+			}
+			for _, hash := range hashes {
+				origin, err := wh.check(r.Context(), hash)
+				// Label with the verified origin, falling back to the directory
+				// name if we couldn't get that far.
+				label := kind + " " + hash
+				if origin != "" {
+					label = kind + " " + origin
+				}
+				if err != nil {
+					if wh.staging {
+						fmt.Fprintf(buf, "%s: %v (ignored)\n", label, err)
+					} else {
+						status = http.StatusInternalServerError
+						fmt.Fprintf(buf, "%s: %v\n", label, err)
+					}
+				} else {
+					fmt.Fprintf(buf, "%s: OK\n", label)
+				}
 			}
 		}
 
@@ -814,6 +903,112 @@ func checkLog(root *os.Root) error {
 		return fmt.Errorf("checkpoint is too old: %v", ct)
 	}
 	return nil
+}
+
+type witnessHealth struct {
+	root     *os.Root
+	verifier note.Verifiers
+	staging  bool
+
+	// mirror, pendingRoot and witnessVerifier are only set for a mirror.
+	mirror          bool
+	pendingRoot     *os.Root
+	witnessVerifier note.Verifiers
+}
+
+// hashes returns the origin-hash subdirectories of the witness directory, each
+// identifying a log. Non-hash entries (such as the "mirror" subdirectory of a
+// mirror witness) are skipped.
+func (wh witnessHealth) hashes() ([]string, error) {
+	entries, err := fs.ReadDir(wh.root.FS(), ".")
+	if err != nil {
+		return nil, fmt.Errorf("failed to enumerate logs: %w", err)
+	}
+	var hashes []string
+	for _, e := range entries {
+		if e.IsDir() && isOriginHash(e.Name()) {
+			hashes = append(hashes, e.Name())
+		}
+	}
+	return hashes, nil
+}
+
+// check verifies the checkpoint served for the log whose origin hashes to hash,
+// and for a mirror also the presence and validity of the right-edge tiles. It
+// returns the origin once verified, so the caller can label a later failure.
+func (wh witnessHealth) check(ctx context.Context, hash string) (string, error) {
+	signedCheckpoint, err := fs.ReadFile(wh.root.FS(), hash+"/checkpoint")
+	if err != nil {
+		return "", fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	n, err := note.Open(signedCheckpoint, wh.verifier)
+	if err != nil {
+		return "", fmt.Errorf("failed to verify checkpoint: %w", err)
+	}
+	checkpoint, err := torchwood.ParseCheckpoint(n.Text)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse checkpoint: %w", err)
+	}
+	origin := checkpoint.Origin
+	if h := witness.OriginHash(origin); h != hash {
+		return origin, fmt.Errorf("origin %q hashes to %s, not %s", origin, h, hash)
+	}
+	if !wh.mirror {
+		return origin, nil
+	}
+
+	// Read the right-edge hashes of the mirror tree through a verifying tile
+	// reader, which loads them from the served tiles and checks them against the
+	// signed checkpoint. This confirms the right-edge tiles exist and are valid.
+	sub, err := fs.Sub(wh.root.FS(), hash)
+	if err != nil {
+		return origin, err
+	}
+	tr, err := torchwood.NewTileFS(sub)
+	if err != nil {
+		return origin, err
+	}
+	hr := torchwood.TileHashReaderWithContext(ctx, checkpoint.Tree, tr)
+	if edge := torchwood.RightEdge(checkpoint.N); len(edge) > 0 {
+		if _, err := hr.ReadHashes(edge); err != nil {
+			return origin, fmt.Errorf("failed to verify right-edge tiles: %w", err)
+		}
+	}
+
+	// The mirror checkpoint must never be ahead of the pending witness
+	// checkpoint, which is signed by the witness cosigner and always present for
+	// a mirrored log (see c2sp.org/tlog-mirror).
+	signedPending, err := fs.ReadFile(wh.pendingRoot.FS(), hash+"/checkpoint")
+	if err != nil {
+		return origin, fmt.Errorf("failed to read pending checkpoint: %w", err)
+	}
+	pn, err := note.Open(signedPending, wh.witnessVerifier)
+	if err != nil {
+		return origin, fmt.Errorf("failed to verify pending checkpoint: %w", err)
+	}
+	pending, err := torchwood.ParseCheckpoint(pn.Text)
+	if err != nil {
+		return origin, fmt.Errorf("failed to parse pending checkpoint: %w", err)
+	}
+	if pending.Origin != origin {
+		return origin, fmt.Errorf("pending checkpoint origin %q does not match mirror origin %q", pending.Origin, origin)
+	}
+	if checkpoint.N > pending.N {
+		return origin, fmt.Errorf("mirror checkpoint size %d is ahead of pending checkpoint size %d", checkpoint.N, pending.N)
+	}
+	return origin, nil
+}
+
+func isOriginHash(name string) bool {
+	b, err := hex.DecodeString(name)
+	return err == nil && len(b) == sha256.Size && strings.ToLower(name) == name
+}
+
+func parseVerifier(vkey string) (note.Verifier, error) {
+	if v, err := note.NewVerifier(vkey); err == nil {
+		return v, nil
+	}
+	return torchwood.NewCosignatureVerifier(vkey)
 }
 
 func fatalError(logger *slog.Logger, msg string, args ...any) {
