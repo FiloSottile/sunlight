@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -188,16 +189,6 @@ func TestWitnessHealth(t *testing.T) {
 	witnessSigner := newTestCosigner(t, "witness.example.org")
 	mirrorSigner := newTestCosigner(t, "mirror.example.org")
 
-	// Build the verifiers through parseVerifier, as the config path does.
-	witnessVerifier, err := parseVerifier(witnessSigner.Verifier().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	mirrorVerifier, err := parseVerifier(mirrorSigner.Verifier().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	openRoot := func(t *testing.T, dir string) *os.Root {
 		root, err := os.OpenRoot(dir)
 		if err != nil {
@@ -207,33 +198,44 @@ func TestWitnessHealth(t *testing.T) {
 		return root
 	}
 
+	load := func(t *testing.T, wh *witnessHealth) {
+		t.Helper()
+		if err := wh.loadVerifiers(); err != nil {
+			t.Fatalf("loadVerifiers() error = %v", err)
+		}
+	}
+
 	// buildWitness writes a witness directory with a checkpoint of the given
-	// size under dirHash, signed by signer.
+	// size under dirHash, signed by signer, and a witness.v0.json listing the
+	// witness verifier key.
 	buildWitness := func(t *testing.T, dirHash string, size int64, signer note.Signer) witnessHealth {
 		dir := t.TempDir()
 		writeWitnessCheckpoint(t, dir, origin, dirHash, size, signer)
-		return witnessHealth{
-			root:     openRoot(t, dir),
-			verifier: note.VerifierList(witnessVerifier),
-		}
+		writeVerifierKeys(t, filepath.Join(dir, "witness.v0.json"), witnessSigner.Verifier().String())
+		wh := witnessHealth{root: openRoot(t, dir)}
+		load(t, &wh)
+		return wh
 	}
 
 	// buildMirror lays out a witness directory with a mirror tree of size
 	// mirrorN under mirror/<dirHash>/ and a pending witness checkpoint of size
-	// pendingN under <dirHash>/. It returns the health check and the mirror
-	// directory.
+	// pendingN under <dirHash>/, along with the witness.v0.json and
+	// mirror.v0.json files listing the verifier keys. It returns the health
+	// check and the mirror directory.
 	buildMirror := func(t *testing.T, dirHash string, mirrorN, pendingN int64) (witnessHealth, string) {
 		witnessDir := t.TempDir()
 		mirrorDir := filepath.Join(witnessDir, "mirror")
 		writeMirrorTree(t, mirrorDir, origin, dirHash, mirrorN, mirrorSigner)
 		writeWitnessCheckpoint(t, witnessDir, origin, dirHash, pendingN, witnessSigner)
-		return witnessHealth{
-			root:            openRoot(t, mirrorDir),
-			pendingRoot:     openRoot(t, witnessDir),
-			mirror:          true,
-			verifier:        note.VerifierList(mirrorVerifier),
-			witnessVerifier: note.VerifierList(witnessVerifier),
-		}, mirrorDir
+		writeVerifierKeys(t, filepath.Join(witnessDir, "witness.v0.json"), witnessSigner.Verifier().String())
+		writeVerifierKeys(t, filepath.Join(mirrorDir, "mirror.v0.json"), mirrorSigner.Verifier().String())
+		wh := witnessHealth{
+			root:        openRoot(t, mirrorDir),
+			pendingRoot: openRoot(t, witnessDir),
+			mirror:      true,
+		}
+		load(t, &wh)
+		return wh, mirrorDir
 	}
 
 	t.Run("witness checkpoint", func(t *testing.T) {
@@ -329,6 +331,52 @@ func TestWitnessHealth(t *testing.T) {
 		}
 	})
 
+	t.Run("missing witness.v0.json", func(t *testing.T) {
+		dir := t.TempDir()
+		writeWitnessCheckpoint(t, dir, origin, witness.OriginHash(origin), 300, witnessSigner)
+		wh := witnessHealth{root: openRoot(t, dir)}
+		if err := wh.loadVerifiers(); err == nil ||
+			!strings.Contains(err.Error(), "failed to read witness.v0.json") {
+			t.Fatalf("loadVerifiers() error = %v, want a witness.v0.json read failure", err)
+		}
+	})
+
+	t.Run("mirror missing pending witness.v0.json", func(t *testing.T) {
+		witnessDir := t.TempDir()
+		mirrorDir := filepath.Join(witnessDir, "mirror")
+		writeMirrorTree(t, mirrorDir, origin, witness.OriginHash(origin), 300, mirrorSigner)
+		writeVerifierKeys(t, filepath.Join(mirrorDir, "mirror.v0.json"), mirrorSigner.Verifier().String())
+		wh := witnessHealth{
+			root:        openRoot(t, mirrorDir),
+			pendingRoot: openRoot(t, witnessDir),
+			mirror:      true,
+		}
+		if err := wh.loadVerifiers(); err == nil ||
+			!strings.Contains(err.Error(), "witness.v0.json") {
+			t.Fatalf("loadVerifiers() error = %v, want a witness.v0.json read failure", err)
+		}
+	})
+
+	t.Run("invalid verifier key", func(t *testing.T) {
+		dir := t.TempDir()
+		writeVerifierKeys(t, filepath.Join(dir, "witness.v0.json"), "not a vkey")
+		wh := witnessHealth{root: openRoot(t, dir)}
+		if err := wh.loadVerifiers(); err == nil ||
+			!strings.Contains(err.Error(), "invalid verifier key") {
+			t.Fatalf("loadVerifiers() error = %v, want an invalid key failure", err)
+		}
+	})
+
+	t.Run("empty verifier keys", func(t *testing.T) {
+		dir := t.TempDir()
+		writeVerifierKeys(t, filepath.Join(dir, "witness.v0.json"))
+		wh := witnessHealth{root: openRoot(t, dir)}
+		if err := wh.loadVerifiers(); err == nil ||
+			!strings.Contains(err.Error(), "no verifier keys") {
+			t.Fatalf("loadVerifiers() error = %v, want a no keys failure", err)
+		}
+	})
+
 	t.Run("hashes reports enumeration errors", func(t *testing.T) {
 		root, err := os.OpenRoot(t.TempDir())
 		if err != nil {
@@ -415,6 +463,17 @@ func writeMirrorTree(t *testing.T, dir, origin, dirHash string, size int64, sign
 		t.Fatal(err)
 	}
 	writeTestFile(t, filepath.Join(dir, dirHash, "checkpoint"), signed)
+}
+
+// writeVerifierKeys writes a witness.v0.json or mirror.v0.json file listing
+// the given verifier keys.
+func writeVerifierKeys(t *testing.T, path string, vkeys ...string) {
+	t.Helper()
+	j, err := json.Marshal(map[string][]string{"verifier_keys": vkeys})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, j)
 }
 
 func writeTestFile(t *testing.T, path string, data []byte) {

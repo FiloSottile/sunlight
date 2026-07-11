@@ -16,9 +16,11 @@ import (
 	"compress/gzip"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -149,15 +151,108 @@ func main() {
 	// mirror/ per c2sp.org/tlog-mirror. Mirrored logs use c2sp.org/tlog-tiles
 	// paths: entry bundles live at tile/entries/, and are stored
 	// gzip-compressed like data tiles.
+	// The witness.v0.json and mirror.v0.json metadata files list the cosigner
+	// verifier keys /health uses to verify the served checkpoints. The keys are
+	// derived from fixed seeds, and the cosignatures carry a fixed timestamp
+	// (which /health doesn't check), so the output stays deterministic.
+	witnessCosigner := newCosigner("witness.example.org", "skylight test witness key")
+	witness2Cosigner := newCosigner("witness2.example.org", "skylight test witness2 key")
+	mirrorCosigner := newCosigner("mirror.example.org", "skylight test mirror key")
+	witnessV0, err := json.MarshalIndent(map[string]any{
+		"name":           "witness.example.org",
+		"submission_url": "https://witness-submit.example.org/",
+		"monitoring_url": "https://witness.example.org/",
+		"verifier_keys":  []string{witnessCosigner.Verifier().String()},
+		"software":       map[string]string{"name": "sunlight", "version": "test"},
+	}, "", "    ")
+	if err != nil {
+		log.Fatal(err)
+	}
+	mirrorV0, err := json.MarshalIndent(map[string]any{
+		"name":           "mirror.example.org",
+		"submission_url": "https://witness-submit.example.org/mirror/",
+		"monitoring_url": "https://witness.example.org/mirror/",
+		"verifier_keys":  []string{mirrorCosigner.Verifier().String()},
+		"software":       map[string]string{"name": "sunlight", "version": "test"},
+	}, "", "    ")
+	if err != nil {
+		log.Fatal(err)
+	}
+	witness2V0, err := json.MarshalIndent(map[string]any{
+		"name":           "witness2.example.org",
+		"submission_url": "https://witness2-submit.example.org/",
+		"monitoring_url": "https://witness2.example.org/",
+		"verifier_keys":  []string{witness2Cosigner.Verifier().String()},
+		"software":       map[string]string{"name": "sunlight", "version": "test"},
+	}, "", "    ")
+	if err != nil {
+		log.Fatal(err)
+	}
+	write("witness/witness.v0.json", append(witnessV0, '\n'))
+	write("witness/mirror/mirror.v0.json", append(mirrorV0, '\n'))
+	write("witness2/witness.v0.json", append(witness2V0, '\n'))
+
+	// The witness checkpoint doubles as the pending checkpoint of the mirrored
+	// log, so it must be cosigned and at least as large as the mirror tree.
+	witnessCheckpoint, err := note.Sign(&note.Note{Text: torchwood.Checkpoint{
+		Origin: origin,
+		Tree:   tlog.Tree{N: treeSize, Hash: treeHash},
+	}.String()}, signer, witnessCosigner)
+	if err != nil {
+		log.Fatal(err)
+	}
 	originHash := sha256.Sum256([]byte(origin))
 	witnessed := hex.EncodeToString(originHash[:])
-	write("witness/"+witnessed+"/checkpoint", checkpoint)
-	write("witness/mirror/"+witnessed+"/checkpoint", checkpoint)
+	write("witness/"+witnessed+"/checkpoint", witnessCheckpoint)
+
+	// The mirror serves a real tree with real hash tiles, so /health can verify
+	// the right-edge tiles against the cosigned mirror checkpoint.
+	hashes := map[int64]tlog.Hash{}
+	hr := tlog.HashReaderFunc(func(indexes []int64) ([]tlog.Hash, error) {
+		out := make([]tlog.Hash, len(indexes))
+		for i, x := range indexes {
+			h, ok := hashes[x]
+			if !ok {
+				return nil, fmt.Errorf("missing stored hash %d", x)
+			}
+			out[i] = h
+		}
+		return out, nil
+	})
+	for i := range int64(treeSize) {
+		stored, err := tlog.StoredHashes(i, fmt.Appendf(nil, "record %d", i), hr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		base := tlog.StoredHashIndex(0, i)
+		for j, h := range stored {
+			hashes[base+int64(j)] = h
+		}
+	}
+	mirrorTreeHash, err := tlog.TreeHash(treeSize, hr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, tile := range tlog.NewTiles(torchwood.TileHeight, 0, treeSize) {
+		data, err := tlog.ReadTileData(tile, hr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		write("witness/mirror/"+witnessed+"/"+torchwood.TilePath(tile), data)
+	}
+	mirrorCheckpoint, err := note.Sign(&note.Note{Text: torchwood.Checkpoint{
+		Origin: origin,
+		Tree:   tlog.Tree{N: treeSize, Hash: mirrorTreeHash},
+	}.String()}, mirrorCosigner)
+	if err != nil {
+		log.Fatal(err)
+	}
+	write("witness/mirror/"+witnessed+"/checkpoint", mirrorCheckpoint)
+
 	// Decoy files that no request path should map to: the per-origin paths of
 	// unknown origins must not collapse to the directory roots.
 	write("witness/checkpoint", []byte("decoy, must never be served\n"))
 	write("witness/mirror/checkpoint", []byte("decoy, must never be served\n"))
-	write("witness/mirror/"+witnessed+"/tile/0/000", []byte("fake mirrored level 0 tile\n"))
 	write("witness/mirror/"+witnessed+"/tile/entries/000", gzipped("fake mirrored entry bundle\n"))
 	write("witness/mirror/"+witnessed+"/tile/entries/001.p/44", gzipped("fake mirrored partial entry bundle\n"))
 
@@ -165,11 +260,44 @@ func main() {
 	// mirror, to exercise serving multiple witnesses from one Skylight.
 	origin2Hash := sha256.Sum256([]byte(origin2))
 	witnessed2 := hex.EncodeToString(origin2Hash[:])
-	write("witness2/"+witnessed2+"/checkpoint", []byte("fake checkpoint for "+origin2+"\n"))
+	checkpoint2, err := note.Sign(&note.Note{Text: torchwood.Checkpoint{
+		Origin: origin2,
+		Tree:   tlog.Tree{N: treeSize, Hash: treeHash},
+	}.String()}, witness2Cosigner)
+	if err != nil {
+		log.Fatal(err)
+	}
+	write("witness2/"+witnessed2+"/checkpoint", checkpoint2)
 
 	fmt.Printf("origin hash: %s\n", witnessed)
 	fmt.Printf("origin2 hash: %s\n", witnessed2)
 	fmt.Printf("issuer hash: %s\n", hex.EncodeToString(issuerHash[:]))
+}
+
+// fixedTimeCosigner is a note.Signer producing c2sp.org/tlog-cosignature
+// Ed25519 cosignatures like [torchwood.CosignatureSigner], except with a fixed
+// timestamp, so the generated testdata is deterministic.
+type fixedTimeCosigner struct {
+	*torchwood.CosignatureSigner
+	key ed25519.PrivateKey
+}
+
+func (s *fixedTimeCosigner) Sign(msg []byte) ([]byte, error) {
+	const t = timestamp / 1000
+	m := fmt.Sprintf("cosignature/v1\ntime %d\n%s", t, msg)
+	sig := binary.BigEndian.AppendUint64(make([]byte, 0, 8+ed25519.SignatureSize), t)
+	return append(sig, ed25519.Sign(s.key, []byte(m))...), nil
+}
+
+// newCosigner derives a cosigner key from a fixed seed.
+func newCosigner(name, seed string) *fixedTimeCosigner {
+	seedHash := sha256.Sum256([]byte(seed))
+	key := ed25519.NewKeyFromSeed(seedHash[:])
+	s, err := torchwood.NewCosignatureSigner(name, key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return &fixedTimeCosigner{s, key}
 }
 
 func write(name string, data []byte) {

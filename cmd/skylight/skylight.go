@@ -13,8 +13,9 @@
 // Metrics are exposed publicly at /metrics, and logs are written to stderr in
 // human-readable format, and to stdout in JSON format. /health reports the
 // health of all logs, returning 500 if any non-staging log is stale; it also
-// verifies the served checkpoints of any witness with a Key configured, and the
-// mirror checkpoints and right-edge tiles of any witness with a MirrorKey.
+// verifies the served checkpoints of every witness against the verifier keys
+// in its witness.v0.json file, and the mirror checkpoints and right-edge tiles
+// of every witness with a mirror subdirectory against mirror/mirror.v0.json.
 //
 // A private HTTP debug server is also started on a random port on localhost. It
 // serves the net/http/pprof endpoints, the [heavyhitter] endpoints, the
@@ -119,17 +120,6 @@ type WitnessConfig struct {
 	// its data. If the witness operates as a mirror, must contain a "mirror"
 	// subdirectory.
 	LocalDirectory string
-
-	// Key is the c2sp.org/signed-note vkey of the witness cosigner. If set,
-	// /health verifies the served witness checkpoints. Required if MirrorKey is
-	// set.
-	Key string
-
-	// MirrorKey is the c2sp.org/signed-note vkey of the mirror cosigner. If set,
-	// /health verifies the served mirror checkpoints and tiles of every log
-	// found under the "mirror" subdirectory of LocalDirectory, and that each is
-	// behind the corresponding witness checkpoint.
-	MirrorKey string
 
 	// Staging indicates that this witness should not make /health fail.
 	Staging bool
@@ -584,38 +574,32 @@ func main() {
 			r = r.WithContext(context.WithValue(r.Context(), unlimitedHandlerContextKey{}, unlimitedHandler))
 			http.StripPrefix(prefix.Path+"/mirror/"+origin, logMux).ServeHTTP(w, r)
 		})
+		mux.HandleFunc(patternPrefix+"/witness.v0.json", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Content-Type", "application/json")
+			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "witness.v0.json"))
+			http.StripPrefix(prefix.Path, unlimitedHandler).ServeHTTP(w, r)
+		})
+		mux.HandleFunc(patternPrefix+"/mirror/mirror.v0.json", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Content-Type", "application/json")
+			r = r.WithContext(context.WithValue(r.Context(), kindContextKey{}, "mirror.v0.json"))
+			http.StripPrefix(prefix.Path, unlimitedHandler).ServeHTTP(w, r)
+		})
 
-		if wc.Key != "" {
-			witnessVerifier, err := parseVerifier(wc.Key)
-			if err != nil {
-				fatalError(logger, "invalid witness Key", "err", err)
-			}
+		witnessChecks = append(witnessChecks, witnessHealth{
+			root:    root,
+			staging: wc.Staging,
+		})
+		if mirrorRoot, err := root.OpenRoot("mirror"); err == nil {
 			witnessChecks = append(witnessChecks, witnessHealth{
-				root:     root,
-				verifier: note.VerifierList(witnessVerifier),
-				staging:  wc.Staging,
+				root:        mirrorRoot,
+				pendingRoot: root,
+				mirror:      true,
+				staging:     wc.Staging,
 			})
-			if wc.MirrorKey != "" {
-				mirrorVerifier, err := parseVerifier(wc.MirrorKey)
-				if err != nil {
-					fatalError(logger, "invalid witness MirrorKey", "err", err)
-				}
-				mirrorRoot, err := root.OpenRoot("mirror")
-				if err != nil {
-					fatalError(logger, "failed to open witness mirror directory", "err", err)
-				}
-				witnessChecks = append(witnessChecks, witnessHealth{
-					root:            mirrorRoot,
-					verifier:        note.VerifierList(mirrorVerifier),
-					pendingRoot:     root,
-					mirror:          true,
-					witnessVerifier: note.VerifierList(witnessVerifier),
-					staging:         wc.Staging,
-				})
-			}
-		}
-		if wc.MirrorKey != "" && wc.Key == "" {
-			fatalError(logger, "witness with MirrorKey must also set Key")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			fatalError(logger, "failed to open witness mirror directory", "err", err)
 		}
 	}
 
@@ -675,7 +659,11 @@ func main() {
 			if wh.mirror {
 				kind = "mirror"
 			}
-			hashes, err := wh.hashes()
+			err := wh.loadVerifiers()
+			var hashes []string
+			if err == nil {
+				hashes, err = wh.hashes()
+			}
 			if err != nil {
 				if wh.staging {
 					fmt.Fprintf(buf, "%s: %v (ignored)\n", kind, err)
@@ -906,14 +894,66 @@ func checkLog(root *os.Root) error {
 }
 
 type witnessHealth struct {
-	root     *os.Root
-	verifier note.Verifiers
-	staging  bool
+	root    *os.Root
+	staging bool
 
 	// mirror, pendingRoot and witnessVerifier are only set for a mirror.
-	mirror          bool
-	pendingRoot     *os.Root
+	mirror      bool
+	pendingRoot *os.Root
+
+	// verifier and witnessVerifier are populated by loadVerifiers.
+	verifier        note.Verifiers
 	witnessVerifier note.Verifiers
+}
+
+// loadVerifiers loads the verifier keys from the witness.v0.json (or, for a
+// mirror, mirror.v0.json) file.
+func (wh *witnessHealth) loadVerifiers() error {
+	name := "witness.v0.json"
+	if wh.mirror {
+		name = "mirror.v0.json"
+	}
+	v, err := parseVerifiers(wh.root, name)
+	if err != nil {
+		return err
+	}
+	wh.verifier = v
+	if wh.mirror {
+		// The pending checkpoints are signed by the witness cosigner.
+		wv, err := parseVerifiers(wh.pendingRoot, "witness.v0.json")
+		if err != nil {
+			return err
+		}
+		wh.witnessVerifier = wv
+	}
+	return nil
+}
+
+// parseVerifiers reads the verifier_keys of a witness.v0.json or
+// mirror.v0.json file.
+func parseVerifiers(root *os.Root, name string) (note.Verifiers, error) {
+	j, err := fs.ReadFile(root.FS(), name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", name, err)
+	}
+	var info struct {
+		VerifierKeys []string `json:"verifier_keys"`
+	}
+	if err := json.Unmarshal(j, &info); err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", name, err)
+	}
+	if len(info.VerifierKeys) == 0 {
+		return nil, fmt.Errorf("%s lists no verifier keys", name)
+	}
+	var verifiers []note.Verifier
+	for _, vkey := range info.VerifierKeys {
+		v, err := parseVerifier(vkey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid verifier key in %s: %w", name, err)
+		}
+		verifiers = append(verifiers, v)
+	}
+	return note.VerifierList(verifiers...), nil
 }
 
 // hashes returns the origin-hash subdirectories of the witness directory, each

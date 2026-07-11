@@ -1,0 +1,12 @@
+{
+    "monitoring_url": "https://witness.example.org/",
+    "name": "witness.example.org",
+    "software": {
+        "name": "sunlight",
+        "version": "test"
+    },
+    "submission_url": "https://witness-submit.example.org/",
+    "verifier_keys": [
+        "witness.example.org+b8a2cf20+BFLN3yikSfFkVAJtrnh/CiY3Zozkoy7clp+P7XB28qUN"
+    ]
+}
