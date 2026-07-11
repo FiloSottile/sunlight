@@ -170,7 +170,7 @@ func main() {
 	}
 	mirrorV0, err := json.MarshalIndent(map[string]any{
 		"name":           "mirror.example.org",
-		"submission_url": "https://witness-submit.example.org/mirror/",
+		"submission_url": "https://witness-submit.example.org/",
 		"monitoring_url": "https://witness.example.org/mirror/",
 		"verifier_keys":  []string{mirrorCosigner.Verifier().String()},
 		"software":       map[string]string{"name": "sunlight", "version": "test"},

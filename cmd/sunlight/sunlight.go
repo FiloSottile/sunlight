@@ -1042,7 +1042,7 @@ func main() {
 			}
 			mi := witnessInfo{
 				Name:             c.Witness.MirrorName,
-				SubmissionPrefix: c.Witness.SubmissionPrefix + "/mirror/",
+				SubmissionPrefix: c.Witness.SubmissionPrefix + "/",
 				MonitoringPrefix: c.Witness.MonitoringPrefix + "/mirror/",
 				VerifierKeys:     []string{mirrorVKey},
 				LogLists:         c.Witness.MirrorLogLists,
