@@ -22,7 +22,6 @@ import (
 	"crypto/elliptic"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
@@ -48,6 +47,7 @@ import (
 
 	"filippo.io/keygen"
 	"filippo.io/mldsa"
+	"filippo.io/mldsa/x509"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/keylog"
@@ -413,6 +413,26 @@ type logInfo struct {
 	} `json:"log_software"`
 }
 
+// witnessInfo is used for the homepage and for /witness.v0.json and /mirror.v0.json.
+type witnessInfo struct {
+	Name             string   `json:"name"`
+	SubmissionPrefix string   `json:"submission_url"` // with trailing slash
+	MonitoringPrefix string   `json:"monitoring_url"` // with trailing slash
+	VerifierKeys     []string `json:"verifier_keys"`
+
+	LogLists []string `json:"-"`
+	Logs     []string `json:"-"`
+
+	// PublicKeyDER and PublicKeyBase64 are the SubjectPublicKeyInfo.
+	PublicKeyDER    []byte `json:"key,omitempty"`
+	PublicKeyBase64 string `json:"-"`
+
+	Software struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"software"`
+}
+
 type PlannedChange struct {
 	NewStatus     string `json:"new_status"`
 	EffectiveDate string `json:"effective_date"`
@@ -553,29 +573,20 @@ func main() {
 		defer logsMu.Unlock()
 		logs[shortName] = li
 	}
-	type witnessInfo struct {
-		Name              string
-		MirrorName        string
-		SubmissionPrefix  string
-		MonitoringPrefix  string
-		VerifierKeys      []string
-		MirrorVerifierKey string
-		LogLists          []string
-		MirrorLogLists    []string
-		MirroredLogs      []string
-		Logs              []string
-	}
 	homeWitnessInfo := func() witnessInfo { return witnessInfo{} }
+	homeMirrorInfo := func() witnessInfo { return witnessInfo{} }
 	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		if err := homeTmpl.Execute(w, struct {
 			Title   string
 			Logs    []logInfo
 			Witness witnessInfo
+			Mirror  witnessInfo
 		}{
 			Title:   cmp.Or(c.Name, "Sunlight"),
 			Logs:    homeLogsInfo(),
 			Witness: homeWitnessInfo(),
+			Mirror:  homeMirrorInfo(),
 		}); err != nil {
 			logger.Error("failed to execute homepage template", "err", err)
 		}
@@ -976,20 +987,94 @@ func main() {
 		witnessMetrics := prometheus.WrapRegistererWithPrefix("witness_", sunlightMetrics)
 		witnessMetrics.MustRegister(w.Metrics()...)
 
+		info, _ := debug.ReadBuildInfo()
+		mirrorVKey, _ := w.MirrorVerifierKey()
+		pkix, err := x509.MarshalPKIXPublicKey(mk.Public())
+		if err != nil {
+			fatalError(logger, "failed to marshal witness public key", "err", err)
+		}
+		wi := witnessInfo{
+			Name:             c.Witness.Name,
+			SubmissionPrefix: c.Witness.SubmissionPrefix + "/",
+			MonitoringPrefix: c.Witness.MonitoringPrefix + "/",
+			VerifierKeys:     w.VerifierKeys(),
+			LogLists:         c.Witness.LogLists,
+			PublicKeyDER:     pkix,
+			PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
+		}
+		wi.Software.Name = info.Main.Path
+		wi.Software.Version = info.Main.Version
 		homeWitnessInfo = func() witnessInfo {
-			logs, mirrored := w.Logs()
-			mirrorVKey, _ := w.MirrorVerifierKey()
-			return witnessInfo{
-				Name:              c.Witness.Name,
-				MirrorName:        c.Witness.MirrorName,
-				SubmissionPrefix:  c.Witness.SubmissionPrefix,
-				MonitoringPrefix:  c.Witness.MonitoringPrefix,
-				VerifierKeys:      w.VerifierKeys(),
-				MirrorVerifierKey: mirrorVKey,
-				LogLists:          c.Witness.LogLists,
-				MirrorLogLists:    c.Witness.MirrorLogLists,
-				MirroredLogs:      mirrored,
-				Logs:              logs,
+			i := wi
+			i.Logs, _ = w.Logs()
+			return i
+		}
+		mux.HandleFunc(prefix.Host+prefix.Path+"/witness.v0.json", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			e := json.NewEncoder(w)
+			e.SetIndent("", "    ")
+			e.Encode(wi)
+		})
+		if j, err := b.Fetch(ctx, "witness.v0.json"); err == nil {
+			var got witnessInfo
+			if err := json.Unmarshal(j, &got); err != nil {
+				fatalError(logger, "failed to parse stored witness.v0.json", "err", err)
+			}
+			if got.Name != c.Witness.Name {
+				fatalError(logger, "stored witness.v0.json has mismatching name",
+					"want", c.Witness.Name, "got", got.Name)
+			}
+		}
+		j, err := json.MarshalIndent(wi, "", "    ")
+		if err != nil {
+			fatalError(logger, "failed to marshal witness.v0.json", "err", err)
+		}
+		if err := b.Upload(ctx, "witness.v0.json", j, optsJSON); err != nil {
+			fatalError(logger, "failed to upload witness.v0.json", "err", err)
+		}
+		if c.Witness.MirrorName != "" {
+			pkix, err := x509.MarshalPKIXPublicKey(mirrorKey.Public())
+			if err != nil {
+				fatalError(logger, "failed to marshal mirror public key", "err", err)
+			}
+			mi := witnessInfo{
+				Name:             c.Witness.MirrorName,
+				SubmissionPrefix: c.Witness.SubmissionPrefix + "/mirror/",
+				MonitoringPrefix: c.Witness.MonitoringPrefix + "/mirror/",
+				VerifierKeys:     []string{mirrorVKey},
+				LogLists:         c.Witness.MirrorLogLists,
+				PublicKeyDER:     pkix,
+				PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
+			}
+			mi.Software.Name = info.Main.Path
+			mi.Software.Version = info.Main.Version
+			homeMirrorInfo = func() witnessInfo {
+				i := mi
+				_, i.Logs = w.Logs()
+				return i
+			}
+			mux.HandleFunc(prefix.Host+prefix.Path+"/mirror/mirror.v0.json", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				e := json.NewEncoder(w)
+				e.SetIndent("", "    ")
+				e.Encode(mi)
+			})
+			if j, err := b.Fetch(ctx, "mirror/mirror.v0.json"); err == nil {
+				var got witnessInfo
+				if err := json.Unmarshal(j, &got); err != nil {
+					fatalError(logger, "failed to parse stored mirror.v0.json", "err", err)
+				}
+				if got.Name != c.Witness.MirrorName {
+					fatalError(logger, "stored mirror.v0.json has mismatching name",
+						"want", c.Witness.MirrorName, "got", got.Name)
+				}
+			}
+			j, err := json.MarshalIndent(mi, "", "    ")
+			if err != nil {
+				fatalError(logger, "failed to marshal mirror.v0.json", "err", err)
+			}
+			if err := b.Upload(ctx, "mirror/mirror.v0.json", j, optsJSON); err != nil {
+				fatalError(logger, "failed to upload mirror.v0.json", "err", err)
 			}
 		}
 	}
@@ -1067,6 +1152,8 @@ func main() {
 	os.Exit(1)
 }
 
+var optsJSON = &ctlog.UploadOptions{ContentType: "application/json"}
+
 func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc LogConfig, cc *ctlog.Config, e *ctlog.SunsetLogError) error {
 	pkix, err := x509.MarshalPKIXPublicKey(&cc.Key.PublicKey)
 	if err != nil {
@@ -1126,7 +1213,7 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 	if err != nil {
 		return err
 	}
-	return cc.Backend.Upload(ctx, "log.v3.json", j, &ctlog.UploadOptions{ContentType: "application/json"})
+	return cc.Backend.Upload(ctx, "log.v3.json", j, optsJSON)
 }
 
 func fetchCheckpoint(ctx context.Context, logger *slog.Logger, prefix string) []byte {
