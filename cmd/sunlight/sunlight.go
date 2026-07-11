@@ -424,8 +424,12 @@ type witnessInfo struct {
 	Logs     []string `json:"-"`
 
 	// PublicKeyDER and PublicKeyBase64 are the SubjectPublicKeyInfo.
+	// They are only included for mirrors.
 	PublicKeyDER    []byte `json:"key,omitempty"`
 	PublicKeyBase64 string `json:"-"`
+
+	// CosignerID is set if the Name has a oid/1.3.6.1.4.1. prefix.
+	CosignerID string `json:"cosigner_id,omitempty"`
 
 	Software struct {
 		Name    string `json:"name"`
@@ -989,18 +993,15 @@ func main() {
 
 		info, _ := debug.ReadBuildInfo()
 		mirrorVKey, _ := w.MirrorVerifierKey()
-		pkix, err := x509.MarshalPKIXPublicKey(mk.Public())
-		if err != nil {
-			fatalError(logger, "failed to marshal witness public key", "err", err)
-		}
 		wi := witnessInfo{
 			Name:             c.Witness.Name,
 			SubmissionPrefix: c.Witness.SubmissionPrefix + "/",
 			MonitoringPrefix: c.Witness.MonitoringPrefix + "/",
 			VerifierKeys:     w.VerifierKeys(),
 			LogLists:         c.Witness.LogLists,
-			PublicKeyDER:     pkix,
-			PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
+		}
+		if id, ok := strings.CutPrefix(c.Witness.Name, "oid/1.3.6.1.4.1."); ok {
+			wi.CosignerID = id
 		}
 		wi.Software.Name = info.Main.Path
 		wi.Software.Version = info.Main.Version
@@ -1045,6 +1046,9 @@ func main() {
 				LogLists:         c.Witness.MirrorLogLists,
 				PublicKeyDER:     pkix,
 				PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
+			}
+			if id, ok := strings.CutPrefix(c.Witness.MirrorName, "oid/1.3.6.1.4.1."); ok {
+				mi.CosignerID = id
 			}
 			mi.Software.Name = info.Main.Path
 			mi.Software.Version = info.Main.Version
