@@ -783,6 +783,7 @@ func main() {
 		}
 
 		// Do some consistency checking on the stored log.v3.json file, if any.
+		var metadataFinalized bool
 		if j, err := b.Fetch(ctx, "log.v3.json"); err == nil {
 			var got logInfo
 			if err := json.Unmarshal(j, &got); err != nil {
@@ -792,13 +793,14 @@ func main() {
 				fatalError(logger, "stored log.v3.json has mismatching short name",
 					"want", lc.ShortName, "got", got.ShortName)
 			}
-			if got.FinalTree.RootHash != nil && l.AcceptingSubmissions() {
+			metadataFinalized = got.FinalTree.RootHash != nil
+			if metadataFinalized && l.AcceptingSubmissions() {
 				fatalError(logger, "stored log.v3.json shows log is sunsetted, but log is accepting submissions")
 			}
 		}
 
 		if l.AcceptingSubmissions() {
-			if err := updateMetadata(ctx, setLogInfo, lc, cc, nil); err != nil {
+			if err := updateMetadata(ctx, setLogInfo, lc, cc, nil, false); err != nil {
 				fatalError(logger, "failed to update log metadata", "err", err)
 			}
 			period := 1 * time.Second
@@ -809,7 +811,7 @@ func main() {
 				err := l.RunSequencer(sequencerContext, period)
 				if e := new(ctlog.SunsetLogError); errors.As(err, e) {
 					// Update log.v3.json with the new state and final checkpoint.
-					return updateMetadata(sequencerContext, setLogInfo, lc, cc, e)
+					return updateMetadata(sequencerContext, setLogInfo, lc, cc, e, false)
 				}
 				return err
 			})
@@ -822,7 +824,7 @@ func main() {
 			if !errors.As(err, sunsetErr) {
 				fatalError(logger, "log not accepting submissions but not sunsetted?", "err", err)
 			}
-			if err := updateMetadata(sequencerContext, setLogInfo, lc, cc, sunsetErr); err != nil {
+			if err := updateMetadata(sequencerContext, setLogInfo, lc, cc, sunsetErr, metadataFinalized); err != nil {
 				fatalError(logger, "failed to update log metadata", "err", err)
 			}
 			logger.Info("log is not accepting submissions (sunsetted)",
@@ -1158,7 +1160,7 @@ func main() {
 
 var optsJSON = &ctlog.UploadOptions{ContentType: "application/json"}
 
-func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc LogConfig, cc *ctlog.Config, e *ctlog.SunsetLogError) error {
+func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc LogConfig, cc *ctlog.Config, e *ctlog.SunsetLogError, skipUpload bool) error {
 	pkix, err := x509.MarshalPKIXPublicKey(&cc.Key.PublicKey)
 	if err != nil {
 		return err
@@ -1212,6 +1214,12 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 	log.Software.Version = info.Main.Version
 
 	setLogInfo(lc.ShortName, log)
+
+	// The metadata for the final tree has already been written, so there is no
+	// point rewriting it, and its data directory may well be read-only.
+	if skipUpload {
+		return nil
+	}
 
 	j, err := json.MarshalIndent(log, "", "    ")
 	if err != nil {
