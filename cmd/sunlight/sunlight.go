@@ -28,6 +28,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
+	"fmt"
 	"html/template"
 	"io"
 	"log/slog"
@@ -298,6 +299,10 @@ type LogConfig struct {
 	//
 	// Once added, roots are never removed for the lifespan of a log.
 	ExtraRoots string
+
+	// CertificateProfile controls certificate acceptance policy. It can be
+	// "tls" or "mark", and defaults to "tls".
+	CertificateProfile string
 
 	// Secret is the path to a file containing a secret seed from which the
 	// log's private keys are derived. The file contents are used as HKDF input.
@@ -710,6 +715,14 @@ func main() {
 			NotAfterStart: notAfterStart,
 			NotAfterLimit: notAfterLimit,
 		}
+		profile, err := certificateProfile(lc)
+		if err != nil {
+			fatalError(logger, "invalid CertificateProfile", "err", err)
+		}
+		if err := validateLogConfig(lc, profile); err != nil {
+			fatalError(logger, "invalid log config", "err", err)
+		}
+		cc.CertificateProfile = profile
 
 		if time.Now().Format(time.DateOnly) == lc.Inception {
 			logger.Info("today is the Inception date, creating log")
@@ -732,9 +745,6 @@ func main() {
 		reloadChan := make(chan os.Signal, 1)
 		signal.Notify(reloadChan, syscall.SIGHUP)
 		if lc.Roots != "" {
-			if lc.CCADBRoots != "" || lc.ExtraRoots != "" {
-				fatalError(logger, "can't set both Roots and CCADBRoots or ExtraRoots")
-			}
 			if err := loadRoots(ctx, lc, l); err != nil {
 				fatalError(logger, "failed to load Roots", "file", lc.Roots, "err", err)
 			}
@@ -1187,6 +1197,8 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 	log.SubmissionEndpoint.URL = log.SubmissionPrefix
 	log.MonitoringEndpoint.URL = log.MonitoringPrefix
 	switch {
+	case cc.CertificateProfile == ctlog.CertificateProfileMark:
+		// No IntendedUse for mark certificate logs.
 	case lc.Roots != "":
 		// No IntendedUse for custom roots.
 	case lc.CCADBRoots == "trusted" || lc.CCADBRoots == "":
@@ -1226,6 +1238,34 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 		return err
 	}
 	return cc.Backend.Upload(ctx, "log.v3.json", j, optsJSON)
+}
+
+func certificateProfile(lc LogConfig) (string, error) {
+	switch lc.CertificateProfile {
+	case "", ctlog.CertificateProfileTLS:
+		return ctlog.CertificateProfileTLS, nil
+	case ctlog.CertificateProfileMark:
+		return ctlog.CertificateProfileMark, nil
+	default:
+		return "", fmt.Errorf("CertificateProfile must be %q, %q, or empty", ctlog.CertificateProfileTLS, ctlog.CertificateProfileMark)
+	}
+}
+
+func validateLogConfig(lc LogConfig, profile string) error {
+	if profile == ctlog.CertificateProfileMark {
+		if lc.CCADBRoots != "" || lc.ExtraRoots != "" {
+			return fmt.Errorf("CCADBRoots and ExtraRoots are not supported with CertificateProfile %q", ctlog.CertificateProfileMark)
+		}
+		if lc.Roots == "" {
+			return fmt.Errorf("CertificateProfile %q requires Roots", ctlog.CertificateProfileMark)
+		}
+	}
+	if lc.Roots != "" {
+		if lc.CCADBRoots != "" || lc.ExtraRoots != "" {
+			return fmt.Errorf("can't set both Roots and CCADBRoots or ExtraRoots")
+		}
+	}
+	return nil
 }
 
 func fetchCheckpoint(ctx context.Context, logger *slog.Logger, prefix string) []byte {
