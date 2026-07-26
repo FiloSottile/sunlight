@@ -120,6 +120,12 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
 		"precert": "", "preissuer": "", "chain_len": "", "low_priority": "", "source": ""}
 	defer func() {
+		// If the client went away before a response could be served, log a
+		// non-standard status code to distinguish it from server errors.
+		if errors.Is(err, context.Canceled) && ctx.Err() == context.Canceled {
+			code = 499
+			err = fmtErrorf("client went away: %w", err)
+		}
 		if err != nil {
 			labels["error"] = errorCategory(err)
 		}
@@ -131,7 +137,10 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 
 	body, err := io.ReadAll(reqBody)
 	if err != nil {
-		return nil, http.StatusInternalServerError, fmtErrorf("failed to read body: %w", err)
+		if errors.As(err, new(*http.MaxBytesError)) {
+			return nil, http.StatusRequestEntityTooLarge, fmtErrorf("request body too large")
+		}
+		return nil, 499, fmtErrorf("failed to read body: %w", err)
 	}
 	var req struct {
 		Chain [][]byte
