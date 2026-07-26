@@ -373,11 +373,14 @@ func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error
 			v2Found = true
 		}
 	}
-	// For one release cycle, don't require the ML-DSA signature, to allow
-	// existing logs to upgrade without downtime. TODO: remove this.
-	_ = v2Found
-	if !v1Found { // || !v2Found {
+	if !v1Found {
 		return sunlight.Checkpoint{}, 0, errors.New("missing verifier signature")
+	}
+	// For one release cycle, don't require the ML-DSA signature, to allow
+	// existing logs to upgrade without downtime. TODO: turn this warning into
+	// an error once every log has emitted a checkpoint carrying one.
+	if !v2Found {
+		config.Log.Warn("checkpoint is missing the ML-DSA-44 log signature")
 	}
 	c, err := sunlight.ParseCheckpoint(n.Text)
 	if err != nil {
