@@ -38,6 +38,9 @@ func main() {
 		fs.PrintDefaults()
 		os.Exit(2)
 	}
+	if *witnessFlag != "" && (*logFlag != "" || *prefixFlag != "") {
+		log.Fatal("-witness can't be combined with -log or -prefix")
+	}
 
 	type outputLine struct {
 		JSONKey      string
