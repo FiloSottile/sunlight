@@ -35,6 +35,7 @@ func main() {
 		skylightJob = flag.String("skylight-job", "skylight", "Prometheus job label for skylight")
 		datasetF    = flag.String("zfs-dataset", "tank/logs/", "ZFS parent dataset (must end with /)")
 		netDevice   = flag.String("network-device", "enp.*", "regex for physical NIC device labels")
+		nodeJob     = flag.String("node-job", "node", "Prometheus job label of the node_exporter serving host metrics")
 	)
 	flag.Parse()
 
@@ -59,6 +60,7 @@ func main() {
 		dataset:       fmt.Sprintf(`dataset=~%q`, regexp.QuoteMeta(*datasetF+*logName)+`[0-9].*`),
 		process:       fmt.Sprintf(`job=~%q`, *logName+"|"+*skylightJob),
 		networkDevice: fmt.Sprintf(`device=~%q`, *netDevice),
+		node:          fmt.Sprintf(`job=%q`, *nodeJob),
 		dsPrefix:      *datasetF,
 		processLabels: map[string]string{
 			*logName:     "sunlight (write path)",
@@ -283,6 +285,7 @@ type selectors struct {
 	dataset       string // e.g. `dataset=~"tank/logs/tuscolo.*"`
 	process       string // e.g. `job=~"tuscolo|skylight"`
 	networkDevice string // e.g. `device=~"enp.*"`
+	node          string // e.g. `job="node"` (node_exporter, including the ZFS textfile collector)
 	dsPrefix      string // e.g. "tank/logs/" (for stripping dataset labels)
 	processLabels map[string]string
 }
@@ -326,8 +329,8 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 
 	add("Bandwidth (system-wide)",
 		multiRangeChart(p, start, end, step, []namedQuery{
-			{"out", fmt.Sprintf(`sum(rate(node_network_transmit_bytes_total{%s}[5m]))`, sel.networkDevice)},
-			{"in", fmt.Sprintf(`sum(rate(node_network_receive_bytes_total{%s}[5m]))`, sel.networkDevice)},
+			{"out", fmt.Sprintf(`sum(rate(node_network_transmit_bytes_total{%s,%s}[5m]))`, sel.node, sel.networkDevice)},
+			{"in", fmt.Sprintf(`sum(rate(node_network_receive_bytes_total{%s,%s}[5m]))`, sel.node, sel.networkDevice)},
 		}, chartOpts{Unit: unitMbps}))
 
 	add("CPU",
@@ -393,7 +396,7 @@ func buildTable(p *prom, end time.Time, sel selectors) *logsTable {
 			get(name).notAfterEnd = v
 		}
 	})
-	scrape(fmt.Sprintf(`zfs_dataset_referenced_bytes{%s}`, sel.dataset), func(l map[string]string, v float64) {
+	scrape(fmt.Sprintf(`zfs_dataset_referenced_bytes{%s,%s}`, sel.node, sel.dataset), func(l map[string]string, v float64) {
 		ds := l["dataset"]
 		name := strings.TrimPrefix(ds, sel.dsPrefix)
 		if name == "" || name == ds {
@@ -402,7 +405,7 @@ func buildTable(p *prom, end time.Time, sel selectors) *logsTable {
 		get(name).onDisk = v
 		get(name).hasDisk = true
 	})
-	scrape(fmt.Sprintf(`zfs_dataset_logicalreferenced_bytes{%s}`, sel.dataset), func(l map[string]string, v float64) {
+	scrape(fmt.Sprintf(`zfs_dataset_logicalreferenced_bytes{%s,%s}`, sel.node, sel.dataset), func(l map[string]string, v float64) {
 		ds := l["dataset"]
 		name := strings.TrimPrefix(ds, sel.dsPrefix)
 		if name == "" || name == ds {
