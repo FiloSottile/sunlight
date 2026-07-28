@@ -13,7 +13,6 @@ import (
 	mathrand "math/rand"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -79,7 +78,7 @@ func TestSequenceLargeLog(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		for k := 0; k < 3000; k++ {
 			e := &ctlog.PendingLogEntry{}
-			e.Certificate = []byte(strconv.Itoa(i*3000 + k))
+			e.Certificate = testCertificate(uint64(i*3000 + k))
 			tl.Log.AddLeafToPool(e)
 		}
 		fatalIfErr(t, tl.Log.Sequence())
@@ -190,8 +189,8 @@ func TestSequenceUploadPaths(t *testing.T) {
 		"issuer/6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d",
 		"issuer/81365bbc90b5b3991c762eebada7c6d84d1e39a0a1d648cb4fe5a9890b089da8",
 		"issuer/df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
-		"staging/261-0a4f1a4119ca89dc90a612834c0da004f5d1b04a5aad89b88df26a904e4a4f0f",
-		"staging/527-0c3e2c4127196a1a5abb8c6d94d3607a92b510e01004607b910eb0c7ba27f710",
+		"staging/261-ef737b670a21586dc4daf3c3f1338aeba81f93601235bd2a97af32f278ee2dd8",
+		"staging/527-15f6369ab80858ba1cf537b71961a144449fb4a70c57947a754f849ed3897b59",
 		"tile/0/000",
 		"tile/0/001",
 		"tile/0/001.p/5",
@@ -237,8 +236,7 @@ func TestRatelimit(t *testing.T) {
 	addCertificateExpectEvictionWithSeed := func(seed int64) string {
 		r := mathrand.New(mathrand.NewSource(seed))
 		e := &ctlog.PendingLogEntry{}
-		e.Certificate = make([]byte, r.Intn(4)+8)
-		r.Read(e.Certificate)
+		e.Certificate = testCertificate(r.Uint64())
 		e.Issuers = chains[r.Intn(len(chains))]
 		f, source := tl.Log.AddLeafToPoolWithLowPriority(e)
 		pendingEvictions = append(pendingEvictions, f)
@@ -260,8 +258,7 @@ func TestRatelimit(t *testing.T) {
 	addLowPriorityExpectRatelimit := func() {
 		r := mathrand.New(mathrand.NewSource(mathrand.Int63()))
 		e := &ctlog.PendingLogEntry{}
-		e.Certificate = make([]byte, r.Intn(4)+8)
-		r.Read(e.Certificate)
+		e.Certificate = testCertificate(r.Uint64())
 		e.Issuers = chains[r.Intn(len(chains))]
 		f, source := tl.Log.AddLeafToPoolWithLowPriority(e)
 		if source != "ratelimit" {
@@ -933,7 +930,7 @@ func BenchmarkSequencer(b *testing.B) {
 		if i%poolSize == 0 && i != 0 {
 			fatalIfErr(b, tl.Log.Sequence())
 		}
-		tl.Log.AddLeafToPool(&ctlog.PendingLogEntry{Certificate: bytes.Repeat([]byte("A"), 2350)})
+		tl.Log.AddLeafToPool(&ctlog.PendingLogEntry{Certificate: testPaddedCertificate(uint64(i))})
 	}
 }
 

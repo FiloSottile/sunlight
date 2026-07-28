@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	mathrand "math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -28,9 +33,11 @@ import (
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/torchwood"
+	"github.com/google/certificate-transparency-go/asn1"
 	"github.com/google/certificate-transparency-go/client"
 	"github.com/google/certificate-transparency-go/jsonclient"
 	"github.com/google/certificate-transparency-go/x509"
+	"github.com/google/certificate-transparency-go/x509/pkix"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
@@ -204,6 +211,16 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 		fatalIfErr(t, err)
 		b, err = io.ReadAll(r)
 		fatalIfErr(t, err)
+
+		namesTile := tile
+		namesTile.L = -2
+		names, err := tl.Config.Backend.Fetch(context.Background(), sunlight.TilePath(namesTile))
+		fatalIfErr(t, err)
+		r, err = gzip.NewReader(bytes.NewReader(names))
+		fatalIfErr(t, err)
+		names, err = io.ReadAll(r)
+		fatalIfErr(t, err)
+
 		for i := 0; i < tile.W; i++ {
 			e, rest, err := sunlight.ReadTileLeaf(b)
 			if err != nil {
@@ -253,9 +270,26 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 					t.Errorf("issuer %x does not hash to %x", fp, fp)
 				}
 			}
+
+			// The names tile has one JSON line per data tile entry.
+			line, rest, ok := bytes.Cut(names, []byte("\n"))
+			if !ok {
+				t.Fatalf("invalid names tile %v: missing entry %d", namesTile, idx)
+			}
+			names = rest
+			trimmed, err := e.TrimmedEntry()
+			fatalIfErr(t, err)
+			expected, err := json.Marshal(trimmed)
+			fatalIfErr(t, err)
+			if !bytes.Equal(line, expected) {
+				t.Errorf("names tile entry %d is %s, expected %s", idx, line, expected)
+			}
 		}
 		if len(b) != 0 {
 			t.Errorf("invalid data tile %v: trailing data", tile)
+		}
+		if len(names) != 0 {
+			t.Errorf("invalid names tile %v: trailing data", namesTile)
 		}
 	}
 
@@ -384,12 +418,77 @@ var chains = [][][]byte{
 	{},
 }
 
+// testCertificateName is the placeholder DNS name in the certificate templates,
+// which testCertificate replaces with the hex encoding of an id.
+const testCertificateName = "0000000000000000.example.com"
+
+var testCertificateTemplate, testCertificateOffset = makeTestCertificateTemplate(0)
+
+// testPaddedCertificateTemplate is the size of a typical WebPKI certificate, for
+// benchmarks that care about how much data the log moves around.
+var testPaddedCertificateTemplate, testPaddedCertificateOffset = makeTestCertificateTemplate(2000)
+
+func makeTestCertificateTemplate(padding int) ([]byte, int) {
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "Test Certificate"},
+		NotBefore:    time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
+		NotAfter:     time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC),
+		DNSNames:     []string{testCertificateName},
+	}
+	if padding > 0 {
+		tmpl.ExtraExtensions = []pkix.Extension{{
+			Id:    asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 66252},
+			Value: bytes.Repeat([]byte("A"), padding),
+		}}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, fakeSigner{}.Public(), fakeSigner{})
+	if err != nil {
+		panic(err)
+	}
+	if n := bytes.Count(der, []byte(testCertificateName)); n != 1 {
+		panic(fmt.Sprintf("placeholder name appears %d times in template", n))
+	}
+	return der, bytes.Index(der, []byte(testCertificateName))
+}
+
+// fakeSigner produces a fixed signature with a fixed key, so that the
+// certificates it signs are byte-for-byte reproducible across runs. Nothing
+// verifies them: the log doesn't check signatures on the certificates it
+// serializes, and the tests use testRoot as the trusted root anyway.
+type fakeSigner struct{}
+
+func (fakeSigner) Public() crypto.PublicKey {
+	p := elliptic.P256().Params()
+	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: p.Gx, Y: p.Gy}
+}
+
+func (fakeSigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) {
+	return []byte("this is not a signature"), nil
+}
+
+// testCertificate returns a parseable certificate with a DNS name unique to id.
+func testCertificate(id uint64) []byte {
+	return spliceTestCertificate(testCertificateTemplate, testCertificateOffset, id)
+}
+
+// testPaddedCertificate is like testCertificate, but the size of a typical
+// WebPKI certificate.
+func testPaddedCertificate(id uint64) []byte {
+	return spliceTestCertificate(testPaddedCertificateTemplate, testPaddedCertificateOffset, id)
+}
+
+func spliceTestCertificate(template []byte, offset int, id uint64) []byte {
+	der := bytes.Clone(template)
+	hex.Encode(der[offset:], binary.BigEndian.AppendUint64(nil, id))
+	return der
+}
+
 func addCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx context.Context) (*sunlight.LogEntry, error) {
 	t.Helper()
 	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.PendingLogEntry{}
-	e.Certificate = make([]byte, r.Intn(4)+8)
-	r.Read(e.Certificate)
+	e.Certificate = testCertificate(r.Uint64())
 	e.Issuers = chains[r.Intn(len(chains))]
 	f, _ := tl.Log.AddLeafToPool(e)
 	return waitFuncWrapper(t, e, true, f)
@@ -404,8 +503,7 @@ func addCertificateExpectFailureWithSeed(t *testing.T, tl *TestLog, seed int64) 
 	t.Helper()
 	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.PendingLogEntry{}
-	e.Certificate = make([]byte, r.Intn(4)+8)
-	r.Read(e.Certificate)
+	e.Certificate = testCertificate(r.Uint64())
 	e.Issuers = chains[r.Intn(len(chains))]
 	f, _ := tl.Log.AddLeafToPool(e)
 	waitFuncWrapper(t, e, false, f)
@@ -420,10 +518,11 @@ func addPreCertificateWithSeed(t *testing.T, tl *TestLog, seed int64) func(ctx c
 	t.Helper()
 	r := mathrand.New(mathrand.NewSource(seed))
 	e := &ctlog.PendingLogEntry{IsPrecert: true}
+	// Certificate is the tbsCertificate of the precertificate, which is not a
+	// certificate itself, and is never parsed by the log.
 	e.Certificate = make([]byte, r.Intn(4)+8)
 	r.Read(e.Certificate)
-	e.PreCertificate = make([]byte, r.Intn(4)+1)
-	r.Read(e.PreCertificate)
+	e.PreCertificate = testCertificate(r.Uint64())
 	r.Read(e.IssuerKeyHash[:])
 	e.Issuers = chains[r.Intn(len(chains))]
 	f, _ := tl.Log.AddLeafToPool(e)

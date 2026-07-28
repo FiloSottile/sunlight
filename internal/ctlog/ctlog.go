@@ -316,7 +316,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	rootsPEM, err := config.Backend.Fetch(ctx, "_roots.pem")
 	if err != nil {
 		config.Log.WarnContext(ctx, "failed to fetch previously trusted roots", "err", err)
-	} else {
+	} else if len(rootsPEM) > 0 {
 		if !roots.AppendCertsFromPEM(rootsPEM) {
 			config.Log.WarnContext(ctx, "failed to parse previously trusted roots",
 				"roots", string(rootsPEM))
