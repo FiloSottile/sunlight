@@ -10,11 +10,13 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"slices"
 	"time"
 
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/reused"
 	ct "github.com/google/certificate-transparency-go"
+	"github.com/google/certificate-transparency-go/asn1"
 	"github.com/google/certificate-transparency-go/trillian/ctfe"
 	"github.com/google/certificate-transparency-go/x509"
 	"github.com/google/certificate-transparency-go/x509util"
@@ -116,6 +118,10 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// markCertificateEKU is the id-kp-BrandIndicatorforMessageIdentification EKU
+// required on mark certificates by the BIMI Guidelines.
+var markCertificateEKU = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 31}
+
 func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
 		"precert": "", "preissuer": "", "chain_len": "", "low_priority": "", "source": ""}
@@ -152,9 +158,18 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		return nil, http.StatusBadRequest, fmtErrorf("empty chain")
 	}
 
-	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.rootPool(), time.Time{}, false, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
+	ekus := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	if l.c.MarkCertificates {
+		// The Verified Mark Certificate EKU is not known to the x509 package,
+		// so we can't ask ctfe to check for it. Do it ourselves below.
+		ekus = nil
+	}
+	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.rootPool(), time.Time{}, false, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, ekus))
 	if err != nil {
 		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: %w", err)
+	}
+	if l.c.MarkCertificates && !slices.ContainsFunc(chain[0].UnknownExtKeyUsage, markCertificateEKU.Equal) {
+		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: missing Verified Mark Certificate EKU")
 	}
 	lowPriority := lowPriority(chain[0])
 	labels["chain_len"] = fmt.Sprintf("%d", len(chain))

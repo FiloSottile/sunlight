@@ -299,6 +299,16 @@ type LogConfig struct {
 	// Once added, roots are never removed for the lifespan of a log.
 	ExtraRoots string
 
+	// CertificateProfile can be "tls" or "mark". Optional, defaults to "tls".
+	//
+	// A "tls" log requires submitted certificates to have the serverAuth EKU.
+	//
+	// A "mark" log requires submitted certificates to have the Verified Mark
+	// Certificate EKU (1.3.6.1.5.5.7.3.31) instead. It must use Roots, and
+	// omits intended_use from log.v3.json, since it is neither a production
+	// nor a test TLS log.
+	CertificateProfile string
+
 	// Secret is the path to a file containing a secret seed from which the
 	// log's private keys are derived. The file contents are used as HKDF input.
 	// It must be exactly 32 bytes long.
@@ -391,7 +401,7 @@ type logInfo struct {
 	// Fields from the "Operator-published CT Log Metadata" proposal.
 	LogSpec         string          `json:"log_spec"`              // always "static-ct-api"
 	MMDSeconds      int             `json:"mmd_seconds"`           // always 60, same as MMD
-	TLSOnly         bool            `json:"tls_only"`              // always true
+	TLSOnly         bool            `json:"tls_only,omitzero"`     // true, or absent for mark logs
 	IntendedUse     string          `json:"intended_use,omitzero"` // "production" or "test"
 	Status          string          `json:"status"`                // "active" or "readonly" or "inactive"
 	StatusTimestamp string          `json:"status_timestamp"`
@@ -699,17 +709,29 @@ func main() {
 				"name", lc.Name, "submissionPrefix", lc.SubmissionPrefix)
 		}
 
+		switch lc.CertificateProfile {
+		case "", "tls":
+		case "mark":
+			if lc.Roots == "" {
+				fatalError(logger, `CertificateProfile "mark" requires Roots`)
+			}
+		default:
+			fatalError(logger, `CertificateProfile must be "tls", "mark", or empty`,
+				"CertificateProfile", lc.CertificateProfile)
+		}
+
 		cc := &ctlog.Config{
-			Name:          prefix.Host + prefix.Path,
-			Key:           k,
-			WitnessKey:    wk,
-			Cache:         lc.Cache,
-			PoolSize:      lc.PoolSize,
-			Backend:       b,
-			Lock:          db,
-			Log:           logger,
-			NotAfterStart: notAfterStart,
-			NotAfterLimit: notAfterLimit,
+			Name:             prefix.Host + prefix.Path,
+			Key:              k,
+			WitnessKey:       wk,
+			Cache:            lc.Cache,
+			PoolSize:         lc.PoolSize,
+			Backend:          b,
+			Lock:             db,
+			Log:              logger,
+			NotAfterStart:    notAfterStart,
+			NotAfterLimit:    notAfterLimit,
+			MarkCertificates: lc.CertificateProfile == "mark",
 		}
 
 		if time.Now().Format(time.DateOnly) == lc.Inception {
@@ -1182,7 +1204,7 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 		PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),
 		MMD:              60,
 		MMDSeconds:       60,
-		TLSOnly:          true,
+		TLSOnly:          lc.CertificateProfile != "mark",
 		LogSpec:          "static-ct-api",
 	}
 	log.Interval.NotAfterStart = lc.NotAfterStart
@@ -1191,7 +1213,7 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 	log.MonitoringEndpoint.URL = log.MonitoringPrefix
 	switch {
 	case lc.Roots != "":
-		// No IntendedUse for custom roots.
+		// No IntendedUse for custom roots (including all mark certificate logs).
 	case lc.CCADBRoots == "trusted" || lc.CCADBRoots == "":
 		log.IntendedUse = "production"
 	case lc.CCADBRoots == "testing":

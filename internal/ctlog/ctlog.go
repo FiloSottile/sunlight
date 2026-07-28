@@ -111,6 +111,10 @@ type Config struct {
 
 	NotAfterStart time.Time
 	NotAfterLimit time.Time
+
+	// MarkCertificates requires submitted certificates to have the Verified
+	// Mark Certificate EKU, instead of the serverAuth EKU.
+	MarkCertificates bool
 }
 
 var ErrLogExists = errors.New("checkpoint already exist, refusing to initialize log")
