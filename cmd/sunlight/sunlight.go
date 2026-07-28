@@ -579,7 +579,7 @@ func main() {
 	}
 	homeWitnessInfo := func() witnessInfo { return witnessInfo{} }
 	homeMirrorInfo := func() witnessInfo { return witnessInfo{} }
-	mux.HandleFunc("/{$}", func(w http.ResponseWriter, r *http.Request) {
+	homeHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		if err := homeTmpl.Execute(w, struct {
 			Title   string
@@ -595,6 +595,7 @@ func main() {
 			logger.Error("failed to execute homepage template", "err", err)
 		}
 	})
+	mux.Handle("/{$}", homeHandler)
 
 	var acmeHosts []string
 	for _, lc := range c.Logs {
@@ -831,6 +832,7 @@ func main() {
 				"tree_size", sunsetErr.FinalTree.N, "timestamp", sunsetErr.FinalTimestamp)
 		}
 		mux.Handle(prefix.Host+prefix.Path+"/ct/v1/", http.StripPrefix(prefix.Path, l.Handler()))
+		mux.Handle(prefix.Host+prefix.Path+"/{$}", homeHandler)
 
 		acmeHosts = append(acmeHosts, prefix.Hostname())
 
@@ -982,6 +984,7 @@ func main() {
 				"prefix", c.Witness.SubmissionPrefix)
 		}
 		mux.Handle(prefix.Host+prefix.Path+"/", http.StripPrefix(prefix.Path, w.Handler()))
+		mux.Handle(prefix.Host+prefix.Path+"/{$}", homeHandler)
 
 		acmeHosts = append(acmeHosts, prefix.Host)
 

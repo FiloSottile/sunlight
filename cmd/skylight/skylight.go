@@ -556,6 +556,10 @@ func main() {
 		}
 
 		patternPrefix := "GET " + prefix.Host + prefix.Path
+		if c.HomeRedirect != "" {
+			mux.Handle(patternPrefix+"/{$}", homeRedirect)
+			mux.Handle(patternPrefix+"/mirror/{$}", homeRedirect)
+		}
 		mux.HandleFunc(patternPrefix+"/{origin}/", func(w http.ResponseWriter, r *http.Request) {
 			origin := r.PathValue("origin")
 			r = r.WithContext(context.WithValue(r.Context(), originContextKey{}, cappedOrigin(origin, "")))
