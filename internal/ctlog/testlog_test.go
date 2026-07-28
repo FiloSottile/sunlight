@@ -367,8 +367,15 @@ func (tl *TestLog) LogClient() *client.LogClient {
 
 func (tl *TestLog) StartSequencer() {
 	ctx, cancel := context.WithCancel(context.Background())
-	tl.t.Cleanup(cancel)
+	done := make(chan struct{})
+	tl.t.Cleanup(func() {
+		// Wait for the sequencer to exit, or it might log (or error) after the
+		// test is complete.
+		cancel()
+		<-done
+	})
 	go func() {
+		defer close(done)
 		err := tl.Log.RunSequencer(ctx, 50*time.Millisecond)
 		if err != nil && !errors.Is(err, context.Canceled) &&
 			!errors.As(err, new(ctlog.SunsetLogError)) {
