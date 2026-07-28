@@ -523,7 +523,7 @@ func main() {
 	buildInfoGauge.WithLabelValues(buildVersion, buildCommit).Set(1)
 	sunlightMetrics.MustRegister(buildInfoGauge)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	serveGroup, ctx := errgroup.WithContext(ctx)

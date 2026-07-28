@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/immutable"
@@ -60,7 +61,7 @@ func main() {
 		fatalError(logger, "failed to parse config file", "err", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	var exitCode int

@@ -47,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"filippo.io/sunlight"
@@ -433,7 +434,7 @@ func main() {
 		rateLimitedHandlerFromContext(r.Context()).ServeHTTP(w, r)
 	})
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	var acmeHosts []string
