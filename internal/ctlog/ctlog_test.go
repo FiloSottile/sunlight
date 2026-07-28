@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"filippo.io/mldsa"
@@ -67,23 +68,29 @@ func TestSequenceLargeLog(t *testing.T) {
 		t.Skip("skipping TestSequenceLargeLog in -short mode")
 	}
 
-	tl := NewEmptyTestLog(t)
-	tl.Quiet()
-	for i := 0; i < 5; i++ {
-		addCertificate(t, tl)
-	}
-	fatalIfErr(t, tl.Log.Sequence())
-	tl.CheckLog(5)
-
-	for i := 0; i < 500; i++ {
-		for k := 0; k < 3000; k++ {
-			e := &ctlog.PendingLogEntry{}
-			e.Certificate = testCertificate(uint64(i*3000 + k))
-			tl.Log.AddLeafToPool(e)
+	// Sequencing is subject to wall clock timeouts, which a slow or emulated
+	// machine can exceed, silently dropping a pool. Run in a synctest bubble,
+	// where the clock only advances while everything is blocked, so the
+	// timeouts can't fire in the middle of a sequencing.
+	synctest.Test(t, func(t *testing.T) {
+		tl := NewEmptyTestLog(t)
+		tl.Quiet()
+		for i := 0; i < 5; i++ {
+			addCertificate(t, tl)
 		}
 		fatalIfErr(t, tl.Log.Sequence())
-	}
-	tl.CheckLog(5 + 500*3000)
+		tl.CheckLog(5)
+
+		for i := 0; i < 500; i++ {
+			for k := 0; k < 3000; k++ {
+				e := &ctlog.PendingLogEntry{}
+				e.Certificate = testCertificate(uint64(i*3000 + k))
+				tl.Log.AddLeafToPool(e)
+			}
+			fatalIfErr(t, tl.Log.Sequence())
+		}
+		tl.CheckLog(5 + 500*3000)
+	})
 }
 
 func TestSequenceEmptyPool(t *testing.T) {
