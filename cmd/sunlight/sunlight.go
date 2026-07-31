@@ -69,6 +69,14 @@ type Config struct {
 	// HTML page title. Optional. If empty, the title defaults to "Sunlight".
 	Name string
 
+	// HomeHTML is the path to an HTML file whose contents are included in
+	// the home page, between the introduction and the list of logs. It can
+	// be used for operator branding and links. Optional.
+	//
+	// The contents are trusted and included without escaping. The file is
+	// read once at startup.
+	HomeHTML string
+
 	// Listen are the addresses to listen on, e.g. ":443".
 	Listen []string
 
@@ -488,6 +496,15 @@ func main() {
 		fatalError(logger, "failed to parse config file", "err", err)
 	}
 
+	var homeExtra template.HTML
+	if c.HomeHTML != "" {
+		html, err := os.ReadFile(c.HomeHTML)
+		if err != nil {
+			fatalError(logger, "failed to read HomeHTML file", "err", err)
+		}
+		homeExtra = template.HTML(html)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		// TODO: print total certificates serialized in last 60s.
@@ -593,11 +610,13 @@ func main() {
 		w.Header().Set("Content-Type", "text/html")
 		if err := homeTmpl.Execute(w, struct {
 			Title   string
+			Extra   template.HTML
 			Logs    []logInfo
 			Witness witnessInfo
 			Mirror  witnessInfo
 		}{
 			Title:   cmp.Or(c.Name, "Sunlight"),
+			Extra:   homeExtra,
 			Logs:    homeLogsInfo(),
 			Witness: homeWitnessInfo(),
 			Mirror:  homeMirrorInfo(),
