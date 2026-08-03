@@ -647,9 +647,9 @@ func main() {
 		for log, root := range roots {
 			if err := checkLog(root); err != nil {
 				if errors.Is(err, errLogSunset) {
-					fmt.Fprintf(buf, "%s: read-only\n", log.ShortName)
+					fmt.Fprintf(buf, "%s: OK (read-only)\n", log.ShortName)
 				} else if log.Staging {
-					fmt.Fprintf(buf, "%s: %v (ignored)\n", log.ShortName, err)
+					fmt.Fprintf(buf, "%s: %v (ignored because it's staging)\n", log.ShortName, err)
 				} else {
 					status = http.StatusInternalServerError
 					fmt.Fprintf(buf, "%s: %v\n", log.ShortName, err)

@@ -317,9 +317,9 @@ code == 302
 GET https://skylight.example.org/health
 header content-type == text/plain; charset=utf-8
 header x-content-type-options == nosniff
-body contains rome2026h1: read-only
-body contains rome2026h2: read-only
-body contains milan2026h1: read-only
+body contains rome2026h1: OK (read-only)
+body contains rome2026h2: OK (read-only)
+body contains milan2026h1: OK (read-only)
 body contains witness rome2026h1.example.org: OK
 body contains mirror rome2026h1.example.org: OK
 body contains witness milan2026h1.example.org: OK
