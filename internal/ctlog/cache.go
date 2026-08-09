@@ -1,19 +1,44 @@
 package ctlog
 
 import (
+	"context"
+	"log/slog"
+	"path/filepath"
+	"time"
+
 	"crawshaw.io/sqlite"
 	"crawshaw.io/sqlite/sqlitex"
 	"filippo.io/sunlight"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-func initCache(path string) (readConn, writeConn *sqlite.Conn, err error) {
+func initCache(log *slog.Logger, path string) (readConn, writeConn *sqlite.Conn, err error) {
 	writeConn, err = sqlite.OpenConn(path, 0)
 	if err != nil {
 		return nil, nil, err
 	}
+	// On ZFS, transaction groups commit atomically and in order, so
+	// synchronous=OFF doesn't corrupt the database, and it makes checkpoints
+	// cheap enough to run on every sequencing round, avoiding latency spikes.
+	synchronousPRAGMA := `PRAGMA synchronous = OFF;`
+	if !onZFS(filepath.Dir(path)) {
+		synchronousPRAGMA = `PRAGMA synchronous = NORMAL;`
+		log.Warn("cache database is not on ZFS, using synchronous=NORMAL for safety; " +
+			"this may cause latency spikes during checkpoints")
+	}
+	if err := sqlitex.ExecTransient(writeConn, synchronousPRAGMA, nil); err != nil {
+		writeConn.Close()
+		return nil, nil, err
+	}
+	// Bound how long a checkpoint can stall a sequencing round waiting for
+	// in-flight cacheGet reads to move off the WAL. writeConn otherwise never
+	// contends: it is the only writer, and readers don't block it in WAL mode.
+	writeConn.SetBusyTimeout(time.Second)
+	// Checkpoints are executed explicitly with RESTART, instead of the
+	// automatic PASSIVE ones, which can't reset the WAL under sustained reads.
+	// We have only one writer, so RESTART is cheap.
 	if err := sqlitex.ExecTransient(writeConn,
-		`PRAGMA synchronous = NORMAL;`, nil); err != nil {
+		`PRAGMA wal_autocheckpoint = 0;`, nil); err != nil {
 		writeConn.Close()
 		return nil, nil, err
 	}
@@ -126,4 +151,29 @@ func (l *Log) cachePut(entries []*sunlight.LogEntry) (err error) {
 		}
 	}
 	return nil
+}
+
+func (l *Log) cacheCheckpoint(ctx context.Context) {
+	defer prometheus.NewTimer(l.m.CacheCheckpointDuration).ObserveDuration()
+	var busy, frames, checkpointed int64
+	err := sqlitex.ExecTransient(l.cacheWrite, `PRAGMA wal_checkpoint(RESTART);`,
+		func(stmt *sqlite.Stmt) error {
+			busy = stmt.ColumnInt64(0)
+			frames = stmt.ColumnInt64(1)
+			checkpointed = stmt.ColumnInt64(2)
+			return nil
+		})
+	if err != nil {
+		l.c.Log.ErrorContext(ctx, "cache checkpoint failed", "err", err)
+		l.m.CacheCheckpointErrors.Inc()
+		return
+	}
+	l.m.CacheWALFrames.Set(float64(frames))
+	if busy != 0 {
+		// The checkpoint couldn't complete within the busy timeout.
+		// The next attempt picks up where this one stopped.
+		l.c.Log.WarnContext(ctx, "cache checkpoint busy",
+			"frames", frames, "checkpointed", checkpointed)
+		l.m.CacheCheckpointBusy.Inc()
+	}
 }

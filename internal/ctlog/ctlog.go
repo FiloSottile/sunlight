@@ -136,7 +136,7 @@ func CreateLog(ctx context.Context, config *Config) error {
 		return fmt.Errorf("checkpoint missing from database but present in object storage")
 	}
 
-	cacheRead, cacheWrite, err := initCache(config.Cache)
+	cacheRead, cacheWrite, err := initCache(config.Log, config.Cache)
 	if err != nil {
 		return fmt.Errorf("couldn't initialize cache database: %w", err)
 	}
@@ -241,7 +241,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		}
 	}
 
-	cacheRead, cacheWrite, err := initCache(config.Cache)
+	cacheRead, cacheWrite, err := initCache(config.Log, config.Cache)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't initialize cache database: %w", err)
 	}
@@ -1107,6 +1107,14 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			"tree_size", tree.N, "entries", len(p.pendingLeaves), "err", err)
 		l.m.CachePutErrors.Inc()
 	}
+	// Checkpoint on every put to avoid latency spikes and limit WAL size.
+	//
+	// We are the only writer, so wal_checkpoint(RESTART) only needs to wait
+	// until already in-flight readers move off the WAL (while new readers go
+	// directly to the db).
+	//
+	// On ZFS, with synchronous=OFF, this is especially cheap.
+	l.cacheCheckpoint(ctx)
 
 	for _, t := range edgeTiles {
 		l.c.Log.DebugContext(ctx, "edge tile", "tile", t)

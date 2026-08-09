@@ -37,9 +37,13 @@ type metrics struct {
 	AddChainCount *prometheus.CounterVec
 	AddChainWait  prometheus.Summary
 
-	CacheGetDuration prometheus.Summary
-	CachePutDuration prometheus.Summary
-	CachePutErrors   prometheus.Counter
+	CacheGetDuration        prometheus.Summary
+	CachePutDuration        prometheus.Summary
+	CachePutErrors          prometheus.Counter
+	CacheCheckpointDuration prometheus.Summary
+	CacheCheckpointBusy     prometheus.Counter
+	CacheCheckpointErrors   prometheus.Counter
+	CacheWALFrames          prometheus.Gauge
 
 	StagingDiscardErrors prometheus.Counter
 }
@@ -226,6 +230,33 @@ func initMetrics() metrics {
 			prometheus.CounterOpts{
 				Name: "cache_put_errors_total",
 				Help: "Number of failed deduplication cache inserts.",
+			},
+		),
+		CacheCheckpointDuration: prometheus.NewSummary(
+			prometheus.SummaryOpts{
+				Name:       "cache_checkpoint_duration_seconds",
+				Help:       "Duration of deduplication cache WAL checkpoints.",
+				Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+				MaxAge:     1 * time.Minute,
+				AgeBuckets: 6,
+			},
+		),
+		CacheCheckpointBusy: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "cache_checkpoint_busy_total",
+				Help: "Number of cache WAL checkpoints that couldn't complete and reset the WAL.",
+			},
+		),
+		CacheCheckpointErrors: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "cache_checkpoint_errors_total",
+				Help: "Number of failed cache WAL checkpoints.",
+			},
+		),
+		CacheWALFrames: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "cache_wal_frames",
+				Help: "Frames in the cache WAL as of the latest checkpoint.",
 			},
 		),
 		StagingDiscardErrors: prometheus.NewCounter(

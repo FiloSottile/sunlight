@@ -1,6 +1,8 @@
 package ctlog
 
 import (
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"testing"
 
@@ -52,7 +54,7 @@ func TestCacheNewEntriesUse256BitTable(t *testing.T) {
 		}
 	}()
 
-	rc, wc, err := initCache(path)
+	rc, wc, err := initCache(slog.New(slog.DiscardHandler), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +131,7 @@ func TestCacheLegacyFallback(t *testing.T) {
 		}
 	}()
 
-	rc, wc, err := initCache(path)
+	rc, wc, err := initCache(slog.New(slog.DiscardHandler), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +164,89 @@ func TestCacheLegacyFallback(t *testing.T) {
 	}
 }
 
+func newCheckpointTestLog(t *testing.T) *Log {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	rc, wc, err := initCache(slog.New(slog.DiscardHandler), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rc.Close(); wc.Close() })
+	return &Log{
+		cacheRead:  rc,
+		cacheWrite: wc,
+		m:          initMetrics(),
+		c:          &Config{Log: slog.New(slog.DiscardHandler)},
+	}
+}
+
+func checkpointTestBatch(i, n int) []*sunlight.LogEntry {
+	batch := make([]*sunlight.LogEntry, n)
+	for j := range batch {
+		batch[j] = &sunlight.LogEntry{
+			Certificate: fmt.Appendf(nil, "cert-%d-%d", i, j),
+			LeafIndex:   int64(i*n + j),
+			Timestamp:   1234,
+		}
+	}
+	return batch
+}
+
+// walFrames returns the number of frames currently in the WAL, as reported by
+// a passive checkpoint.
+func walFrames(t *testing.T, conn *sqlite.Conn) int64 {
+	t.Helper()
+	var frames int64
+	if err := sqlitex.ExecTransient(conn, `PRAGMA wal_checkpoint(PASSIVE);`,
+		func(stmt *sqlite.Stmt) error { frames = stmt.ColumnInt64(1); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	return frames
+}
+
+// TestCacheCheckpoint verifies that the WAL is restarted after every pool, so
+// it doesn't grow unboundedly, and that entries survive the checkpoints.
+func TestCacheCheckpoint(t *testing.T) {
+	l := newCheckpointTestLog(t)
+
+	ctx := t.Context()
+	for i := range 4 {
+		batch := checkpointTestBatch(i, 500)
+		if err := l.cachePut(batch); err != nil {
+			t.Fatal(err)
+		}
+		l.cacheCheckpoint(ctx)
+	}
+	frames := walFrames(t, l.cacheRead)
+
+	// A checkpoint only marks the WAL for restart: the frame count stays at
+	// its high-water mark until the next writer rewinds, and each pool dirties
+	// more pages as the table grows. The observable property is that each pool
+	// overwrites the WAL from the start instead of appending, so compare
+	// against a control receiving identical writes with no checkpoints.
+	control := newCheckpointTestLog(t)
+	for i := range 4 {
+		if err := control.cachePut(checkpointTestBatch(i, 500)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controlFrames := walFrames(t, control.cacheRead)
+
+	if frames*2 > controlFrames {
+		t.Errorf("WAL has %d frames with per-pool resets, %d without: expected much fewer",
+			frames, controlFrames)
+	}
+
+	// The entries survive the checkpoints.
+	got, err := l.cacheGet(&PendingLogEntry{Certificate: []byte("cert-0-0")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.LeafIndex != 0 {
+		t.Fatalf("cache256 round-trip after checkpoint: got %+v, want index 0", got)
+	}
+}
+
 // TestCacheLegacyTableDroppedMidRun verifies that if the legacy table is
 // dropped while the log is running (an operator finishing the migration after
 // running cmd/recompute-cache), cacheGet degrades to a miss instead of
@@ -181,7 +266,7 @@ func TestCacheLegacyTableDroppedMidRun(t *testing.T) {
 		}
 	}()
 
-	rc, wc, err := initCache(path)
+	rc, wc, err := initCache(slog.New(slog.DiscardHandler), path)
 	if err != nil {
 		t.Fatal(err)
 	}
