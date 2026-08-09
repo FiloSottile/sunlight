@@ -17,6 +17,12 @@ func initCache(path string) (readConn, writeConn *sqlite.Conn, err error) {
 		writeConn.Close()
 		return nil, nil, err
 	}
+	if err := sqlitex.ExecTransient(writeConn,
+		// 1 GiB, enough for the interior pages of a full shard.
+		`PRAGMA cache_size = -1048576;`, nil); err != nil {
+		writeConn.Close()
+		return nil, nil, err
+	}
 	if err := sqlitex.ExecTransient(writeConn, `
 		CREATE TABLE IF NOT EXISTS cache256 (
 			key BLOB PRIMARY KEY,
@@ -28,6 +34,12 @@ func initCache(path string) (readConn, writeConn *sqlite.Conn, err error) {
 	}
 	readConn, err = sqlite.OpenConn(path, 0)
 	if err != nil {
+		writeConn.Close()
+		return nil, nil, err
+	}
+	if err := sqlitex.ExecTransient(readConn,
+		`PRAGMA cache_size = -1048576;`, nil); err != nil {
+		readConn.Close()
 		writeConn.Close()
 		return nil, nil, err
 	}
