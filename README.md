@@ -111,12 +111,14 @@ A shorter period reduces latency, but causes more frequent writes. You should no
 The pool size effectively acts as a rate limit: Sunlight will accept at most `poolsize / period` submissions.
 
 ```yaml
-    cache: /tank/logs/example2025h2/cache.db
+    cache: /tank/caches/example2025h2/cache.db
 ```
 
 Cache is the path to an SQLite database that keeps track of submitted certificates to avoid duplicate entries. This part of Sunlight can tolerate data loss: it's ok to rollback a few entries on a regular basis, or even lose the cache in an emergency. The only consequence is that existing entries might be resubmitted, growing the size of the log. If the actual log data is hosted on object storage (see below) and the secret is backed up, a log can recover from the complete loss of the Sunlight server.
 
 This generally doesn’t grow beyond 100 GB.
+
+The cache is accessed with uniformly random 4 KiB page reads and writes, so it's best kept on a filesystem tuned for that pattern, separate from the sequentially-written log data. For example, on ZFS use a dedicated dataset with `recordsize=4K`: larger record sizes amplify reads and evict useful cache memory, which can slow sequencing under sustained submission load.
 
 The cache is trusted: an attacker who can modify it can cause Sunlight to sign an SCT for a certificate that is not actually in the log.
 

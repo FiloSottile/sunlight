@@ -33,14 +33,21 @@ func main() {
 		step        = flag.Duration("step", 0, "chart step (0 = auto-scale to ~2000 points)")
 		logName     = flag.String("log-name", "tuscolo", "log family name (matches sunlight job and log label prefix)")
 		skylightJob = flag.String("skylight-job", "skylight", "Prometheus job label for skylight")
-		datasetF    = flag.String("zfs-dataset", "tank/logs/", "ZFS parent dataset (must end with /)")
+		datasetF    = flag.String("zfs-dataset", "tank/logs/,tank/caches/", "comma-separated ZFS parent datasets (each must end with /)")
 		netDevice   = flag.String("network-device", "enp.*", "regex for physical NIC device labels")
 		nodeJob     = flag.String("node-job", "node", "Prometheus job label of the node_exporter serving host metrics")
 	)
 	flag.Parse()
 
-	if !strings.HasSuffix(*datasetF, "/") {
-		log.Fatalf("-zfs-dataset must end with /: %q", *datasetF)
+	dsPrefixes := strings.Split(*datasetF, ",")
+	for _, p := range dsPrefixes {
+		if !strings.HasSuffix(p, "/") {
+			log.Fatalf("-zfs-dataset entries must end with /: %q", p)
+		}
+	}
+	quotedPrefixes := make([]string, len(dsPrefixes))
+	for i, p := range dsPrefixes {
+		quotedPrefixes[i] = regexp.QuoteMeta(p)
 	}
 
 	if *step == 0 {
@@ -57,11 +64,11 @@ func main() {
 	sel := selectors{
 		sunlight:      fmt.Sprintf(`job=%q`, *logName),
 		skylight:      fmt.Sprintf(`log=~%q`, *logName+".*"),
-		dataset:       fmt.Sprintf(`dataset=~%q`, regexp.QuoteMeta(*datasetF+*logName)+`[0-9].*`),
+		dataset:       fmt.Sprintf(`dataset=~%q`, "(?:"+strings.Join(quotedPrefixes, "|")+")"+regexp.QuoteMeta(*logName)+`[0-9].*`),
 		process:       fmt.Sprintf(`job=~%q`, *logName+"|"+*skylightJob),
 		networkDevice: fmt.Sprintf(`device=~%q`, *netDevice),
 		node:          fmt.Sprintf(`job=%q`, *nodeJob),
-		dsPrefix:      *datasetF,
+		dsPrefixes:    dsPrefixes,
 		processLabels: map[string]string{
 			*logName:     "sunlight (write path)",
 			*skylightJob: "skylight (read path)",
@@ -280,13 +287,13 @@ var palette = []string{
 }
 
 type selectors struct {
-	sunlight      string // e.g. `job="tuscolo"`
-	skylight      string // e.g. `log=~"tuscolo.*"`
-	dataset       string // e.g. `dataset=~"tank/logs/tuscolo.*"`
-	process       string // e.g. `job=~"tuscolo|skylight"`
-	networkDevice string // e.g. `device=~"enp.*"`
-	node          string // e.g. `job="node"` (node_exporter, including the ZFS textfile collector)
-	dsPrefix      string // e.g. "tank/logs/" (for stripping dataset labels)
+	sunlight      string   // e.g. `job="tuscolo"`
+	skylight      string   // e.g. `log=~"tuscolo.*"`
+	dataset       string   // e.g. `dataset=~"(?:tank/logs/|tank/caches/)tuscolo.*"`
+	process       string   // e.g. `job=~"tuscolo|skylight"`
+	networkDevice string   // e.g. `device=~"enp.*"`
+	node          string   // e.g. `job="node"` (node_exporter, including the ZFS textfile collector)
+	dsPrefixes    []string // e.g. ["tank/logs/", "tank/caches/"] (for stripping dataset labels)
 	processLabels map[string]string
 }
 
@@ -396,22 +403,22 @@ func buildTable(p *prom, end time.Time, sel selectors) *logsTable {
 			get(name).notAfterEnd = v
 		}
 	})
+	// A shard's usage is spread across multiple parent datasets (tiles and
+	// dedup cache), summed into a single row.
 	scrape(fmt.Sprintf(`zfs_dataset_referenced_bytes{%s,%s}`, sel.node, sel.dataset), func(l map[string]string, v float64) {
-		ds := l["dataset"]
-		name := strings.TrimPrefix(ds, sel.dsPrefix)
-		if name == "" || name == ds {
+		name := shardFromDataset(l["dataset"], sel.dsPrefixes)
+		if name == "" {
 			return
 		}
-		get(name).onDisk = v
+		get(name).onDisk += v
 		get(name).hasDisk = true
 	})
 	scrape(fmt.Sprintf(`zfs_dataset_logicalreferenced_bytes{%s,%s}`, sel.node, sel.dataset), func(l map[string]string, v float64) {
-		ds := l["dataset"]
-		name := strings.TrimPrefix(ds, sel.dsPrefix)
-		if name == "" || name == ds {
+		name := shardFromDataset(l["dataset"], sel.dsPrefixes)
+		if name == "" {
 			return
 		}
-		get(name).logical = v
+		get(name).logical += v
 	})
 
 	names := make([]string, 0, len(rows))
@@ -453,6 +460,15 @@ func buildTable(p *prom, end time.Time, sel selectors) *logsTable {
 		IsTotal:     true,
 	}
 	return tbl
+}
+
+func shardFromDataset(ds string, prefixes []string) string {
+	for _, p := range prefixes {
+		if name := strings.TrimPrefix(ds, p); name != ds && name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 func fmtNotAfter(start, end float64) string {
