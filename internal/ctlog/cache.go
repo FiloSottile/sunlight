@@ -3,6 +3,7 @@ package ctlog
 import (
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -141,6 +142,7 @@ func (l *Log) cacheGet(leaf *PendingLogEntry) (*sunlight.LogEntry, error) {
 
 func (l *Log) cachePut(entries []*sunlight.LogEntry) (err error) {
 	defer prometheus.NewTimer(l.m.CachePutDuration).ObserveDuration()
+	l.m.CachePutEntries.Add(float64(len(entries)))
 	defer sqlitex.Save(l.cacheWrite)(&err)
 	for _, se := range entries {
 		h := computeCacheHash(se.Certificate, se.IsPrecert, se.IssuerKeyHash)
@@ -175,5 +177,8 @@ func (l *Log) cacheCheckpoint(ctx context.Context) {
 		l.c.Log.WarnContext(ctx, "cache checkpoint busy",
 			"frames", frames, "checkpointed", checkpointed)
 		l.m.CacheCheckpointBusy.Inc()
+	}
+	if fi, err := os.Stat(l.c.Cache); err == nil {
+		l.m.CacheDatabaseBytes.Set(float64(fi.Size()))
 	}
 }

@@ -67,7 +67,7 @@ func TestCacheNewEntriesUse256BitTable(t *testing.T) {
 	if !legacy {
 		t.Fatal("legacy cache table was not detected")
 	}
-	l := &Log{cacheRead: rc, cacheWrite: wc, cacheLegacy: legacy}
+	l := &Log{cacheRead: rc, cacheWrite: wc, cacheLegacy: legacy, m: initMetrics()}
 
 	if err := l.cachePut([]*sunlight.LogEntry{{
 		Certificate: []byte("new-entry"),
@@ -144,7 +144,7 @@ func TestCacheLegacyFallback(t *testing.T) {
 	if !legacy {
 		t.Fatal("legacy cache table was not detected")
 	}
-	l := &Log{cacheRead: rc, cacheWrite: wc, cacheLegacy: legacy}
+	l := &Log{cacheRead: rc, cacheWrite: wc, cacheLegacy: legacy, m: initMetrics()}
 
 	got, err := l.cacheGet(&PendingLogEntry{Certificate: cert})
 	if err != nil {
@@ -176,7 +176,7 @@ func newCheckpointTestLog(t *testing.T) *Log {
 		cacheRead:  rc,
 		cacheWrite: wc,
 		m:          initMetrics(),
-		c:          &Config{Log: slog.New(slog.DiscardHandler)},
+		c:          &Config{Log: slog.New(slog.DiscardHandler), Cache: path},
 	}
 }
 
@@ -279,7 +279,7 @@ func TestCacheLegacyTableDroppedMidRun(t *testing.T) {
 	if !legacy {
 		t.Fatal("legacy cache table was not detected")
 	}
-	l := &Log{cacheRead: rc, cacheWrite: wc, cacheLegacy: legacy}
+	l := &Log{cacheRead: rc, cacheWrite: wc, cacheLegacy: legacy, m: initMetrics()}
 
 	// Drop the legacy table out from under the running log, on another
 	// connection, as an external sqlite3 process would.

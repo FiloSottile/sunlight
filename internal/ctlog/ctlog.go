@@ -886,6 +886,15 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	ctx, cancel := context.WithTimeout(ctx, sequenceTimeout)
 	defer cancel()
 
+	// phase attributes the time since the previous phase (or the start of the
+	// round) to a phase of the sequencing round.
+	phaseStart := start
+	phase := func(name string) {
+		now := time.Now()
+		l.m.SeqPhaseDuration.WithLabelValues(name).Observe(now.Sub(phaseStart).Seconds())
+		phaseStart = now
+	}
+
 	timestamp := timeNowUnixMilli()
 	if timestamp <= l.tree.Time {
 		return fmt.Errorf("%w: time did not progress! %d -> %d", errFatal, l.tree.Time, timestamp)
@@ -1022,6 +1031,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	if err != nil {
 		return fmtErrorf("couldn't compute tree head: %w", err)
 	}
+	phase("hash")
 
 	// Upload tiles to staging, where they can be recovered by LoadLog if we
 	// crash right after updating the lock database. See also
@@ -1047,6 +1057,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			return fmtErrorf("couldn't upload staged tiles: %w", err)
 		}
 	}
+	phase("stage")
 
 	checkpoint, err := signTreeHead(l.c, tree)
 	if err != nil {
@@ -1060,6 +1071,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		// to a good state after restart.
 		return fmt.Errorf("%w: couldn't upload checkpoint to database: %w", errFatal, err)
 	}
+	phase("checkpoint")
 
 	// At this point the pool is fully serialized: new entries were persisted to
 	// object storage (in staging) and the checkpoint was committed to the
@@ -1097,6 +1109,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 			l.m.StagingDiscardErrors.Inc()
 		}
 	}
+	phase("upload")
 
 	// At this point if the cache put fails, there's no reason to return errors
 	// to users. The only consequence of cache false negatives are duplicated
@@ -1115,6 +1128,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 	//
 	// On ZFS, with synchronous=OFF, this is especially cheap.
 	l.cacheCheckpoint(ctx)
+	phase("cache")
 
 	for _, t := range edgeTiles {
 		l.c.Log.DebugContext(ctx, "edge tile", "tile", t)

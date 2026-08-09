@@ -18,6 +18,7 @@ type metrics struct {
 	SeqCount             *prometheus.CounterVec
 	SeqPoolSize          prometheus.Summary
 	SeqDuration          prometheus.Summary
+	SeqPhaseDuration     *prometheus.SummaryVec
 	SeqLeafSize          prometheus.Summary
 	SeqTiles             prometheus.Counter
 	SeqDataTileSize      prometheus.Summary
@@ -39,7 +40,9 @@ type metrics struct {
 
 	CacheGetDuration        prometheus.Summary
 	CachePutDuration        prometheus.Summary
+	CachePutEntries         prometheus.Counter
 	CachePutErrors          prometheus.Counter
+	CacheDatabaseBytes      prometheus.Gauge
 	CacheCheckpointDuration prometheus.Summary
 	CacheCheckpointBusy     prometheus.Counter
 	CacheCheckpointErrors   prometheus.Counter
@@ -99,6 +102,16 @@ func initMetrics() metrics {
 				MaxAge:     1 * time.Minute,
 				AgeBuckets: 6,
 			},
+		),
+		SeqPhaseDuration: prometheus.NewSummaryVec(
+			prometheus.SummaryOpts{
+				Name:       "sequencing_phase_duration_seconds",
+				Help:       "Duration of sequencing round phases, up to the point of failure.",
+				Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+				MaxAge:     1 * time.Minute,
+				AgeBuckets: 6,
+			},
+			[]string{"phase"},
 		),
 		SeqLeafSize: prometheus.NewSummary(
 			prometheus.SummaryOpts{
@@ -226,10 +239,22 @@ func initMetrics() metrics {
 				AgeBuckets: 6,
 			},
 		),
+		CachePutEntries: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "cache_put_entries_total",
+				Help: "Number of entries in deduplication cache inserts, successful or not.",
+			},
+		),
 		CachePutErrors: prometheus.NewCounter(
 			prometheus.CounterOpts{
 				Name: "cache_put_errors_total",
 				Help: "Number of failed deduplication cache inserts.",
+			},
+		),
+		CacheDatabaseBytes: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "cache_database_bytes",
+				Help: "Size of the deduplication cache database file.",
 			},
 		),
 		CacheCheckpointDuration: prometheus.NewSummary(
