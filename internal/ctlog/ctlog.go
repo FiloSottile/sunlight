@@ -668,6 +668,16 @@ func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry, lowPrior
 	if f, ok := l.inSequencing[h]; ok {
 		return f, "pool"
 	}
+	// Apply the rate limit before going to the SQLite cache, to limit
+	// SQLite queries under pressure.
+	n := len(p.pendingLeaves)
+	if l.c.PoolSize > 0 && n >= l.c.PoolSize {
+		if lowPriority || len(p.lowPriority) == 0 {
+			return func(ctx context.Context) (*sunlight.LogEntry, error) {
+				return nil, errPoolFull
+			}, "ratelimit"
+		}
+	}
 	if leaf, err := l.cacheGet(leaf); err != nil {
 		return func(ctx context.Context) (*sunlight.LogEntry, error) {
 			return nil, fmtErrorf("deduplication cache get failed: %w", err)
@@ -677,13 +687,9 @@ func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry, lowPrior
 			return leaf, nil
 		}, "cache"
 	}
-	n := len(p.pendingLeaves)
 	if l.c.PoolSize > 0 && n >= l.c.PoolSize {
-		if lowPriority || len(p.lowPriority) == 0 {
-			return func(ctx context.Context) (*sunlight.LogEntry, error) {
-				return nil, errPoolFull
-			}, "ratelimit"
-		}
+		// We checked above that there are low-priority entries, and that this
+		// entry is high-priority, so evict to make space for this entry.
 		for nn, cancel := range p.lowPriority {
 			cancel()
 			delete(p.lowPriority, nn)
