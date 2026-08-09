@@ -51,6 +51,10 @@ type Log struct {
 	// sequencing batch, before inSequencing and currentPool are rotated.
 	cacheWrite *sqlite.Conn
 
+	// poolGate is acquired by addLeafToPool before poolMu, while the sequencer
+	// takes poolMu directly, so that sequencing doesn't have to queue behind
+	// multiple addLeafToPool calls under load.
+	poolGate sync.Mutex
 	// poolMu is held for the entire duration of addLeafToPool, and by
 	// RunSequencer while rotating currentPool and inSequencing.
 	// This guarantees that addLeafToPool will never add to a pool that already
@@ -653,8 +657,13 @@ func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry, lowPrior
 		}
 	}
 
+	l.poolGate.Lock()
+	defer l.poolGate.Unlock()
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
+	if testingOnlyPauseAddLeafToPool != nil {
+		testingOnlyPauseAddLeafToPool()
+	}
 	p := l.currentPool
 	if err := p.err; err != nil {
 		return func(ctx context.Context) (*sunlight.LogEntry, error) {
@@ -831,6 +840,10 @@ func (l *Log) sequence(ctx context.Context) error {
 	l.currentPool = newPool()
 	l.inSequencing = p.byHash
 	l.poolMu.Unlock()
+
+	if testingOnlyPoolSwapped != nil {
+		testingOnlyPoolSwapped()
+	}
 
 	err := l.sequencePool(ctx, p)
 
@@ -1109,6 +1122,8 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 }
 
 var testingOnlyPauseSequencing func()
+var testingOnlyPauseAddLeafToPool func()
+var testingOnlyPoolSwapped func()
 
 type uploadAction struct {
 	key  string

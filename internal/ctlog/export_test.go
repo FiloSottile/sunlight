@@ -31,6 +31,14 @@ func SetTimeNowUnixMilli(f func() int64) {
 	timeNowUnixMilli = f
 }
 
+func SetAddLeafToPoolPause(f func()) {
+	testingOnlyPauseAddLeafToPool = f
+}
+
+func SetPoolSwapCallback(f func()) {
+	testingOnlyPoolSwapped = f
+}
+
 var seqRunning chan struct{}
 
 func PauseSequencer() {

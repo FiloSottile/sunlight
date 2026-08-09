@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -342,6 +343,92 @@ func TestRatelimit(t *testing.T) {
 	checkEvictions()
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog(40)
+}
+
+// TestSequencerNotStarved verifies that the sequencer takes priority over
+// submissions for the pool lock: even with a long queue of submissions, each
+// spending time in the addLeafToPool critical section (e.g. on slow
+// deduplication cache lookups), a sequencing round rotates the pools after
+// waiting for at most the one submission inside the critical section.
+func TestSequencerNotStarved(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+
+	// Park every submission inside the pool lock critical section until the
+	// test releases it, simulating slow deduplication cache lookups. The hold
+	// must exceed the sync.Mutex starvation threshold (1ms): within a shorter
+	// critical section, submissions can keep barging in front of the waiting
+	// sequencer, which is fair game for the assertion below only if each of
+	// them costs as much as a real cache lookup.
+	pauses := make(chan chan struct{})
+	ctlog.SetAddLeafToPoolPause(func() {
+		time.Sleep(2 * time.Millisecond)
+		release := make(chan struct{})
+		pauses <- release
+		<-release
+	})
+	t.Cleanup(func() { ctlog.SetAddLeafToPoolPause(nil) })
+
+	swapped := make(chan struct{}, 1)
+	ctlog.SetPoolSwapCallback(func() {
+		select {
+		case swapped <- struct{}{}:
+		default:
+		}
+	})
+	t.Cleanup(func() { ctlog.SetPoolSwapCallback(nil) })
+
+	const submitters = 100
+	var wg sync.WaitGroup
+	for i := range submitters {
+		wg.Go(func() {
+			e := &ctlog.PendingLogEntry{}
+			e.Certificate = testCertificate(uint64(i))
+			tl.Log.AddLeafToPool(e)
+		})
+	}
+
+	// One submission is now parked inside the critical section; give the
+	// others time to queue up for the pool lock behind it.
+	holder := <-pauses
+	time.Sleep(100 * time.Millisecond)
+
+	seqDone := make(chan error, 1)
+	go func() { seqDone <- tl.Log.Sequence() }()
+	close(holder)
+
+	// The sequencer must rotate the pools after waiting for at most the
+	// submission holding the lock, not for the whole queue. A couple of
+	// submissions can win the race with the sequencer, but the rest must
+	// still be queued when the rotation happens.
+	releasedBeforeSwap := 0
+	for waiting := true; waiting; {
+		select {
+		case release := <-pauses:
+			releasedBeforeSwap++
+			close(release)
+		case <-swapped:
+			waiting = false
+		}
+	}
+	if releasedBeforeSwap > 5 {
+		t.Errorf("sequencer waited for %d submissions, expected at most a few", releasedBeforeSwap)
+	}
+
+	// Release the rest of the queue and wait for the round to complete.
+	allDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(allDone)
+	}()
+	for draining := true; draining; {
+		select {
+		case release := <-pauses:
+			close(release)
+		case <-allDone:
+			draining = false
+		}
+	}
+	fatalIfErr(t, <-seqDone)
 }
 
 func TestDuplicates(t *testing.T) {
