@@ -272,6 +272,8 @@ type logTableRow struct {
 type chartOpts struct {
 	Unit     unitKind
 	Stack    bool
+	LogScale bool              // logarithmic Y axis with power-of-ten ticks
+	Order    []string          // explicit series order (bottom-up for stacks); unlisted labels sort last
 	LabelMap map[string]string // rewrite series labels for the legend
 }
 
@@ -316,12 +318,13 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`sum by (low_priority) (rate(sunlight_addchain_requests_total{%s,error=""}[5m]))`, sel.sunlight),
 			[]string{"low_priority"}, chartOpts{Unit: unitRate, Stack: true,
+				Order:    []string{"normal", "low"},
 				LabelMap: map[string]string{"true": "low", "false": "normal"}}))
 
 	add("Submit latency (p50, p99, worst shard)",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`max by (quantile) (sunlight_addchain_wait_seconds{%s,quantile=~"0.5|0.99"})`, sel.sunlight),
-			[]string{"quantile"}, chartOpts{Unit: unitSeconds}))
+			[]string{"quantile"}, chartOpts{Unit: unitSeconds, LogScale: true}))
 
 	add("Requests/s served (per kind)",
 		rangeChart(p, start, end, step,
@@ -524,7 +527,15 @@ func rangeChart(p *prom, start, end time.Time, step time.Duration, expr string, 
 			Samples: sr.Samples,
 		})
 	}
-	if o.Stack {
+	if len(o.Order) > 0 {
+		rank := func(s chartSeries) int {
+			if i := slices.Index(o.Order, s.Label); i >= 0 {
+				return i
+			}
+			return len(o.Order)
+		}
+		sort.SliceStable(cs, func(i, j int) bool { return rank(cs[i]) < rank(cs[j]) })
+	} else if o.Stack {
 		// Largest series at the bottom of the stack.
 		sort.SliceStable(cs, func(i, j int) bool { return seriesTotal(cs[i]) > seriesTotal(cs[j]) })
 	} else {
@@ -600,28 +611,52 @@ func renderChart(cs []chartSeries, start, end time.Time, o chartOpts) chartPanel
 	if len(cs) == 0 {
 		return chartPanel{Error: "no data"}
 	}
-	vmin, vmax, ok := seriesRange(cs)
-	if !ok {
-		return chartPanel{Error: "no data"}
+	var yOf func(v float64) float64
+	var yTicks []float64
+	if o.LogScale {
+		lmin, lmax, ok := logYAxis(cs)
+		if !ok {
+			return chartPanel{Error: "no data"}
+		}
+		logMin, logMax := math.Log10(lmin), math.Log10(lmax)
+		yOf = func(v float64) float64 {
+			// Clamp non-positive and off-scale-low values to the bottom edge.
+			if v < lmin {
+				v = lmin
+			}
+			return yPx(math.Log10(v), logMin, logMax)
+		}
+		for d := logMin; d <= logMax+1e-6; d++ {
+			yTicks = append(yTicks, math.Pow(10, d))
+		}
+	} else {
+		vmin, vmax, ok := seriesRange(cs)
+		if !ok {
+			return chartPanel{Error: "no data"}
+		}
+		if o.Stack {
+			vmin = 0
+			vmax = stackMax(cs)
+		}
+		if vmin > 0 {
+			vmin = 0
+		}
+		if vmax <= vmin {
+			vmax = vmin + 1
+		}
+		niceMin, niceMax, tick := niceYAxis(vmin, vmax)
+		yOf = func(v float64) float64 { return yPx(v, niceMin, niceMax) }
+		for y := niceMin; y <= niceMax+tick*1e-6; y += tick {
+			yTicks = append(yTicks, y)
+		}
 	}
-	if o.Stack {
-		vmin = 0
-		vmax = stackMax(cs)
-	}
-	if vmin > 0 {
-		vmin = 0
-	}
-	if vmax <= vmin {
-		vmax = vmin + 1
-	}
-	niceMin, niceMax, tick := niceYAxis(vmin, vmax)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, `<svg viewBox="0 0 %d %d" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">`, chartW, chartH)
 
 	fmt.Fprintf(&b, `<g font-size="10" fill="#999" font-family="-apple-system,system-ui,sans-serif">`)
-	for y := niceMin; y <= niceMax+tick*1e-6; y += tick {
-		py := yPx(y, niceMin, niceMax)
+	for _, y := range yTicks {
+		py := yOf(y)
 		fmt.Fprintf(&b, `<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#eee"/>`, padL, py, chartW-padR, py)
 		fmt.Fprintf(&b, `<text x="%d" y="%.1f" text-anchor="end">%s</text>`,
 			padL-4, py+3, html.EscapeString(fmtAxis(y, o.Unit)))
@@ -635,10 +670,10 @@ func renderChart(cs []chartSeries, start, end time.Time, o chartOpts) chartPanel
 	fmt.Fprintf(&b, `</g>`)
 
 	if o.Stack {
-		renderStack(&b, cs, start, end, niceMin, niceMax)
+		renderStack(&b, cs, start, end, yOf)
 	} else {
 		for _, s := range cs {
-			renderLine(&b, s, start, end, niceMin, niceMax)
+			renderLine(&b, s, start, end, yOf)
 		}
 	}
 	fmt.Fprintf(&b, `</svg>`)
@@ -669,6 +704,37 @@ func seriesRange(cs []chartSeries) (min, max float64, ok bool) {
 		}
 	}
 	return
+}
+
+// logYAxis returns power-of-ten axis bounds covering the positive values in
+// cs, spanning at most six decades below the maximum.
+func logYAxis(cs []chartSeries) (min, max float64, ok bool) {
+	for _, s := range cs {
+		for _, p := range s.Samples {
+			if math.IsNaN(p.V) || p.V <= 0 {
+				continue
+			}
+			if !ok || p.V < min {
+				min = p.V
+			}
+			if !ok || p.V > max {
+				max = p.V
+			}
+			ok = true
+		}
+	}
+	if !ok {
+		return 0, 0, false
+	}
+	lo := math.Floor(math.Log10(min))
+	hi := math.Ceil(math.Log10(max))
+	if hi == lo {
+		hi++
+	}
+	if lo < hi-6 {
+		lo = hi - 6
+	}
+	return math.Pow(10, lo), math.Pow(10, hi), true
 }
 
 func seriesTotal(s chartSeries) float64 {
@@ -716,7 +782,7 @@ func yPx(v, ymin, ymax float64) float64 {
 	return float64(padT) + (ymax-v)/span*float64(chartH-padT-padB)
 }
 
-func renderLine(b *strings.Builder, s chartSeries, start, end time.Time, ymin, ymax float64) {
+func renderLine(b *strings.Builder, s chartSeries, start, end time.Time, yOf func(float64) float64) {
 	var pts []string
 	flush := func() {
 		if len(pts) >= 2 {
@@ -733,12 +799,12 @@ func renderLine(b *strings.Builder, s chartSeries, start, end time.Time, ymin, y
 			flush()
 			continue
 		}
-		pts = append(pts, fmt.Sprintf("%.1f,%.1f", xPx(p.T, start, end), yPx(p.V, ymin, ymax)))
+		pts = append(pts, fmt.Sprintf("%.1f,%.1f", xPx(p.T, start, end), yOf(p.V)))
 	}
 	flush()
 }
 
-func renderStack(b *strings.Builder, cs []chartSeries, start, end time.Time, ymin, ymax float64) {
+func renderStack(b *strings.Builder, cs []chartSeries, start, end time.Time, yOf func(float64) float64) {
 	tsSet := map[int64]struct{}{}
 	for _, s := range cs {
 		for _, p := range s.Samples {
@@ -768,11 +834,11 @@ func renderStack(b *strings.Builder, cs []chartSeries, start, end time.Time, ymi
 		var pts []string
 		for j, t := range ts {
 			pts = append(pts, fmt.Sprintf("%.1f,%.1f",
-				xPx(time.Unix(t, 0), start, end), yPx(top[j], ymin, ymax)))
+				xPx(time.Unix(t, 0), start, end), yOf(top[j])))
 		}
 		for j := len(ts) - 1; j >= 0; j-- {
 			pts = append(pts, fmt.Sprintf("%.1f,%.1f",
-				xPx(time.Unix(ts[j], 0), start, end), yPx(running[j], ymin, ymax)))
+				xPx(time.Unix(ts[j], 0), start, end), yOf(running[j])))
 		}
 		fmt.Fprintf(b, `<polygon fill="%s" fill-opacity="0.55" stroke="%s" stroke-width="0.8" points="%s"/>`,
 			s.Color, s.Color, strings.Join(pts, " "))
