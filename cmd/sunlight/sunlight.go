@@ -976,32 +976,32 @@ func main() {
 
 		reloadChan := make(chan os.Signal, 1)
 		signal.Notify(reloadChan, syscall.SIGHUP)
-		serveGroup.Go(func() error {
+		sequencerGroup.Go(func() error {
 			for _, url := range c.Witness.LogLists {
-				if err := w.PullLogList(ctx, url, false); err != nil {
+				if err := w.PullLogList(sequencerContext, url, false); err != nil {
 					logger.Error("failed to pull log list", "list", url, "err", err)
 				}
 			}
 			for _, url := range c.Witness.MirrorLogLists {
-				if err := w.PullLogList(ctx, url, true); err != nil {
+				if err := w.PullLogList(sequencerContext, url, true); err != nil {
 					logger.Error("failed to pull mirror log list", "list", url, "err", err)
 				}
 			}
 			ticker := time.NewTicker(15 * time.Minute)
 			for {
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-sequencerContext.Done():
+					return sequencerContext.Err()
 				case <-reloadChan:
 				case <-ticker.C:
 				}
 				for _, url := range c.Witness.LogLists {
-					if err := w.PullLogList(ctx, url, false); err != nil {
+					if err := w.PullLogList(sequencerContext, url, false); err != nil {
 						logger.Error("failed to pull log list", "list", url, "err", err)
 					}
 				}
 				for _, url := range c.Witness.MirrorLogLists {
-					if err := w.PullLogList(ctx, url, true); err != nil {
+					if err := w.PullLogList(sequencerContext, url, true); err != nil {
 						logger.Error("failed to pull mirror log list", "list", url, "err", err)
 					}
 				}
