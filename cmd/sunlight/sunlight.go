@@ -889,14 +889,13 @@ func main() {
 		})
 	}
 
-	if c.Witness.Name != "" && c.Witness.LocalDirectory == "" && c.Witness.S3Bucket == "" {
-		// The witness backend was added later, don't make it a fatal error if
-		// it's missing, for now.
-		logger.Warn("missing witness backend, turning witness off")
-	} else if c.Witness.Name != "" {
+	if c.Witness.Name != "" {
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("witness", c.Witness.Name),
 		}))
+		if c.Witness.LocalDirectory == "" && c.Witness.S3Bucket == "" {
+			fatalError(logger, "witness name is set but neither LocalDirectory nor S3Bucket are set")
+		}
 
 		var b ctlog.Backend
 		switch {
