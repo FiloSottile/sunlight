@@ -506,19 +506,21 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	healthHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// TODO: print total certificates serialized in last 60s.
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.Handle("/health", healthHandler)
 
 	metrics := prometheus.NewRegistry()
 	metrics.MustRegister(collectors.NewGoCollector())
 	metrics.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	mux.Handle("/metrics", promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
+	metricsHandler := promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
 		ErrorLog: slog.NewLogLogger(stdlog.Handler.WithAttrs(
 			[]slog.Attr{slog.String("source", "metrics")},
 		), slog.LevelWarn),
-	}))
+	})
+	mux.Handle("/metrics", metricsHandler)
 	sunlightMetrics := prometheus.WrapRegistererWithPrefix("sunlight_", metrics)
 
 	buildInfo, _ := debug.ReadBuildInfo()
@@ -1025,6 +1027,8 @@ func main() {
 		}
 		mux.Handle(prefix.Host+prefix.Path+"/", http.StripPrefix(prefix.Path, w.Handler()))
 		mux.Handle(prefix.Host+prefix.Path+"/{$}", homeHandler)
+		mux.Handle(prefix.Host+"/health", healthHandler)
+		mux.Handle(prefix.Host+"/metrics", metricsHandler)
 
 		acmeHosts = append(acmeHosts, prefix.Host)
 
