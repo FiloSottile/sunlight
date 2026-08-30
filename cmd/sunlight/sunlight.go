@@ -48,6 +48,7 @@ import (
 	"filippo.io/keygen"
 	"filippo.io/mldsa"
 	"filippo.io/mldsa/x509"
+	"filippo.io/mlockexe"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/keylog"
@@ -475,6 +476,12 @@ func main() {
 	fs.Parse(os.Args[1:])
 
 	logger := slog.New(stdlog.Handler)
+
+	if locked, err := mlockexe.OnFault(); err != nil && !errors.Is(err, errors.ErrUnsupported) {
+		logger.Warn("failed to lock executable in memory", "locked", locked, "err", err)
+	} else if err == nil {
+		logger.Info("locked executable in memory", "bytes", locked)
+	}
 
 	go func() {
 		ln, err := net.Listen("tcp", "localhost:")

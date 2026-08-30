@@ -50,6 +50,7 @@ import (
 	"syscall"
 	"time"
 
+	"filippo.io/mlockexe"
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/keylog"
@@ -282,6 +283,12 @@ func main() {
 	fs.Parse(os.Args[1:])
 
 	logger := slog.New(stdlog.Handler)
+
+	if locked, err := mlockexe.OnFault(); err != nil && !errors.Is(err, errors.ErrUnsupported) {
+		logger.Warn("failed to lock executable in memory", "locked", locked, "err", err)
+	} else if err == nil {
+		logger.Info("locked executable in memory", "bytes", locked)
+	}
 
 	yml, err := os.ReadFile(*configFlag)
 	if err != nil {
