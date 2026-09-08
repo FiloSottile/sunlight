@@ -1,0 +1,27 @@
+# Prometheus recording rules required by heliograph-dashboard.
+#
+# The add-chain counter carries issuer and root labels, so it has thousands of
+# series per log. Aggregating it on the fly over the chart window is too slow,
+# and gets slower every time a new CA starts submitting. These rules keep the
+# aggregation incremental: each evaluation only touches the last five minutes.
+#
+# Install as /etc/prometheus/rules.yml and reference it from prometheus.yml:
+#
+#   rule_files:
+#     - /etc/prometheus/rules.yml
+#
+# To backfill history for a freshly added rule (this Prometheus runs with
+# --storage.tsdb.allow-overlapping-blocks):
+#
+#   promtool tsdb create-blocks-from rules --url=http://localhost:9090 \
+#     --start=$(date -d '-7 days' +%s) --end=$(date +%s) \
+#     --output-dir=/tmp/backfill /etc/prometheus/rules.yml
+#   mv /tmp/backfill/* /tank/prometheus/
+groups:
+  - name: heliograph
+    interval: 30s
+    rules:
+      - record: log:sunlight_addchain_requests:rate5m
+        expr: sum by (job, log) (rate(sunlight_addchain_requests_total{error=""}[5m]))
+      - record: low_priority:sunlight_addchain_requests:rate5m
+        expr: sum by (job, low_priority) (rate(sunlight_addchain_requests_total{error=""}[5m]))

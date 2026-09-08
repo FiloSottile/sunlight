@@ -1,5 +1,8 @@
 // Command heliograph-dashboard generates a static HTML dashboard summarising a
 // Sunlight CT log's cost and activity from Prometheus metrics.
+//
+// The submission charts read the recording rules in rules.yml, which must be
+// loaded by the Prometheus server being queried.
 package main
 
 import (
@@ -311,12 +314,12 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 
 	add("Submissions/s (per log)",
 		rangeChart(p, start, end, step,
-			fmt.Sprintf(`sum by (log) (rate(sunlight_addchain_requests_total{%s,error=""}[5m]))`, sel.sunlight),
+			fmt.Sprintf(`log:sunlight_addchain_requests:rate5m{%s}`, sel.sunlight),
 			[]string{"log"}, chartOpts{Unit: unitRate}))
 
 	add("Submissions/s (by priority)",
 		rangeChart(p, start, end, step,
-			fmt.Sprintf(`sum by (low_priority) (rate(sunlight_addchain_requests_total{%s,error=""}[5m]))`, sel.sunlight),
+			fmt.Sprintf(`low_priority:sunlight_addchain_requests:rate5m{%s}`, sel.sunlight),
 			[]string{"low_priority"}, chartOpts{Unit: unitRate, Stack: true,
 				Order:    []string{"normal", "low"},
 				LabelMap: map[string]string{"true": "low", "false": "normal"}}))
