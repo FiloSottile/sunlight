@@ -193,9 +193,11 @@ A *private* HTTP server listens on a random port of localhost, exposing the [net
 ```
 GET /debug/heavyhitter/useragents
 GET /debug/heavyhitter/ips
+GET /debug/heavyhitter/useragents-bytes
+GET /debug/heavyhitter/ips-bytes
 ```
 
-The 100 most common client IP addresses and User-Agents, tracked with the Space-Saving algorithm.
+The 100 most common client IP addresses and User-Agents, by number of requests and by response bytes, tracked with the Space-Saving algorithm.
 
 ```
 POST /debug/keylog/on

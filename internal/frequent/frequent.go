@@ -29,21 +29,26 @@ func New(size int) *Table {
 // Count updates the count of the specified value in the table, and associates
 // the attr value as its [Item.Latest] attribute.
 func (t *Table) Count(value, attr string) {
+	t.Add(value, attr, 1)
+}
+
+// Add is like [Table.Count], but increments the count by n.
+func (t *Table) Add(value, attr string, n int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	i, ok := t.index[value]
 	switch {
 	case ok:
-		t.items[i].Count++
+		t.items[i].Count += n
 	case len(t.items) < cap(t.items):
-		t.items = append(t.items, Item{Value: value, Count: 1})
+		t.items = append(t.items, Item{Value: value, Count: n})
 		i = len(t.items) - 1
 	default:
 		i = len(t.items) - 1
 		delete(t.index, t.items[i].Value)
 		t.items[i].Value = value
 		t.items[i].MaxError = t.items[i].Count
-		t.items[i].Count++
+		t.items[i].Count += n
 	}
 	for k := i - 1; k >= 0; k-- {
 		if t.items[k].Count >= t.items[i].Count {
