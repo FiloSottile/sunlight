@@ -437,8 +437,7 @@ func newClientContextHandler(next http.Handler) http.Handler {
 		}
 		r = r.WithContext(context.WithValue(r.Context(), familyContextKey{}, family))
 
-		source, _, _ := net.SplitHostPort(r.RemoteAddr)
-		clientAddresses.Add(family, source)
+		clientAddresses.Add(family, heavyhitter.Source(r))
 
 		next.ServeHTTP(w, r)
 	})
