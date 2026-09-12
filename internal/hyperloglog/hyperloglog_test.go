@@ -53,27 +53,42 @@ func TestWindow(t *testing.T) {
 	w := NewWindow(5, time.Minute)
 	w.now = func() time.Time { return now }
 
+	checkWindow := func(distinct, total int) {
+		t.Helper()
+		d, n := w.Estimate()
+		checkEstimate(t, d, distinct)
+		if n != total {
+			t.Errorf("total %d, want %d", n, total)
+		}
+	}
+
 	for i := range 1000 {
 		w.Add(fmt.Sprintf("first-%d", i))
 	}
-	checkEstimate(t, w.Estimate(), 1000)
+	checkWindow(1000, 1000)
+
+	// Duplicates count towards the total but not the distinct estimate.
+	for i := range 1000 {
+		w.Add(fmt.Sprintf("first-%d", i))
+	}
+	checkWindow(1000, 2000)
 
 	now = now.Add(2 * time.Minute)
 	for i := range 1000 {
 		w.Add(fmt.Sprintf("second-%d", i))
 	}
-	checkEstimate(t, w.Estimate(), 2000)
+	checkWindow(2000, 3000)
 
 	// Two minutes later, the first batch is four minutes old, still in the
 	// window of five buckets.
 	now = now.Add(2 * time.Minute)
-	checkEstimate(t, w.Estimate(), 2000)
+	checkWindow(2000, 3000)
 
 	// After five minutes the first batch is out, and the second is not.
 	now = now.Add(time.Minute)
-	checkEstimate(t, w.Estimate(), 1000)
+	checkWindow(1000, 1000)
 
 	// Far in the future, everything is out, however many buckets were skipped.
 	now = now.Add(time.Hour)
-	checkEstimate(t, w.Estimate(), 0)
+	checkWindow(0, 0)
 }

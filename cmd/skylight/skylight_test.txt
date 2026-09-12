@@ -356,6 +356,8 @@ body contains client="with-email"
 body contains client="anonymous"
 body contains code="404"
 body contains skylight_distinct_clients{family="other"} 1
+body contains skylight_client_paths_distinct{family="other",kind="checkpoint",log="rome2026h1"} 1
+body contains skylight_client_paths_requests{family="other",kind="checkpoint",log="rome2026h1"}
 # Unknown witness origins (the ffff... requests above) are counted with an
 # empty log label, so the label cardinality is bounded by the origins present
 # in the witness directories, not by client-chosen paths.

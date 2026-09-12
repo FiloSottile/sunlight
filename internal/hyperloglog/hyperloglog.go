@@ -71,6 +71,7 @@ func (s *Sketch) Estimate() float64 {
 type Window struct {
 	mu      sync.Mutex
 	buckets []Sketch
+	counts  []int     // total values added to each bucket
 	current int       // index into buckets
 	start   time.Time // start of the current bucket
 	d       time.Duration
@@ -79,7 +80,7 @@ type Window struct {
 
 // NewWindow returns a Window of n buckets of duration d each.
 func NewWindow(n int, d time.Duration) *Window {
-	return &Window{buckets: make([]Sketch, n), d: d, now: time.Now}
+	return &Window{buckets: make([]Sketch, n), counts: make([]int, n), d: d, now: time.Now}
 }
 
 // advance resets a bucket for each bucket boundary crossed since the last call,
@@ -97,6 +98,7 @@ func (w *Window) advance() {
 	for range min(elapsed, len(w.buckets)) {
 		w.current = (w.current + 1) % len(w.buckets)
 		w.buckets[w.current].Reset()
+		w.counts[w.current] = 0
 	}
 	w.start = w.start.Add(time.Duration(elapsed) * w.d)
 }
@@ -107,17 +109,20 @@ func (w *Window) Add(v string) {
 	defer w.mu.Unlock()
 	w.advance()
 	w.buckets[w.current].Add(v)
+	w.counts[w.current]++
 }
 
 // Estimate returns the estimated number of distinct values added to the window
-// during the last (n-1)×d to n×d.
-func (w *Window) Estimate() float64 {
+// during the last (n-1)×d to n×d, and the total number of values added over
+// the same span, so that the two can be compared exactly.
+func (w *Window) Estimate() (distinct float64, total int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.advance()
 	var s Sketch
 	for i := range w.buckets {
 		s.Merge(&w.buckets[i])
+		total += w.counts[i]
 	}
-	return s.Estimate()
+	return s.Estimate(), total
 }

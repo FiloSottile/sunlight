@@ -382,9 +382,61 @@ func (c *clientWindows) Estimates() map[string]float64 {
 	defer c.mu.Unlock()
 	e := make(map[string]float64, len(c.windows))
 	for family, w := range c.windows {
-		e[family] = w.Estimate()
+		e[family], _ = w.Estimate()
 	}
 	return e
+}
+
+// clientPaths tracks the (client, path) pairs requested in the last five
+// minutes. Except for checkpoints, these should match the request count,
+// otherwise some clients are re-fetching duplicate entries.
+var clientPaths = &pathWindows{windows: make(map[pathKey]*hyperloglog.Window)}
+
+type pathKey struct{ log, kind, family string }
+
+type pathWindows struct {
+	mu      sync.Mutex
+	windows map[pathKey]*hyperloglog.Window
+}
+
+func (p *pathWindows) Add(log, kind, family, client, path string) {
+	k := pathKey{log, kind, family}
+	p.mu.Lock()
+	w, ok := p.windows[k]
+	if !ok {
+		w = hyperloglog.NewWindow(5, time.Minute)
+		p.windows[k] = w
+	}
+	p.mu.Unlock()
+	w.Add(client + " " + path)
+}
+
+type pathStats struct {
+	distinct float64 // estimated distinct (client, path) pairs
+	total    int     // total requests over the same span
+}
+
+// Estimates returns the estimated number of distinct (client, path) pairs,
+// along with the number of requests over the same span.
+func (p *pathWindows) Estimates() map[pathKey]pathStats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := make(map[pathKey]pathStats, len(p.windows))
+	for k, w := range p.windows {
+		d, n := w.Estimate()
+		e[k] = pathStats{d, n}
+	}
+	return e
+}
+
+// newClientPathsHandler records the client and path of each request in
+// clientPaths, under the log name returned by logName.
+func newClientPathsHandler(logName func(context.Context) string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		clientPaths.Add(logName(ctx), kindFromContext(ctx), familyFromContext(ctx), heavyhitter.Source(r), r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func newClientContextHandler(next http.Handler) http.Handler {
@@ -522,8 +574,22 @@ func main() {
 		},
 		[]string{"family"},
 	)
+	clientPathsDistinct := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "client_paths_distinct",
+			Help: "Estimated number of distinct (client IP address, path) pairs requested in the last five minutes.",
+		},
+		[]string{"log", "kind", "family"},
+	)
+	clientPathsRequests := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "client_paths_requests",
+			Help: "Total number of requests over the same span as client_paths_distinct.",
+		},
+		[]string{"log", "kind", "family"},
+	)
 	skylightMetrics := prometheus.WrapRegistererWithPrefix("skylight_", metrics)
-	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize, distinctClients)
+	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize, distinctClients, clientPathsDistinct, clientPathsRequests)
 
 	metricsHandler := promhttp.InstrumentMetricHandler(metrics,
 		promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
@@ -535,6 +601,10 @@ func main() {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		for family, n := range clientAddresses.Estimates() {
 			distinctClients.WithLabelValues(family).Set(n)
+		}
+		for k, s := range clientPaths.Estimates() {
+			clientPathsDistinct.WithLabelValues(k.log, k.kind, k.family).Set(s.distinct)
+			clientPathsRequests.WithLabelValues(k.log, k.kind, k.family).Set(float64(s.total))
 		}
 		metricsHandler.ServeHTTP(w, r)
 	})
@@ -658,6 +728,7 @@ func main() {
 		handler = promhttp.InstrumentHandlerResponseSize(resSize.MustCurryWith(labels), handler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("family", familyFromContext))
+		handler = newClientPathsHandler(func(context.Context) string { return lc.ShortName }, handler)
 
 		// Then, apply the rate limit handler. Keep an unrestricted handler for
 		// small browser-friendly endpoints like checkpoint and JSON metadata.
@@ -728,6 +799,7 @@ func main() {
 			promhttp.WithLabelFromCtx("log", originFromContext),
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("family", familyFromContext))
+		handler = newClientPathsHandler(originFromContext, handler)
 
 		unlimitedHandler := promhttp.InstrumentHandlerCounter(reqCount, handler,
 			promhttp.WithLabelFromCtx("log", originFromContext),
