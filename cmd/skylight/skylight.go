@@ -173,20 +173,64 @@ func (t *TAT) Allow(interval time.Duration, burst int) (allow bool, retryAfter t
 	return false, now.Add(tat.Sub(nowPlusBurst))
 }
 
+// Reserve claims the next slot and returns how long to wait before using it.
+// If the wait would exceed maxWait, it returns false without claiming a slot.
+func (t *TAT) Reserve(interval time.Duration, burst int, maxWait time.Duration) (wait time.Duration, ok bool) {
+	now := time.Now()
+	t.Lock()
+	defer t.Unlock()
+	tat := t.Time
+	if tat.Before(now) {
+		tat = now
+	}
+	wait = tat.Sub(now) - interval*time.Duration(burst)
+	if wait > maxWait {
+		return 0, false
+	}
+	t.Time = tat.Add(interval)
+	return max(wait, 0), true
+}
+
 // rateLimitInterval allows 75 req/s, which at the average size of a full data
 // tile works out to about 100Mbps.
 const rateLimitInterval = 1 * time.Second / 75
 const rateLimitBurst = 10
 
-// anonymousClientLimit is the rate-limit for alicents that don't specify an
+// anonymousClientLimit is the rate-limit for clients that don't specify an
 // email address in their User-Agent.
 var anonymousClientLimit TAT
 
-func newRateLimitHandler(handler http.Handler) http.Handler {
+// legacyCertstreamPartialLimit is the rate-limit for partial tile fetches by
+// older versions of Certstream Server Go.
+//
+// These clients lack a dampening mechanism to avoid over-fetching partials and
+// have an off-by-one bug that causes them to refetch the partial every second
+// if the log didn't grow, or refetch the full tile if the next partial fetch
+// gets a 429. See https://github.com/d-Rickyy-b/certstream-server-go/issues/104.
+//
+// Rather than rejecting requests over the limit, hold them: a rejected partial
+// leaves these clients with an index at the end of the previous full tile,
+// which they then refetch on every poll, so rejecting costs more than serving.
+//
+// Their poll loop is sequential, so holding the partial slows down the whole
+// loop and the served rate settles at the limit.
+var legacyCertstreamPartialLimit TAT
+
+// legacyCertstreamMaxWait is how long we'll hold Certstream partial fetches.
+// These clients have a timeout of 30s, after which they would behave as if they
+// got a 429.
+//
+// It bounds the number of held requests to rate limit × maximum wait.
+//
+// At 75 req/s this accommodates 1875 client-log pairs, e.g. 375 clients
+// following five logs on this host.
+const legacyCertstreamMaxWait = 25 * time.Second
+
+func newRateLimitHandler(ctx context.Context, handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if clientFromContext(r.Context()) == "anonymous" {
 			msg := "Please add an email address to your User-Agent."
-			r.Header.Add("Skylight-Rate-Limited", msg)
+			w.Header().Add("Skylight-Rate-Limited", msg)
 			allow, retryAfter := anonymousClientLimit.Allow(rateLimitInterval, rateLimitBurst)
 			if !allow {
 				w.Header().Set("Retry-After", retryAfter.Format(time.RFC1123))
@@ -198,6 +242,28 @@ func newRateLimitHandler(handler http.Handler) http.Handler {
 				w.Header().Del("Cache-Control")
 				http.Error(w, msg, http.StatusTooManyRequests)
 				return
+			}
+		}
+		if familyFromContext(r.Context()) == "certstream-go-legacy" &&
+			kindFromContext(r.Context()) == "partial" {
+			msg := "Please update your certstream-server-go version."
+			w.Header().Add("Skylight-Rate-Limited", msg)
+			wait, ok := legacyCertstreamPartialLimit.Reserve(rateLimitInterval, rateLimitBurst, legacyCertstreamMaxWait)
+			// If the wait would exceed the maximum, we have a difficult choice:
+			// rejecting the request would cause the client to refetch the full
+			// tile, and holding for longer would work like a rejection. Just
+			// serve it instead. If this happens often, we should raise the rate.
+			if ok && wait > 0 {
+				http.NewResponseController(w).SetWriteDeadline(time.Now().Add(wait + 15*time.Second))
+				timer := time.NewTimer(wait)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-r.Context().Done():
+					return
+				case <-ctx.Done():
+					// Don't block shutdown.
+				}
 			}
 		}
 		handler.ServeHTTP(w, r)
@@ -547,7 +613,7 @@ func main() {
 
 		// Then, apply the rate limit handler. Keep an unrestricted handler for
 		// small browser-friendly endpoints like checkpoint and JSON metadata.
-		rateLimitedHandler := newRateLimitHandler(handler)
+		rateLimitedHandler := newRateLimitHandler(ctx, handler)
 		unlimitedHandler := handler
 
 		// Next, the request counter. It needs to go before the mux as it uses
@@ -621,7 +687,7 @@ func main() {
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
 			promhttp.WithLabelFromCtx("client", clientFromContext),
 			promhttp.WithLabelFromCtx("family", familyFromContext))
-		rateLimitedHandler := promhttp.InstrumentHandlerCounter(reqCount, newRateLimitHandler(handler),
+		rateLimitedHandler := promhttp.InstrumentHandlerCounter(reqCount, newRateLimitHandler(ctx, handler),
 			promhttp.WithLabelFromCtx("log", originFromContext),
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),

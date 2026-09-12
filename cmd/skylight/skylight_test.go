@@ -35,7 +35,7 @@ import (
 // keep them. The webtest scripts can't cover the 429 path, because triggering
 // the rate limit over HTTP would be timing-dependent.
 func TestRateLimitErrorHeaders(t *testing.T) {
-	h := newRateLimitHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := newRateLimitHandler(context.Background(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("fake tile"))
 	}))
 	var allowed, limited int
@@ -72,6 +72,68 @@ func TestRateLimitErrorHeaders(t *testing.T) {
 	}
 	if allowed == 0 || limited == 0 {
 		t.Errorf("got %d allowed and %d rate limited responses, want some of each", allowed, limited)
+	}
+}
+
+// TestLegacyCertstreamHold checks that partial tile requests from legacy
+// Certstream clients are never rejected, but are held once past the burst,
+// and that shutdown releases held requests.
+func TestLegacyCertstreamHold(t *testing.T) {
+	legacyCertstreamPartialLimit = TAT{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := newRateLimitHandler(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("fake tile"))
+	}))
+	serve := func() time.Duration {
+		req := httptest.NewRequest("GET", "/tile/data/000.p/5", nil)
+		req = req.WithContext(context.WithValue(req.Context(), clientContextKey{}, "with-github"))
+		req = req.WithContext(context.WithValue(req.Context(), familyContextKey{}, "certstream-go-legacy"))
+		req = req.WithContext(context.WithValue(req.Context(), kindContextKey{}, "partial"))
+		rec := httptest.NewRecorder()
+		start := time.Now()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got status %d, want 200", rec.Code)
+		}
+		return time.Since(start)
+	}
+	var held time.Duration
+	for range 3 * rateLimitBurst {
+		held += serve()
+	}
+	if want := rateLimitInterval * rateLimitBurst; held < want {
+		t.Errorf("held requests for %v total, want at least %v", held, want)
+	}
+
+	// The next request would be held, but a shutdown releases it immediately.
+	cancel()
+	if d := serve(); d > rateLimitInterval {
+		t.Errorf("request held for %v after shutdown, want immediate", d)
+	}
+}
+
+// TestReserve checks that Reserve queues requests at the configured rate and
+// refuses to queue past the maximum wait.
+func TestReserve(t *testing.T) {
+	var limit TAT
+	const interval, burst, maxWait = 10 * time.Millisecond, 5, 100 * time.Millisecond
+	for i := range burst + 11 {
+		wait, ok := limit.Reserve(interval, burst, maxWait)
+		if !ok {
+			t.Fatalf("request %d: not reserved, want reserved", i)
+		}
+		want := max(0, time.Duration(i-burst)*interval)
+		if wait < want-interval || wait > want {
+			t.Errorf("request %d: wait = %v, want about %v", i, wait, want)
+		}
+	}
+	if _, ok := limit.Reserve(interval, burst, maxWait); ok {
+		t.Error("request past the maximum wait was reserved")
+	}
+	time.Sleep(2 * interval)
+	if _, ok := limit.Reserve(interval, burst, maxWait); !ok {
+		t.Error("request after a slot freed up was not reserved")
 	}
 }
 
