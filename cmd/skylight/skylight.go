@@ -1038,17 +1038,16 @@ func main() {
 	}
 	<-ctx.Done()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := s.Shutdown(shutdownCtx); err != nil {
-		logger.Error("Shutdown error", "err", err)
+	// Close instead of Shutdown because rejecting new requests during shutdown
+	// is as bad as rejecting in-flight requests now, and it can take much
+	// longer to drain in-flight requests due to the [newRateLimitHandler] queue.
+	if err := s.Close(); err != nil {
+		logger.Error("Close error", "err", err)
 	}
-
 	if err := serveGroup.Wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("serve error", "err", err)
+		os.Exit(1)
 	}
-
-	os.Exit(1)
 }
 
 // filesOnlyFS hides directories, so [http.FileServerFS] serves 404s instead
