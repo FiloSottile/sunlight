@@ -53,6 +53,7 @@ import (
 	"filippo.io/mlockexe"
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/heavyhitter"
+	"filippo.io/sunlight/internal/hyperloglog"
 	"filippo.io/sunlight/internal/keylog"
 	"filippo.io/sunlight/internal/reused"
 	"filippo.io/sunlight/internal/stdlog"
@@ -355,6 +356,37 @@ var clientFamilies = []struct {
 	{"prometheus", "Prometheus/"},
 }
 
+// clientAddresses tracks the client IP addresses observed per family, to
+// estimate how many distinct ones there were in the last five minutes.
+var clientAddresses = &clientWindows{windows: make(map[string]*hyperloglog.Window)}
+
+type clientWindows struct {
+	mu      sync.Mutex
+	windows map[string]*hyperloglog.Window
+}
+
+func (c *clientWindows) Add(family, addr string) {
+	c.mu.Lock()
+	w, ok := c.windows[family]
+	if !ok {
+		w = hyperloglog.NewWindow(5, time.Minute)
+		c.windows[family] = w
+	}
+	c.mu.Unlock()
+	w.Add(addr)
+}
+
+// Estimates returns the estimated number of distinct addresses per family.
+func (c *clientWindows) Estimates() map[string]float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := make(map[string]float64, len(c.windows))
+	for family, w := range c.windows {
+		e[family] = w.Estimate()
+	}
+	return e
+}
+
 func newClientContextHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userAgent := r.UserAgent()
@@ -405,6 +437,9 @@ func newClientContextHandler(next http.Handler) http.Handler {
 		}
 		r = r.WithContext(context.WithValue(r.Context(), familyContextKey{}, family))
 
+		source, _, _ := net.SplitHostPort(r.RemoteAddr)
+		clientAddresses.Add(family, source)
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -448,13 +483,6 @@ func main() {
 	metrics := prometheus.NewRegistry()
 	metrics.MustRegister(collectors.NewGoCollector())
 	metrics.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	mux.Handle("/metrics", promhttp.InstrumentMetricHandler(metrics,
-		promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
-			ErrorLog: slog.NewLogLogger(stdlog.Handler.WithAttrs(
-				[]slog.Attr{slog.String("source", "metrics")},
-			), slog.LevelWarn),
-			Registry: metrics,
-		})))
 	reqInFlight := prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "http_in_flight_requests",
@@ -488,8 +516,29 @@ func main() {
 		},
 		[]string{"log", "kind", "family"},
 	)
+	distinctClients := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "distinct_clients",
+			Help: "Estimated number of distinct client IP addresses in the last five minutes.",
+		},
+		[]string{"family"},
+	)
 	skylightMetrics := prometheus.WrapRegistererWithPrefix("skylight_", metrics)
-	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize)
+	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize, distinctClients)
+
+	metricsHandler := promhttp.InstrumentMetricHandler(metrics,
+		promhttp.HandlerFor(metrics, promhttp.HandlerOpts{
+			ErrorLog: slog.NewLogLogger(stdlog.Handler.WithAttrs(
+				[]slog.Attr{slog.String("source", "metrics")},
+			), slog.LevelWarn),
+			Registry: metrics,
+		}))
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		for family, n := range clientAddresses.Estimates() {
+			distinctClients.WithLabelValues(family).Set(n)
+		}
+		metricsHandler.ServeHTTP(w, r)
+	})
 
 	buildInfo, _ := debug.ReadBuildInfo()
 	buildVersion := buildInfo.Main.Version
