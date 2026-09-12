@@ -63,6 +63,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
+	"golang.org/x/mod/semver"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
@@ -224,6 +225,13 @@ func clientFromContext(ctx context.Context) string {
 	return c
 }
 
+type familyContextKey struct{}
+
+func familyFromContext(ctx context.Context) string {
+	c, _ := ctx.Value(familyContextKey{}).(string)
+	return c
+}
+
 type rateLimitedHandlerContextKey struct{}
 
 func rateLimitedHandlerFromContext(ctx context.Context) http.Handler {
@@ -248,8 +256,43 @@ func filePrefixFromContext(ctx context.Context) string {
 	return p
 }
 
+var clientFamilies = []struct {
+	Label  string
+	Prefix string
+}{
+	{"certstream-go", "Certstream Server"},
+	{"certstream-rust", "certstream-server-rust/"},
+	{"certspotter", "certspotter/"},
+	{"gungnir", "gungnir +https://github.com/g0ldencybersec/gungnir"},
+	{"gungnir-rix4uni", "gungnir +https://github.com/rix4uni/gungnir"},
+	{"linkdata-certstream", "certstream (+https://github.com/linkdata/certstream)"},
+	{"crlite", "ct-fetch; +https://github.com/mozilla/crlite"},
+	{"crtsh", "github.com/crtsh/"},
+	{"google-ct-bot", "Google-CT-bot"},
+
+	{"go-http-client-1.1", "Go-http-client/1.1"},
+	{"go-http-client-2.0", "Go-http-client/2.0"},
+	{"python-httpx", "python-httpx/"},
+	{"python-requests", "python-requests/"},
+	{"python", "Python/"},
+	{"curl", "curl/"},
+	{"restsharp", "RestSharp/"},
+	{"req", "req/"},
+	{"node", "node"},
+	{"undici", "undici"},
+	{"axios", "axios/"},
+	{"node-fetch", "node-fetch"},
+	{"ruby", "Ruby"},
+	{"browser", "Mozilla/5.0"},
+
+	{"hetrixtools", "HetrixTools Uptime Monitoring Bot"},
+	{"prometheus", "Prometheus/"},
+}
+
 func newClientContextHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userAgent := r.UserAgent()
+
 		// If you are reading this to figure out how to bypass the rate limit,
 		// we know it's easy, but please don't. We also know how to make your
 		// life harder by blocking your ASN or fingerprinting your client.
@@ -261,7 +304,7 @@ func newClientContextHandler(next http.Handler) http.Handler {
 		// forward it to your email, and put that in your User-Agent.
 		//
 		// Thank you!
-		if userAgent := r.UserAgent(); strings.Contains(userAgent, "example.com") {
+		if strings.Contains(userAgent, "example.com") {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
 		} else if strings.Contains(userAgent, "@") {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "with-email"))
@@ -272,6 +315,30 @@ func newClientContextHandler(next http.Handler) http.Handler {
 		} else {
 			r = r.WithContext(context.WithValue(r.Context(), clientContextKey{}, "anonymous"))
 		}
+
+		family := "other"
+		if userAgent == "" {
+			family = "empty"
+		} else {
+			for _, cf := range clientFamilies {
+				if strings.HasPrefix(userAgent, cf.Prefix) {
+					family = cf.Label
+				}
+			}
+		}
+		if family == "other" && strings.Contains(userAgent, " sunlight/v") {
+			family = "sunlight"
+		}
+		if family == "certstream-go" {
+			v := strings.TrimPrefix(userAgent, "Certstream Server ")
+			v, _, _ = strings.Cut(v, " ")
+			v = "v" + strings.TrimLeft(v, "v") // some clients send vv1.9.0
+			if semver.IsValid(v) && semver.Compare(v, "v1.10.0-beta.1") < 0 {
+				family = "certstream-go-legacy"
+			}
+		}
+		r = r.WithContext(context.WithValue(r.Context(), familyContextKey{}, family))
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -333,7 +400,7 @@ func main() {
 			Name: "http_requests_total",
 			Help: "HTTP requests served.",
 		},
-		[]string{"log", "kind", "client", "reused", "code"},
+		[]string{"log", "kind", "client", "family", "reused", "code"},
 	)
 	reqDuration := prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
@@ -353,7 +420,7 @@ func main() {
 			MaxAge:     1 * time.Minute,
 			AgeBuckets: 6,
 		},
-		[]string{"log", "kind"},
+		[]string{"log", "kind", "family"},
 	)
 	skylightMetrics := prometheus.WrapRegistererWithPrefix("skylight_", metrics)
 	skylightMetrics.MustRegister(reqInFlight, reqCount, reqDuration, resSize)
@@ -381,7 +448,8 @@ func main() {
 	homeRedirect = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(
 		prometheus.Labels{"log": "", "kind": "index"}), homeRedirect,
 		promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
-		promhttp.WithLabelFromCtx("client", clientFromContext))
+		promhttp.WithLabelFromCtx("client", clientFromContext),
+		promhttp.WithLabelFromCtx("family", familyFromContext))
 	if c.HomeRedirect != "" {
 		mux.Handle("/{$}", homeRedirect)
 	}
@@ -474,7 +542,8 @@ func main() {
 		handler = promhttp.InstrumentHandlerDuration(reqDuration.MustCurryWith(labels), handler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext))
 		handler = promhttp.InstrumentHandlerResponseSize(resSize.MustCurryWith(labels), handler,
-			promhttp.WithLabelFromCtx("kind", kindFromContext))
+			promhttp.WithLabelFromCtx("kind", kindFromContext),
+			promhttp.WithLabelFromCtx("family", familyFromContext))
 
 		// Then, apply the rate limit handler. Keep an unrestricted handler for
 		// small browser-friendly endpoints like checkpoint and JSON metadata.
@@ -487,11 +556,13 @@ func main() {
 		unlimitedHandler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), unlimitedHandler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
-			promhttp.WithLabelFromCtx("client", clientFromContext))
+			promhttp.WithLabelFromCtx("client", clientFromContext),
+			promhttp.WithLabelFromCtx("family", familyFromContext))
 		rateLimitedHandler = promhttp.InstrumentHandlerCounter(reqCount.MustCurryWith(labels), rateLimitedHandler,
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
-			promhttp.WithLabelFromCtx("client", clientFromContext))
+			promhttp.WithLabelFromCtx("client", clientFromContext),
+			promhttp.WithLabelFromCtx("family", familyFromContext))
 
 		patternPrefix := "GET " + prefix.Host + prefix.Path
 		logMux := http.StripPrefix(prefix.Path, logMux)
@@ -541,18 +612,21 @@ func main() {
 			promhttp.WithLabelFromCtx("kind", kindFromContext))
 		handler = promhttp.InstrumentHandlerResponseSize(resSize, handler,
 			promhttp.WithLabelFromCtx("log", originFromContext),
-			promhttp.WithLabelFromCtx("kind", kindFromContext))
+			promhttp.WithLabelFromCtx("kind", kindFromContext),
+			promhttp.WithLabelFromCtx("family", familyFromContext))
 
 		unlimitedHandler := promhttp.InstrumentHandlerCounter(reqCount, handler,
 			promhttp.WithLabelFromCtx("log", originFromContext),
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
-			promhttp.WithLabelFromCtx("client", clientFromContext))
+			promhttp.WithLabelFromCtx("client", clientFromContext),
+			promhttp.WithLabelFromCtx("family", familyFromContext))
 		rateLimitedHandler := promhttp.InstrumentHandlerCounter(reqCount, newRateLimitHandler(handler),
 			promhttp.WithLabelFromCtx("log", originFromContext),
 			promhttp.WithLabelFromCtx("kind", kindFromContext),
 			promhttp.WithLabelFromCtx("reused", reused.LabelFromContext),
-			promhttp.WithLabelFromCtx("client", clientFromContext))
+			promhttp.WithLabelFromCtx("client", clientFromContext),
+			promhttp.WithLabelFromCtx("family", familyFromContext))
 
 		// Cap the cardinality of the origin metric label by only recording ones
 		// that exist on the filesystem.
@@ -628,7 +702,8 @@ func main() {
 	mux.HandleFunc("GET "+logsJSONPrefix+"/logs.json", func(w http.ResponseWriter, r *http.Request) {
 		reused := reused.LabelFromContext(r.Context())
 		client := clientFromContext(r.Context())
-		reqCount.WithLabelValues("", "logs.json", client, reused, "200").Inc()
+		family := familyFromContext(r.Context())
+		reqCount.WithLabelValues("", "logs.json", client, family, reused, "200").Inc()
 
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
@@ -708,7 +783,8 @@ func main() {
 
 		reused := reused.LabelFromContext(r.Context())
 		client := clientFromContext(r.Context())
-		reqCount.WithLabelValues("", "health", client, reused, strconv.Itoa(status)).Inc()
+		family := familyFromContext(r.Context())
+		reqCount.WithLabelValues("", "health", client, family, reused, strconv.Itoa(status)).Inc()
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
