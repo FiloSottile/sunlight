@@ -67,6 +67,7 @@ func main() {
 	sel := selectors{
 		sunlight:      fmt.Sprintf(`job=%q`, *logName),
 		skylight:      fmt.Sprintf(`log=~%q`, *logName+".*"),
+		skylightJob:   fmt.Sprintf(`job=%q`, *skylightJob),
 		dataset:       fmt.Sprintf(`dataset=~%q`, "(?:"+strings.Join(quotedPrefixes, "|")+")"+regexp.QuoteMeta(*logName)+`[0-9].*`),
 		process:       fmt.Sprintf(`job=~%q`, *logName+"|"+*skylightJob),
 		networkDevice: fmt.Sprintf(`device=~%q`, *netDevice),
@@ -229,7 +230,11 @@ type pageData struct {
 	Updated time.Time
 	Window  time.Duration
 	Table   *logsTable
+	Clients *clientsTable
 	Charts  []chartPanel
+	// ClientsBefore is the index of the chart the clients table is rendered
+	// above.
+	ClientsBefore int
 }
 
 type chartPanel struct {
@@ -272,6 +277,24 @@ type logTableRow struct {
 	IsTotal     bool
 }
 
+type clientsTable struct {
+	Rows  []clientRow
+	Total clientRow
+	Error string
+}
+
+type clientRow struct {
+	Family    string // display name
+	Rule      string // how skylight assigns the family
+	Clients   string
+	Requests  string
+	Egress    string
+	PollEvery string
+	Mix       []string // checkpoint, partial, data, tile, names, other
+	Warnings  string
+	IsTotal   bool
+}
+
 type chartOpts struct {
 	Unit     unitKind
 	Stack    bool
@@ -294,6 +317,7 @@ var palette = []string{
 type selectors struct {
 	sunlight      string   // e.g. `job="tuscolo"`
 	skylight      string   // e.g. `log=~"tuscolo.*"`
+	skylightJob   string   // e.g. `job="skylight"` (for metrics without a log label)
 	dataset       string   // e.g. `dataset=~"(?:tank/logs/|tank/caches/)tuscolo.*"`
 	process       string   // e.g. `job=~"tuscolo|skylight"`
 	networkDevice string   // e.g. `device=~"enp.*"`
@@ -306,6 +330,7 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 	page := &pageData{Title: title, Updated: end, Window: end.Sub(start)}
 
 	page.Table = buildTable(p, end, sel)
+	page.Clients = buildClientsTable(p, end, sel)
 
 	add := func(title string, c chartPanel) {
 		c.Title = title
@@ -340,6 +365,7 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 			{"anonymous", fmt.Sprintf(`sum(rate(skylight_http_requests_total{%s,client="anonymous"}[5m]))`, sel.skylight)},
 		}, chartOpts{Unit: unitRate, Stack: true}))
 
+	page.ClientsBefore = len(page.Charts)
 	add("Bandwidth (system-wide)",
 		multiRangeChart(p, start, end, step, []namedQuery{
 			{"out", fmt.Sprintf(`sum(rate(node_network_transmit_bytes_total{%s,%s}[5m]))`, sel.node, sel.networkDevice)},
@@ -376,17 +402,7 @@ func buildTable(p *prom, end time.Time, sel selectors) *logsTable {
 	}
 
 	scrape := func(expr string, f func(labels map[string]string, v float64)) {
-		s, err := p.queryInstant(expr, end)
-		if err != nil {
-			log.Printf("query %q: %v", expr, err)
-			return
-		}
-		for _, sr := range s {
-			if len(sr.Samples) == 0 || math.IsNaN(sr.Samples[0].V) {
-				continue
-			}
-			f(sr.Labels, sr.Samples[0].V)
-		}
+		p.scrape(end, expr, f)
 	}
 	scrape(fmt.Sprintf(`sunlight_tree_size_leaves_total{%s}`, sel.sunlight), func(l map[string]string, v float64) {
 		if name := l["log"]; name != "" {
@@ -466,6 +482,281 @@ func buildTable(p *prom, end time.Time, sel selectors) *logsTable {
 		IsTotal:     true,
 	}
 	return tbl
+}
+
+// scrape runs an instant query at time t and calls f for each result.
+func (p *prom) scrape(t time.Time, expr string, f func(labels map[string]string, v float64)) {
+	s, err := p.queryInstant(expr, t)
+	if err != nil {
+		log.Printf("query %q: %v", expr, err)
+		return
+	}
+	for _, sr := range s {
+		if len(sr.Samples) == 0 || math.IsNaN(sr.Samples[0].V) {
+			continue
+		}
+		f(sr.Labels, sr.Samples[0].V)
+	}
+}
+
+// rowData holds the five-minute rates and gauges of one client family.
+type rowData struct {
+	clients, requests, bytes, limited float64
+	checkpoint, partial, data         float64
+	tile, names                       float64
+	logs                              float64 // logs the family fetched checkpoints from
+	partialPairs, dataPairs           float64 // distinct (client, path) pairs
+	partialWindow, dataWindow         float64 // requests over the span of the pairs
+}
+
+// buildClientsTable summarizes the read path traffic of the last five minutes
+// by client family. All inputs are five-minute rates or gauges over a
+// five-minute window, so the derived columns compare like with like.
+func buildClientsTable(p *prom, end time.Time, sel selectors) *clientsTable {
+	rows := map[string]*rowData{}
+	get := func(family string) *rowData {
+		r, ok := rows[family]
+		if !ok {
+			r = &rowData{}
+			rows[family] = r
+		}
+		return r
+	}
+	byFamily := func(expr string, f func(r *rowData, l map[string]string, v float64)) {
+		p.scrape(end, expr, func(l map[string]string, v float64) {
+			if family := l["family"]; family != "" {
+				f(get(family), l, v)
+			}
+		})
+	}
+
+	byFamily(fmt.Sprintf(`sum by (family) (rate(skylight_http_requests_total{%s}[5m]))`, sel.skylight),
+		func(r *rowData, l map[string]string, v float64) { r.requests = v })
+	byFamily(fmt.Sprintf(`sum by (family) (rate(skylight_http_response_size_bytes_sum{%s}[5m]))`, sel.skylight),
+		func(r *rowData, l map[string]string, v float64) { r.bytes = v })
+	byFamily(fmt.Sprintf(`sum by (family) (rate(skylight_http_requests_total{%s,code="429"}[5m]))`, sel.skylight),
+		func(r *rowData, l map[string]string, v float64) { r.limited = v })
+	byFamily(fmt.Sprintf(`sum by (family, kind) (rate(skylight_http_requests_total{%s,kind=~"checkpoint|partial|data|tile|names"}[5m]))`, sel.skylight),
+		func(r *rowData, l map[string]string, v float64) {
+			switch l["kind"] {
+			case "checkpoint":
+				r.checkpoint = v
+			case "partial":
+				r.partial = v
+			case "data":
+				r.data = v
+			case "tile":
+				r.tile = v
+			case "names":
+				r.names = v
+			}
+		})
+	byFamily(fmt.Sprintf(`count by (family) (sum by (family, log) (rate(skylight_http_requests_total{%s,kind="checkpoint"}[5m])) > 0)`, sel.skylight),
+		func(r *rowData, l map[string]string, v float64) { r.logs = v })
+	byFamily(fmt.Sprintf(`skylight_distinct_clients{%s}`, sel.skylightJob),
+		func(r *rowData, l map[string]string, v float64) { r.clients = v })
+	byFamily(fmt.Sprintf(`sum by (family, kind) (skylight_client_paths_distinct{%s,kind=~"partial|data"})`, sel.skylight),
+		func(r *rowData, l map[string]string, v float64) {
+			switch l["kind"] {
+			case "partial":
+				r.partialPairs = v
+			case "data":
+				r.dataPairs = v
+			}
+		})
+	byFamily(fmt.Sprintf(`sum by (family, kind) (skylight_client_paths_requests{%s,kind=~"partial|data"})`, sel.skylight),
+		func(r *rowData, l map[string]string, v float64) {
+			switch l["kind"] {
+			case "partial":
+				r.partialWindow = v
+			case "data":
+				r.dataWindow = v
+			}
+		})
+
+	families := make([]string, 0, len(rows))
+	var tot rowData
+	for f, r := range rows {
+		// Families that made less than a request per hundred seconds would
+		// all show as 0.00/s.
+		if r.requests < 0.01 {
+			continue
+		}
+		families = append(families, f)
+		tot.requests += r.requests
+		tot.bytes += r.bytes
+		tot.limited += r.limited
+		tot.checkpoint += r.checkpoint
+		tot.partial += r.partial
+		tot.data += r.data
+		tot.tile += r.tile
+		tot.names += r.names
+		tot.clients += r.clients
+		tot.partialPairs += r.partialPairs
+		tot.dataPairs += r.dataPairs
+		tot.partialWindow += r.partialWindow
+		tot.dataWindow += r.dataWindow
+	}
+	sort.Slice(families, func(i, j int) bool {
+		a, b := rows[families[i]], rows[families[j]]
+		if a.bytes != b.bytes {
+			return a.bytes > b.bytes
+		}
+		return families[i] < families[j]
+	})
+
+	row := func(family string, r *rowData) clientRow {
+		return clientRow{
+			Family:    familyName(family),
+			Rule:      familyRule(family),
+			Clients:   fmtClients(r.clients),
+			Requests:  fmtRate(r.requests),
+			Egress:    fmtEgress(r.bytes),
+			PollEvery: fmtPollEvery(family, r.clients, r.logs, r.checkpoint),
+			Mix:       fmtMix([]float64{r.checkpoint, r.partial, r.data, r.tile, r.names}, r.requests),
+			Warnings:  fmtWarnings(r),
+		}
+	}
+	tbl := &clientsTable{}
+	for _, f := range families {
+		tbl.Rows = append(tbl.Rows, row(f, rows[f]))
+	}
+	if len(tbl.Rows) == 0 {
+		tbl.Error = "no data"
+		return tbl
+	}
+	tbl.Total = row("total", &tot)
+	tbl.Total.IsTotal = true
+	return tbl
+}
+
+func fmtClients(v float64) string {
+	if v == 0 {
+		return "—"
+	}
+	return fmtInt(v)
+}
+
+func fmtRate(v float64) string {
+	return fmtShort(v) + "/s"
+}
+
+func fmtEgress(bytes float64) string {
+	return fmt.Sprintf("%.1f Mbps", bytes*8/1e6)
+}
+
+// fmtPollEvery returns the interval between checkpoint fetches by a single
+// client for a single log, from the fleet's aggregate checkpoint rate. It's
+// only meaningful for families made of a single program.
+func fmtPollEvery(family string, clients, logs, checkpoint float64) string {
+	if families[family].Mixed || clients == 0 || logs == 0 || checkpoint < 0.1 {
+		return "—"
+	}
+	s := clients * logs / checkpoint
+	if s < 10 {
+		return fmt.Sprintf("%.1fs", s)
+	}
+	return fmt.Sprintf("%.0fs", s)
+}
+
+// fmtMix returns the percentage of total made up by each of the kinds, and by
+// everything else.
+func fmtMix(kinds []float64, total float64) []string {
+	parts := make([]string, 0, len(kinds)+1)
+	if total < 0.1 {
+		for range len(kinds) + 1 {
+			parts = append(parts, "—")
+		}
+		return parts
+	}
+	other := total
+	for _, k := range kinds {
+		other -= k
+		parts = append(parts, fmt.Sprintf("%.0f", 100*k/total))
+	}
+	return append(parts, fmt.Sprintf("%.0f", 100*max(0, other)/total))
+}
+
+// families maps the family label values minted by skylight to display names
+// and to a description of the rule skylight uses to assign them. Unlisted
+// values are shown as they are. Mixed families lump together unrelated
+// programs, so per-client behavior can't be inferred from their aggregates.
+var families = map[string]struct {
+	Name, Rule string
+	Mixed      bool
+}{
+	"certstream-go":        {"Certstream Server Go", `User-Agent starts with "Certstream Server", version ≥ 1.10.0`, false},
+	"certstream-go-legacy": {"Certstream Server Go (< 1.10.0)", `User-Agent starts with "Certstream Server", version < 1.10.0`, false},
+	"certstream-rust":      {"certstream-server-rust", `User-Agent starts with "certstream-server-rust/"`, false},
+	"certspotter":          {"Cert Spotter", `User-Agent starts with "certspotter/"`, false},
+	"gungnir":              {"gungnir", `User-Agent starts with "gungnir +https://github.com/g0ldencybersec/gungnir"`, false},
+	"gungnir-rix4uni":      {"gungnir (rix4uni fork)", `User-Agent starts with "gungnir +https://github.com/rix4uni/gungnir"`, false},
+	"linkdata-certstream":  {"linkdata/certstream", `User-Agent starts with "certstream (+https://github.com/linkdata/certstream)"`, false},
+	"crlite":               {"Mozilla CRLite", `User-Agent starts with "ct-fetch; +https://github.com/mozilla/crlite"`, false},
+	"crtsh":                {"crt.sh", `User-Agent starts with "github.com/crtsh/"`, false},
+	"google-ct-bot":        {"Google CT bot", `User-Agent starts with "Google-CT-bot"`, false},
+	"sunlight":             {"filippo.io/sunlight clients", `User-Agent contains " sunlight/v" and matches no other family`, false},
+	"go-http-client-1.1":   {"Go net/http default (HTTP/1.1)", `User-Agent starts with "Go-http-client/1.1"`, true},
+	"go-http-client-2.0":   {"Go net/http default (HTTP/2)", `User-Agent starts with "Go-http-client/2.0"`, true},
+	"python-httpx":         {"Python httpx default", `User-Agent starts with "python-httpx/"`, true},
+	"python-requests":      {"Python requests default", `User-Agent starts with "python-requests/"`, true},
+	"python":               {"Python default", `User-Agent starts with "Python/"`, true},
+	"curl":                 {"curl default", `User-Agent starts with "curl/"`, true},
+	"restsharp":            {"RestSharp default", `User-Agent starts with "RestSharp/"`, true},
+	"req":                  {"req default", `User-Agent starts with "req/"`, true},
+	"node":                 {"Node.js default", `User-Agent starts with "node"`, true},
+	"undici":               {"undici default", `User-Agent starts with "undici"`, true},
+	"axios":                {"axios default", `User-Agent starts with "axios/"`, true},
+	"node-fetch":           {"node-fetch default", `User-Agent starts with "node-fetch"`, true},
+	"ruby":                 {"Ruby default", `User-Agent starts with "Ruby"`, true},
+	"browser":              {"Browser", `User-Agent starts with "Mozilla/5.0"`, true},
+	"empty":                {"No User-Agent", `No User-Agent header`, true},
+	"hetrixtools":          {"HetrixTools", `User-Agent starts with "HetrixTools Uptime Monitoring Bot"`, false},
+	"prometheus":           {"Prometheus", `User-Agent starts with "Prometheus/"`, false},
+	"other":                {"Other", `No other family matched`, true},
+	"total":                {"total", `All families listed above`, true},
+}
+
+func familyName(label string) string {
+	if f, ok := families[label]; ok {
+		return f.Name
+	}
+	return label
+}
+
+func familyRule(label string) string {
+	if f, ok := families[label]; ok {
+		return f.Rule
+	}
+	return label
+}
+
+func fmtWarnings(r *rowData) string {
+	var w []string
+	if d := dupRatio(r.partialWindow, r.partialPairs); d >= 2 {
+		w = append(w, fmt.Sprintf("partial dup %.1f×", d))
+	}
+	if d := dupRatio(r.dataWindow, r.dataPairs); d >= 2 {
+		w = append(w, fmt.Sprintf("data dup %.1f×", d))
+	}
+	if r.limited > 0 && r.requests > 0 {
+		if share := 100 * r.limited / r.requests; share < 1 {
+			w = append(w, "limited <1%")
+		} else {
+			w = append(w, fmt.Sprintf("limited %.0f%%", share))
+		}
+	}
+	return strings.Join(w, ", ")
+}
+
+// dupRatio returns how many times each client requested each distinct path,
+// from the requests and the distinct (client, path) pairs over the same span,
+// or 0 if there were too few requests to tell.
+func dupRatio(requests, pairs float64) float64 {
+	if requests < 30 || pairs < 1 {
+		return 0
+	}
+	return requests / pairs
 }
 
 func shardFromDataset(ds string, prefixes []string) string {
@@ -1035,6 +1326,15 @@ table.logs th:first-child, table.logs td:first-child { text-align: left; }
 table.logs th { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.03em; border-bottom: 1px solid #e5e5e5; }
 table.logs tr.total td { border-top: 1px solid #e5e5e5; font-weight: 600; }
 table.logs td.log { font-family: ui-monospace, Menlo, monospace; }
+table.logs th[title] { text-decoration: underline dotted; cursor: help; }
+.scroll { max-height: 480px; overflow-y: auto; }
+table.clients thead th { position: sticky; top: 0; background: white; border-bottom: none; box-shadow: inset 0 -1px #e5e5e5; }
+table.clients th.mix, table.clients td.mix { width: 2.2em; padding-left: 0; padding-right: 0; text-align: center; }
+table.clients th.mix.first, table.clients td.mix.first { padding-left: 10px; }
+table.clients th.mix.last, table.clients td.mix.last { padding-right: 10px; }
+table.clients th.warn, table.clients td.warn { text-align: left; }
+table.clients td.warn { color: #b91c1c; }
+.table-wrap h2 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: #555; letter-spacing: 0.02em; text-transform: uppercase; }
 .chart { background: white; border: 1px solid #e5e5e5; border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; }
 .chart h2 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: #555; letter-spacing: 0.02em; text-transform: uppercase; }
 .chart svg { display: block; width: 100%; height: auto; }
@@ -1058,15 +1358,39 @@ footer a { color: inherit; }
 {{end}}<tr class="total"><td class="log">{{.Total.Log}}</td><td></td><td>{{.Total.Entries}}</td><td>{{.Total.Growth24h}}</td><td>{{.Total.OnDisk}}</td><td>{{.Total.Logical}}</td><td>{{.Total.Compression}}</td></tr>
 </tbody></table>{{end}}
 </div>{{end}}
-{{range .Charts}}<div class="chart">
+{{range $i, $c := .Charts}}{{if eq $i $.ClientsBefore}}{{template "clients" $.Clients}}{{end}}{{with $c}}<div class="chart">
 <h2>{{.Title}}</h2>
 {{if .Error}}<div class="error">{{.Error}}</div>{{else}}{{.SVG}}{{end}}
 {{if .Legend}}<div class="legend">{{range .Legend}}<span><i style="background:{{.Color}}"></i>{{.Label}}</span>{{end}}</div>{{end}}
 </div>
-{{end}}<footer><a href="https://github.com/FiloSottile/sunlight/tree/main/cmd/heliograph-dashboard">heliograph-dashboard</a></footer>
+{{end}}{{end}}<footer><a href="https://github.com/FiloSottile/sunlight/tree/main/cmd/heliograph-dashboard">heliograph-dashboard</a></footer>
 </main>
 </body>
-</html>`
+</html>
+{{define "clients"}}{{with .}}<div class="table-wrap">
+<h2>Clients (last 5 minutes)</h2>
+{{if .Error}}<div class="error">{{.Error}}</div>{{else}}<div class="scroll"><table class="logs clients">
+<thead><tr>
+<th title="Client software, from the User-Agent. 'default' families sent a bare HTTP library User-Agent. Anything unrecognized is Other. Hover a name for the matching rule.">Family</th>
+<th title="Distinct client IP addresses (IPv6 by /64) across all logs on this host. Estimated with HyperLogLog, ±2%. — means none were seen.">Clients</th>
+<th title="Requests per second, all kinds. Families below 0.01/s are not listed.">Req/s</th>
+<th title="Response bytes per second, in megabits.">Egress</th>
+<th title="Seconds between checkpoint fetches by one client for one log: clients × logs polled ÷ checkpoint requests per second. Lower is more aggressive polling. — for families that lump together unrelated programs, and when there are fewer than 0.1 checkpoint requests per second.">Poll</th>
+<th class="mix first" title="Checkpoint requests, % of all requests. Tailing clients are mostly checkpoints and partials; backfilling ones are mostly data tiles. — means fewer than 0.1 requests per second.">C</th>
+<th class="mix" title="Partial data tile requests, % of all requests.">P</th>
+<th class="mix" title="Full data tile requests, % of all requests.">D</th>
+<th class="mix" title="Hash tile requests, % of all requests.">H</th>
+<th class="mix" title="Names tile requests, % of all requests.">N</th>
+<th class="mix last" title="Other requests (issuers, metadata, logs.json, health), % of all requests.">O</th>
+<th class="warn" title="partial dup / data dup: requests per client per distinct partial or full data tile path over the window, shown when 2× or more; well-behaved clients are near 1×. limited: share of requests rejected with 429; only anonymous clients (no contact in the User-Agent) are rate limited this way.">Warnings</th>
+</tr></thead>
+<tbody>
+{{range .Rows}}<tr><td title="{{.Rule}}">{{.Family}}</td><td>{{.Clients}}</td><td>{{.Requests}}</td><td>{{.Egress}}</td><td>{{.PollEvery}}</td>{{template "mix" .Mix}}<td class="warn">{{.Warnings}}</td></tr>
+{{end}}<tr class="total"><td title="{{.Total.Rule}}">{{.Total.Family}}</td><td>{{.Total.Clients}}</td><td>{{.Total.Requests}}</td><td>{{.Total.Egress}}</td><td>{{.Total.PollEvery}}</td>{{template "mix" .Total.Mix}}<td class="warn">{{.Total.Warnings}}</td></tr>
+</tbody></table></div>{{end}}
+</div>{{end}}{{end}}
+{{define "mix"}}{{range $i, $v := .}}<td class="mix{{if eq $i 0}} first{{end}}{{if eq $i 5}} last{{end}}">{{$v}}</td>{{end}}{{end}}
+`
 
 var pageTemplate = template.Must(template.New("page").Funcs(template.FuncMap{
 	"fmtDur": func(d time.Duration) string {
