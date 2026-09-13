@@ -226,15 +226,27 @@ func (p *prom) get(q string) ([]series, error) {
 // Page model.
 
 type pageData struct {
-	Title   string
-	Updated time.Time
-	Window  time.Duration
-	Table   *logsTable
+	Title    string
+	Updated  time.Time
+	Window   time.Duration
+	Logs     *logsTable
+	Sections []section
+}
+
+type section struct {
+	Title  string
+	Blocks []block
+}
+
+// block is one panel of a section. Exactly one field is set.
+type block struct {
+	Chart   *chartPanel
 	Clients *clientsTable
-	Charts  []chartPanel
-	// ClientsBefore is the index of the chart the clients table is rendered
-	// above.
-	ClientsBefore int
+}
+
+func (s *section) chart(title string, c chartPanel) {
+	c.Title = title
+	s.Blocks = append(s.Blocks, block{Chart: &c})
 }
 
 type chartPanel struct {
@@ -328,62 +340,81 @@ type selectors struct {
 
 func buildPage(p *prom, title string, start, end time.Time, step time.Duration, sel selectors) *pageData {
 	page := &pageData{Title: title, Updated: end, Window: end.Sub(start)}
+	page.Logs = buildTable(p, end, sel)
 
-	page.Table = buildTable(p, end, sel)
-	page.Clients = buildClientsTable(p, end, sel)
+	sunlight := &section{Title: "Sunlight"}
 
-	add := func(title string, c chartPanel) {
-		c.Title = title
-		page.Charts = append(page.Charts, c)
-	}
-
-	add("Submissions/s (per log)",
+	sunlight.chart("Submissions/s (per log)",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`log:sunlight_addchain_requests:rate5m{%s}`, sel.sunlight),
 			[]string{"log"}, chartOpts{Unit: unitRate}))
 
-	add("Submissions/s (by priority)",
+	sunlight.chart("Submissions/s (by priority)",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`low_priority:sunlight_addchain_requests:rate5m{%s}`, sel.sunlight),
 			[]string{"low_priority"}, chartOpts{Unit: unitRate, Stack: true,
 				Order:    []string{"normal", "low"},
 				LabelMap: map[string]string{"true": "low", "false": "normal"}}))
 
-	add("Submit latency (p50, p99, worst shard)",
+	outcome := func(name, matchers string) namedQuery {
+		return namedQuery{name, fmt.Sprintf(`sum(source_error:sunlight_addchain_requests:rate5m{%s,%s})`, sel.sunlight, matchers)}
+	}
+	sunlight.chart("Submissions/s (per outcome)",
+		multiRangeChart(p, start, end, step, []namedQuery{
+			outcome("sequenced", `error="",source="sequencer"`),
+			outcome("duplicate", `error="",source=~"cache|pool"`),
+			outcome("rate limited", `source=~"ratelimit|evicted"`),
+			outcome("invalid", fmt.Sprintf(`error=~%q`, invalidErrors)),
+			outcome("failed", fmt.Sprintf(`error!="",error!~%q,source!~"ratelimit|evicted"`, invalidErrors)),
+		}, chartOpts{Unit: unitRate}))
+
+	sunlight.chart("Submit latency (p50, p99, worst shard, log scale)",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`max by (quantile) (sunlight_addchain_wait_seconds{%s,quantile=~"0.5|0.99"})`, sel.sunlight),
 			[]string{"quantile"}, chartOpts{Unit: unitSeconds, LogScale: true}))
 
-	add("Requests/s served (per kind)",
+	skylight := &section{Title: "Skylight"}
+
+	skylight.chart("Requests/s served (per kind)",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`sum by (kind) (rate(skylight_http_requests_total{%s}[5m]))`, sel.skylight),
 			[]string{"kind"}, chartOpts{Unit: unitRate}))
 
-	add("Requests/s served (by client)",
+	skylight.chart("Requests/s served (by client)",
 		multiRangeChart(p, start, end, step, []namedQuery{
 			{"identified", fmt.Sprintf(`sum(rate(skylight_http_requests_total{%s,client!="anonymous"}[5m]))`, sel.skylight)},
 			{"anonymous", fmt.Sprintf(`sum(rate(skylight_http_requests_total{%s,client="anonymous"}[5m]))`, sel.skylight)},
 		}, chartOpts{Unit: unitRate, Stack: true}))
 
-	page.ClientsBefore = len(page.Charts)
-	add("Bandwidth (system-wide)",
+	skylight.Blocks = append(skylight.Blocks, block{Clients: buildClientsTable(p, end, sel)})
+
+	system := &section{Title: "System"}
+
+	system.chart("Bandwidth",
 		multiRangeChart(p, start, end, step, []namedQuery{
 			{"out", fmt.Sprintf(`sum(rate(node_network_transmit_bytes_total{%s,%s}[5m]))`, sel.node, sel.networkDevice)},
 			{"in", fmt.Sprintf(`sum(rate(node_network_receive_bytes_total{%s,%s}[5m]))`, sel.node, sel.networkDevice)},
 		}, chartOpts{Unit: unitMbps}))
 
-	add("CPU",
+	system.chart("CPU",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`sum by (job) (rate(process_cpu_seconds_total{%s}[5m]))`, sel.process),
 			[]string{"job"}, chartOpts{Unit: unitCPU, LabelMap: sel.processLabels}))
 
-	add("Resident memory",
+	system.chart("Resident memory",
 		rangeChart(p, start, end, step,
 			fmt.Sprintf(`sum by (job) (process_resident_memory_bytes{%s})`, sel.process),
 			[]string{"job"}, chartOpts{Unit: unitBytes, LabelMap: sel.processLabels}))
 
+	page.Sections = []section{*sunlight, *skylight, *system}
 	return page
 }
+
+// invalidErrors matches the error categories of add-chain requests rejected
+// because of their content, as opposed to failures on the log's side. The
+// categories are the prefixes of the fmtErrorf format strings in
+// internal/ctlog/http.go.
+const invalidErrors = `invalid .*|empty chain|failed to parse request|request body too large|missing precertificate.*|pre-certificate submitted to add-chain|final certificate submitted to add-pre-chain`
 
 func buildTable(p *prom, end time.Time, sel selectors) *logsTable {
 	type rowData struct {
@@ -1318,6 +1349,7 @@ html, body { margin: 0; }
 body { font: 14px/1.4 -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif; color: #222; background: #fafafa; }
 main { max-width: 960px; margin: 24px auto; padding: 0 16px; }
 h1 { font-size: 22px; font-weight: 600; margin: 0 0 2px; }
+h2 { font-size: 17px; font-weight: 600; margin: 28px 0 10px; }
 .updated { color: #888; font-size: 12px; margin-bottom: 20px; font-variant-numeric: tabular-nums; }
 .table-wrap { background: white; border: 1px solid #e5e5e5; border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; overflow-x: auto; }
 table.logs { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
@@ -1334,9 +1366,9 @@ table.clients th.mix.first, table.clients td.mix.first { padding-left: 10px; }
 table.clients th.mix.last, table.clients td.mix.last { padding-right: 10px; }
 table.clients th.warn, table.clients td.warn { text-align: left; }
 table.clients td.warn { color: #b91c1c; }
-.table-wrap h2 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: #555; letter-spacing: 0.02em; text-transform: uppercase; }
+.table-wrap h3 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: #555; letter-spacing: 0.02em; text-transform: uppercase; }
 .chart { background: white; border: 1px solid #e5e5e5; border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; }
-.chart h2 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: #555; letter-spacing: 0.02em; text-transform: uppercase; }
+.chart h3 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: #555; letter-spacing: 0.02em; text-transform: uppercase; }
 .chart svg { display: block; width: 100%; height: auto; }
 .legend { font-size: 11px; color: #555; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 10px; }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
@@ -1350,7 +1382,19 @@ footer a { color: inherit; }
 <main>
 <h1>{{.Title}}</h1>
 <div class="updated">Updated {{.Updated.Format "2006-01-02 15:04:05 MST"}} · last {{fmtDur .Window}}</div>
-{{with .Table}}<div class="table-wrap">
+{{template "logs" .Logs}}
+{{range .Sections}}<h2>{{.Title}}</h2>
+{{range .Blocks}}{{if .Clients}}{{template "clients" .Clients}}{{else}}{{template "chart" .Chart}}{{end}}
+{{end}}{{end}}<footer><a href="https://github.com/FiloSottile/sunlight/tree/main/cmd/heliograph-dashboard">heliograph-dashboard</a></footer>
+</main>
+</body>
+</html>
+{{define "chart"}}<div class="chart">
+<h3>{{.Title}}</h3>
+{{if .Error}}<div class="error">{{.Error}}</div>{{else}}{{.SVG}}{{end}}
+{{if .Legend}}<div class="legend">{{range .Legend}}<span><i style="background:{{.Color}}"></i>{{.Label}}</span>{{end}}</div>{{end}}
+</div>{{end}}
+{{define "logs"}}<div class="table-wrap">
 {{if .Error}}<div class="error">{{.Error}}</div>{{else}}<table class="logs">
 <thead><tr><th>Log</th><th>NotAfter</th><th>Entries</th><th>/24h</th><th>On disk</th><th>Logical</th><th>Compression</th></tr></thead>
 <tbody>
@@ -1358,17 +1402,8 @@ footer a { color: inherit; }
 {{end}}<tr class="total"><td class="log">{{.Total.Log}}</td><td></td><td>{{.Total.Entries}}</td><td>{{.Total.Growth24h}}</td><td>{{.Total.OnDisk}}</td><td>{{.Total.Logical}}</td><td>{{.Total.Compression}}</td></tr>
 </tbody></table>{{end}}
 </div>{{end}}
-{{range $i, $c := .Charts}}{{if eq $i $.ClientsBefore}}{{template "clients" $.Clients}}{{end}}{{with $c}}<div class="chart">
-<h2>{{.Title}}</h2>
-{{if .Error}}<div class="error">{{.Error}}</div>{{else}}{{.SVG}}{{end}}
-{{if .Legend}}<div class="legend">{{range .Legend}}<span><i style="background:{{.Color}}"></i>{{.Label}}</span>{{end}}</div>{{end}}
-</div>
-{{end}}{{end}}<footer><a href="https://github.com/FiloSottile/sunlight/tree/main/cmd/heliograph-dashboard">heliograph-dashboard</a></footer>
-</main>
-</body>
-</html>
-{{define "clients"}}{{with .}}<div class="table-wrap">
-<h2>Clients (last 5 minutes)</h2>
+{{define "clients"}}<div class="table-wrap">
+<h3>Clients (last 5 minutes)</h3>
 {{if .Error}}<div class="error">{{.Error}}</div>{{else}}<div class="scroll"><table class="logs clients">
 <thead><tr>
 <th title="Client software, from the User-Agent. 'default' families sent a bare HTTP library User-Agent. Anything unrecognized is Other. Hover a name for the matching rule.">Family</th>
@@ -1388,7 +1423,7 @@ footer a { color: inherit; }
 {{range .Rows}}<tr><td title="{{.Rule}}">{{.Family}}</td><td>{{.Clients}}</td><td>{{.Requests}}</td><td>{{.Egress}}</td><td>{{.PollEvery}}</td>{{template "mix" .Mix}}<td class="warn">{{.Warnings}}</td></tr>
 {{end}}<tr class="total"><td title="{{.Total.Rule}}">{{.Total.Family}}</td><td>{{.Total.Clients}}</td><td>{{.Total.Requests}}</td><td>{{.Total.Egress}}</td><td>{{.Total.PollEvery}}</td>{{template "mix" .Total.Mix}}<td class="warn">{{.Total.Warnings}}</td></tr>
 </tbody></table></div>{{end}}
-</div>{{end}}{{end}}
+</div>{{end}}
 {{define "mix"}}{{range $i, $v := .}}<td class="mix{{if eq $i 0}} first{{end}}{{if eq $i 5}} last{{end}}">{{$v}}</td>{{end}}{{end}}
 `
 

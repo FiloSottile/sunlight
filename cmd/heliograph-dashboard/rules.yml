@@ -25,3 +25,7 @@ groups:
         expr: sum by (job, log) (rate(sunlight_addchain_requests_total{error=""}[5m]))
       - record: low_priority:sunlight_addchain_requests:rate5m
         expr: sum by (job, low_priority) (rate(sunlight_addchain_requests_total{error=""}[5m]))
+      # Includes failed requests, unlike the two above. The error label is a
+      # bounded set of categories, so this stays at a few dozen series per log.
+      - record: source_error:sunlight_addchain_requests:rate5m
+        expr: sum by (job, log, source, error) (rate(sunlight_addchain_requests_total[5m]))
