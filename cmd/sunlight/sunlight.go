@@ -389,7 +389,7 @@ type logInfo struct {
 	ShortName        string `json:"friendly_name"`
 	SubmissionPrefix string `json:"submission_url"` // with trailing slash
 	MonitoringPrefix string `json:"monitoring_url"` // with trailing slash
-	PoolSize         int    `json:"-"`
+	RateLimit        int    `json:"-"`
 	Interval         struct {
 		NotAfterStart string `json:"start_inclusive"`
 		NotAfterLimit string `json:"end_exclusive"`
@@ -1221,13 +1221,17 @@ func updateMetadata(ctx context.Context, setLogInfo func(string, logInfo), lc Lo
 	}
 	pemKey := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pkix})
 	logID := sha256.Sum256(pkix)
+	rateLimit := lc.PoolSize
+	if lc.Period > 0 {
+		rateLimit = lc.PoolSize * 1000 / lc.Period
+	}
 	log := logInfo{
 		Name:             cc.Name,
 		ShortName:        lc.ShortName,
 		ID:               base64.StdEncoding.EncodeToString(logID[:]),
 		SubmissionPrefix: lc.SubmissionPrefix + "/",
 		MonitoringPrefix: lc.MonitoringPrefix + "/",
-		PoolSize:         lc.PoolSize,
+		RateLimit:        rateLimit,
 		PublicKeyPEM:     string(pemKey),
 		PublicKeyDER:     pkix,
 		PublicKeyBase64:  base64.StdEncoding.EncodeToString(pkix),

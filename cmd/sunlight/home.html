@@ -80,7 +80,7 @@
         <a href="{{ .SubmissionPrefix }}ct/v1/get-roots">get-roots</a>
         <a href="{{ .SubmissionPrefix }}log.v3.json">json</a><br>
       {{ if eq .Status "active" }}
-      Ratelimit: {{ .PoolSize }} req/s
+      Ratelimit: {{ if .RateLimit }}{{ .RateLimit }} submissions/s{{ else }}none{{ end }}
       {{ else }}
       Final tree size: {{ .FinalTree.Size }} at {{ timestamp .FinalTree.Timestamp }}<br>
       Final tree hash: {{ printf "%x" .FinalTree.RootHash }}
