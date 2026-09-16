@@ -1598,7 +1598,10 @@ func stallAddEntries(t *testing.T, w *Witness, fullLen int, prefix []byte) *http
 		WriteTimeout: 15 * time.Second,
 	}
 	go srv.Serve(newOneConnListener(srvConn))
-	t.Cleanup(func() { srv.Close() })
+	// The handler closes the request body early, so after responding the
+	// server goroutine sleeps for the RST avoidance delay before closing the
+	// connection. Shutdown waits for it, so it doesn't outlive the bubble.
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	start := time.Now()
 	head := fmt.Sprintf("POST /add-entries HTTP/1.1\r\nHost: witness.example\r\n"+
