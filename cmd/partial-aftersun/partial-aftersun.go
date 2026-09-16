@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -86,7 +87,7 @@ func main() {
 			fatalError(logger, "failed to get log size", "err", err)
 		}
 
-		levels, err := fs.ReadDir(root.FS(), "tile")
+		levels, err := readDirNames(root, "tile")
 		if os.IsNotExist(err) {
 			logger.DebugContext(ctx, "tile directory does not exist, skipping")
 			continue
@@ -95,7 +96,7 @@ func main() {
 			fatalError(logger, "failed to read tile directory", "err", err)
 		}
 		for _, level := range levels {
-			name := filepath.Join("tile", level.Name())
+			name := filepath.Join("tile", level)
 			if err := cleanDir(ctx, logger, root, name, size, sunlight.ParseTilePath); err != nil {
 				logger.Error("failed to clean directory", "name", name, "err", err)
 				exitCode = 1
@@ -137,7 +138,7 @@ func main() {
 				continue
 			}
 
-			levels, err := fs.ReadDir(root.FS(), "tile")
+			levels, err := readDirNames(root, "tile")
 			if os.IsNotExist(err) {
 				logger.DebugContext(ctx, "tile directory does not exist, skipping")
 				continue
@@ -148,7 +149,7 @@ func main() {
 				continue
 			}
 			for _, level := range levels {
-				name := filepath.Join("tile", level.Name())
+				name := filepath.Join("tile", level)
 				if err := cleanDir(ctx, logger, root, name, size, torchwood.ParseTilePath); err != nil {
 					logger.Error("failed to clean directory", "name", name, "err", err)
 					exitCode = 1
@@ -170,18 +171,18 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := fs.ReadDir(root.FS(), prefix)
+	entries, err := readDirNames(root, prefix)
 	if err != nil {
 		return err
 	}
-	names := make(map[string]fs.DirEntry, len(entries))
+	names := make(map[string]bool, len(entries))
 	for _, entry := range entries {
-		names[entry.Name()] = entry
+		names[entry] = true
 	}
 	for _, entry := range entries {
-		name := filepath.Join(prefix, entry.Name())
+		name := filepath.Join(prefix, entry)
 
-		if strings.HasPrefix(entry.Name(), "x") {
+		if strings.HasPrefix(entry, "x") {
 			if err := cleanDir(ctx, logger, root, name, size, parseTilePath); err != nil {
 				return err
 			}
@@ -190,11 +191,11 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 
 		// First level of safety: never delete a partial tile that doesn't have
 		// a corresponding full tile.
-		full, ok := strings.CutSuffix(entry.Name(), ".p")
+		full, ok := strings.CutSuffix(entry, ".p")
 		if !ok {
 			continue
 		}
-		if _, ok := names[full]; !ok {
+		if !names[full] {
 			continue
 		}
 
@@ -209,12 +210,12 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 			continue
 		}
 
-		partials, err := fs.ReadDir(root.FS(), name)
+		partials, err := readDirNames(root, name)
 		if err != nil {
 			return err
 		}
 		for _, partial := range partials {
-			name := filepath.Join(prefix, entry.Name(), partial.Name())
+			name := filepath.Join(prefix, entry, partial)
 
 			// Third level of safety: never delete a non-partial tile.
 			t, err := parseTilePath(name)
@@ -230,7 +231,7 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 			}
 			logger.DebugContext(ctx, "removing partial", "name", name)
 			removedFiles++
-			i, err := partial.Info()
+			i, err := root.Lstat(name)
 			if err != nil {
 				return err
 			}
@@ -241,7 +242,7 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 		}
 		logger.DebugContext(ctx, "removing dir", "name", name)
 		removedDirs++
-		i, err := entry.Info()
+		i, err := root.Lstat(name)
 		if err != nil {
 			return err
 		}
@@ -251,6 +252,28 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 		}
 	}
 	return nil
+}
+
+// readDirNames returns the sorted names of the entries of the named directory.
+//
+// It deliberately avoids fs.ReadDir on root.FS(): for directories opened
+// through an os.Root, the os package ignores the d_type reported by the
+// filesystem and eagerly lstat()s every entry to populate DirEntry.Info. On a
+// log with millions of tiles, that instantiates a dentry and inode for every
+// tile on each run, which on ZFS pins enough metadata to starve the ARC.
+// Readdirnames never stats, so callers stat only the few entries they delete.
+func readDirNames(root *os.Root, name string) ([]string, error) {
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(-1)
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(names)
+	return names, nil
 }
 
 func overrideImmutable(root *os.Root, name string) error {
