@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/immutable"
@@ -42,6 +43,7 @@ type LogConfig struct {
 func main() {
 	flagSet := flag.NewFlagSet("partial-aftersun", flag.ExitOnError)
 	configFlag := flagSet.String("c", "sunlight.yaml", "path to the Sunlight config file")
+	metricsFlag := flagSet.String("metrics", "", "path of a node_exporter textfile collector file")
 	flagSet.Parse(os.Args[1:])
 
 	logger := slog.New(stdlog.Handler)
@@ -66,6 +68,7 @@ func main() {
 	defer stop()
 
 	var exitCode int
+	var stats []*logStats
 	for _, lc := range c.Logs {
 		if lc.ShortName == "" {
 			fatalError(logger, "missing short name for log")
@@ -73,36 +76,34 @@ func main() {
 		logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 			slog.String("log", lc.ShortName),
 		}))
+		st := &logStats{log: lc.ShortName, failed: true}
+		stats = append(stats, st)
 
 		if lc.LocalDirectory == "" {
-			fatalError(logger, "missing LocalDirectory for log")
+			logger.Error("missing LocalDirectory for log")
+			exitCode = 1
+			continue
 		}
 		root, err := os.OpenRoot(lc.LocalDirectory)
 		if err != nil {
-			fatalError(logger, "failed to open local directory", "err", err)
+			logger.Error("failed to open local directory", "err", err)
+			exitCode = 1
+			continue
 		}
 
 		size, err := logSize(root)
 		if err != nil {
-			fatalError(logger, "failed to get log size", "err", err)
-		}
-
-		levels, err := readDirNames(root, "tile")
-		if os.IsNotExist(err) {
-			logger.DebugContext(ctx, "tile directory does not exist, skipping")
+			root.Close()
+			logger.Error("failed to get log size", "err", err)
+			exitCode = 1
 			continue
 		}
-		if err != nil {
-			fatalError(logger, "failed to read tile directory", "err", err)
+
+		if err := cleanLog(ctx, logger, root, size, sunlight.ParseTilePath, st); err != nil {
+			logger.Error("failed to clean log", "err", err)
+			exitCode = 1
 		}
-		for _, level := range levels {
-			name := filepath.Join("tile", level)
-			if err := cleanDir(ctx, logger, root, name, size, sunlight.ParseTilePath); err != nil {
-				logger.Error("failed to clean directory", "name", name, "err", err)
-				exitCode = 1
-				break
-			}
-		}
+		root.Close()
 	}
 
 	if c.Witness.LocalDirectory != "" {
@@ -119,9 +120,11 @@ func main() {
 			logger := slog.New(stdlog.Handler.WithAttrs([]slog.Attr{
 				slog.String("log", entry.Name()),
 			}))
+			st := &logStats{log: entry.Name(), failed: true}
 
 			root, err := os.OpenRoot(filepath.Join(c.Witness.LocalDirectory, "mirror", entry.Name()))
 			if err != nil {
+				stats = append(stats, st)
 				logger.Error("failed to open witness mirror directory", "err", err)
 				exitCode = 1
 				continue
@@ -129,45 +132,129 @@ func main() {
 
 			size, err := mirroredLogSize(root, entry.Name())
 			if errors.Is(err, fs.ErrNotExist) {
+				root.Close()
 				logger.DebugContext(ctx, "mirror checkpoint does not exist yet, skipping")
 				continue
 			}
+			stats = append(stats, st)
 			if err != nil {
+				root.Close()
 				logger.Error("failed to get mirrored log size", "err", err)
 				exitCode = 1
 				continue
 			}
 
-			levels, err := readDirNames(root, "tile")
-			if os.IsNotExist(err) {
-				logger.DebugContext(ctx, "tile directory does not exist, skipping")
-				continue
-			}
-			if err != nil {
-				logger.Error("failed to read tile directory", "err", err)
+			if err := cleanLog(ctx, logger, root, size, torchwood.ParseTilePath, st); err != nil {
+				logger.Error("failed to clean mirrored log", "err", err)
 				exitCode = 1
-				continue
 			}
-			for _, level := range levels {
-				name := filepath.Join("tile", level)
-				if err := cleanDir(ctx, logger, root, name, size, torchwood.ParseTilePath); err != nil {
-					logger.Error("failed to clean directory", "name", name, "err", err)
-					exitCode = 1
-					break
-				}
-			}
+			root.Close()
 		}
 	}
 
-	logger.Info("done", "files", removedFiles, "dirs", removedDirs, "bytes", removedBytes)
+	var files, dirs, bytes int64
+	for _, st := range stats {
+		files += st.files
+		dirs += st.dirs
+		bytes += st.bytes
+	}
+	logger.Info("done", "files", files, "dirs", dirs, "bytes", bytes)
+
+	if *metricsFlag != "" {
+		if err := writeMetrics(*metricsFlag, stats); err != nil {
+			logger.Error("failed to write metrics", "err", err)
+			exitCode = 1
+		}
+	}
 	os.Exit(exitCode)
 }
 
-var removedFiles int64
-var removedDirs int64
-var removedBytes int64
+// logStats is what a run removed from one log, and how long it took.
+type logStats struct {
+	log     string
+	files   int64
+	dirs    int64
+	bytes   int64
+	elapsed time.Duration
+	failed  bool
+}
 
-func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix string, size int64, parseTilePath func(path string) (tlog.Tile, error)) error {
+// cleanLog removes the redundant partial tiles of every level of a log, and
+// records the outcome in st. The tile directory is created by the first upload,
+// so it is allowed to be missing only while the tree is empty.
+func cleanLog(ctx context.Context, logger *slog.Logger, root *os.Root, size int64, parseTilePath func(path string) (tlog.Tile, error), st *logStats) (err error) {
+	start := time.Now()
+	defer func() {
+		st.elapsed = time.Since(start)
+		st.failed = err != nil
+	}()
+
+	levels, err := readDirNames(root, "tile")
+	if os.IsNotExist(err) && size == 0 {
+		logger.DebugContext(ctx, "empty log has no tile directory yet, skipping")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read tile directory: %w", err)
+	}
+	for _, level := range levels {
+		name := filepath.Join("tile", level)
+		if err := cleanDir(ctx, logger, root, name, size, parseTilePath, st); err != nil {
+			return fmt.Errorf("failed to clean directory %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// writeMetrics writes the per-log statistics of this run as Prometheus gauges
+// for the node_exporter textfile collector. The file is replaced atomically
+// through a temporary name that does not end in .prom, so the collector never
+// sees a partially written file.
+func writeMetrics(path string, stats []*logStats) error {
+	var b bytes.Buffer
+	labelEscaper := strings.NewReplacer("\\", "\\\\", "\n", "\\n", "\"", "\\\"")
+	gauge := func(name, help string, value func(*logStats) any) {
+		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s gauge\n", name, help, name)
+		for _, st := range stats {
+			fmt.Fprintf(&b, "%s{log=\"%s\"} %v\n", name, labelEscaper.Replace(st.log), value(st))
+		}
+	}
+	gauge("partial_aftersun_removed_files", "Partial tile files removed in the last run.",
+		func(st *logStats) any { return st.files })
+	gauge("partial_aftersun_removed_dirs", "Partial tile directories removed in the last run.",
+		func(st *logStats) any { return st.dirs })
+	gauge("partial_aftersun_removed_bytes", "Apparent size of the files and directories removed in the last run.",
+		func(st *logStats) any { return st.bytes })
+	gauge("partial_aftersun_duration_seconds", "Time spent walking and cleaning the log in the last run.",
+		func(st *logStats) any { return st.elapsed.Seconds() })
+	gauge("partial_aftersun_success", "Whether the last run cleaned the log without errors.",
+		func(st *logStats) any {
+			if st.failed {
+				return 0
+			}
+			return 1
+		})
+
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b.Bytes()); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix string, size int64, parseTilePath func(path string) (tlog.Tile, error), st *logStats) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -183,7 +270,7 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 		name := filepath.Join(prefix, entry)
 
 		if strings.HasPrefix(entry, "x") {
-			if err := cleanDir(ctx, logger, root, name, size, parseTilePath); err != nil {
+			if err := cleanDir(ctx, logger, root, name, size, parseTilePath, st); err != nil {
 				return err
 			}
 			continue
@@ -230,23 +317,23 @@ func cleanDir(ctx context.Context, logger *slog.Logger, root *os.Root, prefix st
 				return fmt.Errorf("failed to override immutable flag for %s: %w", name, err)
 			}
 			logger.DebugContext(ctx, "removing partial", "name", name)
-			removedFiles++
+			st.files++
 			i, err := root.Lstat(name)
 			if err != nil {
 				return err
 			}
-			removedBytes += i.Size()
+			st.bytes += i.Size()
 			if err := root.Remove(name); err != nil {
 				return err
 			}
 		}
 		logger.DebugContext(ctx, "removing dir", "name", name)
-		removedDirs++
+		st.dirs++
 		i, err := root.Lstat(name)
 		if err != nil {
 			return err
 		}
-		removedBytes += i.Size()
+		st.bytes += i.Size()
 		if err := root.Remove(name); err != nil {
 			return err
 		}
