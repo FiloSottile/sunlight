@@ -661,6 +661,13 @@ func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry, lowPrior
 	defer l.poolGate.Unlock()
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
+	// Don't spend serialized time (mostly the SQLite cache lookup) on clients
+	// that went away while queued for poolGate.
+	if err := ctx.Err(); err != nil {
+		return func(ctx context.Context) (*sunlight.LogEntry, error) {
+			return nil, fmtErrorf("context canceled while queued for the pool: %w", err)
+		}, "canceled"
+	}
 	if testingOnlyPauseAddLeafToPool != nil {
 		testingOnlyPauseAddLeafToPool()
 	}
@@ -693,6 +700,9 @@ func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry, lowPrior
 		}, "cache"
 	} else if leaf != nil {
 		return func(ctx context.Context) (*sunlight.LogEntry, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, fmtErrorf("context canceled after deduplication cache hit: %w", err)
+			}
 			return leaf, nil
 		}, "cache"
 	}

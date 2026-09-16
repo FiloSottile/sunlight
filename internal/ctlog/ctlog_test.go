@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"flag"
 	mathrand "math/rand"
 	"reflect"
@@ -343,6 +344,48 @@ func TestRatelimit(t *testing.T) {
 	checkEvictions()
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog(40)
+}
+
+func TestCanceledSubmissions(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// No issuers, which are uploaded with the request context before the pool.
+	newEntry := func(seed int64) *ctlog.PendingLogEntry {
+		r := mathrand.New(mathrand.NewSource(seed))
+		return &ctlog.PendingLogEntry{Certificate: testCertificate(r.Uint64())}
+	}
+
+	// A canceled submission is dropped without making it into the pool.
+	seed := mathrand.Int63()
+	f, source := tl.Log.AddLeafToPoolContext(canceled, newEntry(seed))
+	if source != "canceled" {
+		t.Errorf("got source %q, expected \"canceled\"", source)
+	}
+	if _, err := f(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Errorf("got error %v, expected context.Canceled", err)
+	}
+	if _, source := tl.Log.AddLeafToPoolContext(context.Background(), newEntry(seed)); source != "sequencer" {
+		t.Errorf("got source %q, expected \"sequencer\"", source)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(1)
+
+	// A cache hit is not served to a client that went away.
+	f, source = tl.Log.AddLeafToPoolContext(context.Background(), newEntry(seed))
+	if source != "cache" {
+		t.Errorf("got source %q, expected \"cache\"", source)
+	}
+	if _, err := f(canceled); !errors.Is(err, context.Canceled) {
+		t.Errorf("got error %v, expected context.Canceled", err)
+	}
+	if _, err := f(context.Background()); err != nil {
+		t.Errorf("got error %v, expected cache hit", err)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(1)
 }
 
 // TestSequencerNotStarved verifies that the sequencer takes priority over

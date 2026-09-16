@@ -19,6 +19,10 @@ func (l *Log) AddLeafToPoolWithLowPriority(e *PendingLogEntry) (WaitEntryFunc, s
 	return l.addLeafToPool(context.Background(), e, true)
 }
 
+func (l *Log) AddLeafToPoolContext(ctx context.Context, e *PendingLogEntry) (WaitEntryFunc, string) {
+	return l.addLeafToPool(ctx, e, false)
+}
+
 func (l *Log) Sequence() error {
 	return l.sequence(context.Background())
 }
