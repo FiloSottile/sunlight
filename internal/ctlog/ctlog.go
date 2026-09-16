@@ -82,6 +82,11 @@ type Log struct {
 	rootsMu  sync.RWMutex
 	roots    *x509util.PEMCertPool
 	rootsPEM []byte
+
+	// sourceLimiter limits how many low-priority submissions of entries that
+	// are already in the log a single source (an IPv4 address or an IPv6 /64)
+	// can make per minute. It's nil if there is no limit.
+	sourceLimiter *sourceLimiter
 }
 
 type treeWithTimestamp struct {
@@ -337,10 +342,20 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	m.ConfigStart.Set(float64(config.NotAfterStart.Unix()))
 	m.ConfigEnd.Set(float64(config.NotAfterLimit.Unix()))
 
+	var limiter *sourceLimiter
+	if config.PoolSize > 0 {
+		// 3 × PoolSize so that there is space in the in-flight refund-pending
+		// budget for one pending pool, one pool in sequencing, and one pool
+		// getting responses out.
+		limit := 3 * config.PoolSize
+		limiter = newSourceLimiter(time.Minute/time.Duration(limit), limit)
+	}
+
 	return &Log{
 		c:              config,
 		logID:          logID,
 		m:              m,
+		sourceLimiter:  limiter,
 		tree:           treeWithTimestamp{c.Tree, timestamp},
 		lockCheckpoint: lock,
 		edgeTiles:      edgeTiles,
@@ -633,7 +648,7 @@ func newPool() *pool {
 	}
 }
 
-var errPoolFull = fmtErrorf("rate limited")
+var errPoolFull = fmtErrorf("the pool is full, try again later")
 var errEvicted = fmtErrorf("evicted to make way for higher priority leaves")
 
 // addLeafToPool adds leaf to the current pool, unless it is found in a

@@ -200,6 +200,12 @@ GET /debug/heavyhitter/ips-bytes
 The 100 most common client IP addresses and User-Agents, by number of requests and by response bytes, tracked with the Space-Saving algorithm.
 
 ```
+GET /debug/sourcelimit
+```
+
+The 100 sources (IPv4 addresses or IPv6 /64s) with the most low-priority submissions rejected by the per-source rate limit, with the log and User-Agent of their latest rejected request.
+
+```
 POST /debug/keylog/on
 POST /debug/keylog/off
 ```

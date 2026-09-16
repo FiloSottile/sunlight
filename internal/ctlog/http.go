@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"slices"
 	"time"
@@ -60,7 +59,7 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *PendingLogEntry) error {
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), r.RemoteAddr, func(le *PendingLogEntry) error {
 		if le.IsPrecert {
 			return fmtErrorf("pre-certificate submitted to add-chain")
 		}
@@ -68,11 +67,6 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		l.c.Log.DebugContext(r.Context(), "add-chain error", "code", code, "err", err)
-		if code == http.StatusServiceUnavailable {
-			rw.Header().Set("Retry-After", fmt.Sprintf("%d", 30+rand.Intn(60)))
-			http.Error(rw, "😮‍💨 this party is popular and the pool is full ✨ please retry later 🥺", code)
-			return
-		}
 		http.Error(rw, err.Error(), code)
 		return
 	}
@@ -93,7 +87,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, func(le *PendingLogEntry) error {
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), r.RemoteAddr, func(le *PendingLogEntry) error {
 		if !le.IsPrecert {
 			return fmtErrorf("final certificate submitted to add-pre-chain")
 		}
@@ -101,11 +95,6 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		l.c.Log.DebugContext(r.Context(), "add-pre-chain error", "code", code, "err", err)
-		if code == http.StatusServiceUnavailable {
-			rw.Header().Set("Retry-After", fmt.Sprintf("%d", 30+rand.Intn(60)))
-			http.Error(rw, "😮‍💨 this party is popular and the pool is full ✨ please retry later 🥺", code)
-			return
-		}
 		http.Error(rw, err.Error(), code)
 		return
 	}
@@ -122,7 +111,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 // required on mark certificates by the BIMI Guidelines.
 var markCertificateEKU = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 31}
 
-func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
+func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, userAgent, remoteAddr string, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
 		"precert": "", "preissuer": "", "chain_len": "", "low_priority": "", "source": ""}
 	defer func() {
@@ -171,7 +160,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	if l.c.MarkCertificates && !slices.ContainsFunc(chain[0].UnknownExtKeyUsage, markCertificateEKU.Equal) {
 		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: missing Verified Mark Certificate EKU")
 	}
-	lowPriority := lowPriority(chain[0])
+	lowPriority := lowPriorityLeaf(chain[0])
 	labels["chain_len"] = fmt.Sprintf("%d", len(chain))
 	labels["root"] = x509util.NameToString(chain[len(chain)-1].Subject)
 	labels["issuer"] = x509util.NameToString(chain[0].Issuer)
@@ -221,6 +210,28 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 		return nil, http.StatusBadRequest, err
 	}
 
+	// Rate limit sources that submit too many low-priority entries that are
+	// already in the log. Low-priority requests from a source over its limit
+	// are rejected before reaching the pool gate and the deduplication cache.
+	// Every low-priority request is charged on admission, and refunded unless
+	// it turns out to be a duplicate, so that requests in flight count against
+	// the limit. High-priority requests are never charged nor rejected.
+	var source string
+	if lowPriority && l.sourceLimiter != nil {
+		receipt, ok := l.sourceLimiter.Allow(remoteAddr)
+		if !ok {
+			labels["source"] = "duplimit"
+			limitedSources.Count(receipt.source.String(), fmt.Sprintf("%s %q", l.c.Name, userAgent))
+			return nil, http.StatusTooManyRequests, fmtErrorf("source rate limited: too many submissions of entries already in the log")
+		}
+		defer func() {
+			if source == "cache" && err == nil {
+				return
+			}
+			l.sourceLimiter.Refund(receipt)
+		}()
+	}
+
 	waitLeaf, source := l.addLeafToPool(ctx, e, lowPriority)
 	labels["source"] = source
 	waitTimer := prometheus.NewTimer(l.m.AddChainWait)
@@ -265,7 +276,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, che
 	return rsp, http.StatusOK, nil
 }
 
-func lowPriority(c *x509.Certificate) bool {
+func lowPriorityLeaf(c *x509.Certificate) bool {
 	if isPrecert, _ := ctfe.IsPrecertificate(c); isPrecert {
 		// The BRs allow at most 48 hours of backdating. A precertificate older
 		// than that can't turn into a valid certificate anymore, so it must be

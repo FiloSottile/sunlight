@@ -2,6 +2,7 @@ package ctlog
 
 import (
 	"context"
+	"time"
 
 	"filippo.io/sunlight"
 )
@@ -29,6 +30,10 @@ func (l *Log) Sequence() error {
 
 func (e *PendingLogEntry) AsLogEntry(idx, timestamp int64) *sunlight.LogEntry {
 	return e.asLogEntry(idx, timestamp)
+}
+
+func (l *Log) SetDuplicateLimit(interval time.Duration, burst int) {
+	l.sourceLimiter = newSourceLimiter(interval, burst)
 }
 
 func SetTimeNowUnixMilli(f func() int64) {

@@ -11,7 +11,8 @@
 //
 // A private HTTP debug server is also started on a random port on localhost. It
 // serves the net/http/pprof endpoints, the [heavyhitter] endpoints, the
-// [keylog] endpoints, and the [stdlog] endpoints.
+// [ctlog.LimitedSourcesHandler] endpoint, the [keylog] endpoints, and the
+// [stdlog] endpoints.
 package main
 
 import (
@@ -343,6 +344,11 @@ type LogConfig struct {
 	// possible, and otherwise add-chain requests will be rejected with a 503.
 	// Lower-priority entries are precertificates with NotBefore more than 48h
 	// in the past, or certificates with an SCT extension. Zero means no limit.
+	//
+	// A single source (an IPv4 address or an IPv6 /64) can also make at most
+	// 3 × PoolSize submissions of lower-priority entries that are already in the
+	// log per minute. Once over that limit, every lower-priority submission
+	// from the source is rate-limited at approximately 3 × PoolSize per minute.
 	PoolSize int
 
 	// S3Region is the AWS region for the S3 bucket.
@@ -483,6 +489,7 @@ func main() {
 		logger.Info("locked executable in memory", "bytes", locked)
 	}
 
+	http.HandleFunc("GET /debug/sourcelimit", ctlog.LimitedSourcesHandler)
 	go func() {
 		ln, err := net.Listen("tcp", "localhost:")
 		if err != nil {

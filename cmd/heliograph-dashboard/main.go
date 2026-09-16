@@ -363,9 +363,9 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 		multiRangeChart(p, start, end, step, []namedQuery{
 			outcome("sequenced", `error="",source="sequencer"`),
 			outcome("duplicate", `error="",source=~"cache|pool"`),
-			outcome("rate limited", `source=~"ratelimit|evicted"`),
+			outcome("rate limited", `source=~"ratelimit|evicted|duplimit"`),
 			outcome("invalid", fmt.Sprintf(`error=~%q`, invalidErrors)),
-			outcome("failed", fmt.Sprintf(`error!="",error!~%q,source!~"ratelimit|evicted"`, invalidErrors)),
+			outcome("failed", fmt.Sprintf(`error!="",error!~%q,source!~"ratelimit|evicted|duplimit"`, invalidErrors)),
 		}, chartOpts{Unit: unitRate}))
 
 	// Only shards receiving a meaningful number of submissions count towards
