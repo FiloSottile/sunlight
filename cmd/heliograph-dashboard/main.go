@@ -368,9 +368,14 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 			outcome("failed", fmt.Sprintf(`error!="",error!~%q,source!~"ratelimit|evicted"`, invalidErrors)),
 		}, chartOpts{Unit: unitRate}))
 
-	sunlight.chart("Submit latency (p50, p99, worst shard, log scale)",
+	// Only shards receiving a meaningful number of submissions count towards
+	// the worst shard: the wait quantiles of a near-idle shard are computed
+	// over a handful of samples, so they jitter without saying anything about
+	// the log's health.
+	active := fmt.Sprintf(`(log:sunlight_addchain_requests:rate5m{%s} > %g)`, sel.sunlight, activeShardRate)
+	sunlight.chart("Submit latency (p50, p99, worst active shard, log scale)",
 		rangeChart(p, start, end, step,
-			fmt.Sprintf(`max by (quantile) (sunlight_addchain_wait_seconds{%s,quantile=~"0.5|0.99"})`, sel.sunlight),
+			fmt.Sprintf(`max by (quantile) (sunlight_addchain_wait_seconds{%s,quantile=~"0.5|0.99"} and on (job, log) %s)`, sel.sunlight, active),
 			[]string{"quantile"}, chartOpts{Unit: unitSeconds, LogScale: true}))
 
 	skylight := &section{Title: "Skylight"}
@@ -409,6 +414,11 @@ func buildPage(p *prom, title string, start, end time.Time, step time.Duration, 
 	page.Sections = []section{*sunlight, *skylight, *system}
 	return page
 }
+
+// activeShardRate is the minimum submissions per second for a shard to count
+// as active in the latency chart. Shards outside the current notAfter window
+// see a few submissions per minute, active ones tens to hundreds per second.
+const activeShardRate = 1.0
 
 // invalidErrors matches the error categories of add-chain requests rejected
 // because of their content, as opposed to failures on the log's side. The
