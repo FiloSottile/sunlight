@@ -242,7 +242,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 	if err == errEvicted {
 		labels["source"] = "evicted"
 	}
-	if err == errPoolFull || err == errEvicted {
+	if err == errPoolFull || err == errEvicted || err == errTimeout {
 		return nil, http.StatusServiceUnavailable, err
 	} else if errors.As(err, new(SunsetLogError)) {
 		return nil, http.StatusGone, err

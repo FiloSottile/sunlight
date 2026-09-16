@@ -474,6 +474,72 @@ func TestSequencerNotStarved(t *testing.T) {
 	fatalIfErr(t, <-seqDone)
 }
 
+// TestPoolGateTimeout verifies that submissions give up waiting for the pool
+// lock after a bounded time, low-priority ones much sooner than high-priority
+// ones, and that a canceled context ends the wait early.
+func TestPoolGateTimeout(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+
+	pauses := make(chan chan struct{})
+	ctlog.SetAddLeafToPoolPause(func() {
+		release := make(chan struct{})
+		pauses <- release
+		<-release
+	})
+	t.Cleanup(func() { ctlog.SetAddLeafToPoolPause(nil) })
+
+	go tl.Log.AddLeafToPool(&ctlog.PendingLogEntry{Certificate: testCertificate(0)})
+	holder := <-pauses
+
+	start := time.Now()
+	f, source := tl.Log.AddLeafToPoolWithLowPriority(&ctlog.PendingLogEntry{Certificate: testCertificate(1)})
+	if source != "timeout" {
+		t.Errorf("got source %q, expected \"timeout\"", source)
+	}
+	if _, err := f(context.Background()); err != ctlog.ErrTimeout {
+		t.Errorf("got error %v, expected ErrTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("low-priority submission waited %v", elapsed)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan string, 1)
+	go func() {
+		_, source := tl.Log.AddLeafToPoolContext(ctx, &ctlog.PendingLogEntry{Certificate: testCertificate(2)})
+		done <- source
+	}()
+	select {
+	case source := <-done:
+		t.Fatalf("high-priority submission returned %q instead of waiting", source)
+	case <-time.After(500 * time.Millisecond):
+	}
+	cancel()
+	if source := <-done; source != "canceled" {
+		t.Errorf("got source %q, expected \"canceled\"", source)
+	}
+
+	start = time.Now()
+	f, source = tl.Log.AddLeafToPool(&ctlog.PendingLogEntry{Certificate: testCertificate(3)})
+	if source != "timeout" {
+		t.Errorf("got source %q, expected \"timeout\"", source)
+	}
+	if _, err := f(context.Background()); err != ctlog.ErrTimeout {
+		t.Errorf("got error %v, expected ErrTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond || elapsed > 5*time.Second {
+		t.Errorf("high-priority submission waited %v, expected about 1s", elapsed)
+	}
+
+	close(holder)
+	ctlog.SetAddLeafToPoolPause(nil)
+	if _, source := tl.Log.AddLeafToPool(&ctlog.PendingLogEntry{Certificate: testCertificate(4)}); source != "sequencer" {
+		t.Errorf("got source %q, expected \"sequencer\"", source)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(2)
+}
+
 func TestDuplicates(t *testing.T) {
 	t.Run("Certificates", func(t *testing.T) {
 		testDuplicates(t, addCertificateWithSeed)

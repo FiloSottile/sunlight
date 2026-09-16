@@ -53,8 +53,9 @@ type Log struct {
 
 	// poolGate is acquired by addLeafToPool before poolMu, while the sequencer
 	// takes poolMu directly, so that sequencing doesn't have to queue behind
-	// multiple addLeafToPool calls under load.
-	poolGate sync.Mutex
+	// multiple addLeafToPool calls under load. It's a one-slot channel so that
+	// it can be selected with a context and a timeout.
+	poolGate chan struct{}
 	// poolMu is held for the entire duration of addLeafToPool, and by
 	// RunSequencer while rotating currentPool and inSequencing.
 	// This guarantees that addLeafToPool will never add to a pool that already
@@ -361,6 +362,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		edgeTiles:      edgeTiles,
 		cacheRead:      cacheRead,
 		cacheLegacy:    cacheLegacy,
+		poolGate:       make(chan struct{}, 1),
 		currentPool:    newPool(),
 		cacheWrite:     cacheWrite,
 		issuers:        make(map[[32]byte]bool),
@@ -649,7 +651,21 @@ func newPool() *pool {
 }
 
 var errPoolFull = fmtErrorf("the pool is full, try again later")
-var errEvicted = fmtErrorf("evicted to make way for higher priority leaves")
+
+// poolGateLowPriorityTimeout and poolGateHighPriorityTimeout are how long a
+// submission waits for poolGate.
+//
+// Admission throughput is bounded by the serialized deduplication cache lookup,
+// so if the cache gets slow, an unbounded queue would grow until every request
+// outlasts its client's timeout.
+const (
+	poolGateLowPriorityTimeout  = 100 * time.Millisecond
+	poolGateHighPriorityTimeout = 1 * time.Second
+)
+
+var errTimeout = fmtErrorf("timed out waiting for admission to the pool, try again later")
+
+var errEvicted = fmtErrorf("evicted to make way for higher priority leaves, try again later")
 
 // addLeafToPool adds leaf to the current pool, unless it is found in a
 // deduplication cache. It returns a function that will wait until the pool is
@@ -672,12 +688,27 @@ func (l *Log) addLeafToPool(ctx context.Context, leaf *PendingLogEntry, lowPrior
 		}
 	}
 
-	l.poolGate.Lock()
-	defer l.poolGate.Unlock()
+	timeout := poolGateHighPriorityTimeout
+	if lowPriority {
+		timeout = poolGateLowPriorityTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case l.poolGate <- struct{}{}:
+		defer func() { <-l.poolGate }()
+	case <-timer.C:
+		return func(ctx context.Context) (*sunlight.LogEntry, error) {
+			return nil, errTimeout
+		}, "timeout"
+	case <-ctx.Done():
+		err := ctx.Err()
+		return func(ctx context.Context) (*sunlight.LogEntry, error) {
+			return nil, fmtErrorf("context canceled while queued for the pool: %w", err)
+		}, "canceled"
+	}
 	l.poolMu.Lock()
 	defer l.poolMu.Unlock()
-	// Don't spend serialized time (mostly the SQLite cache lookup) on clients
-	// that went away while queued for poolGate.
 	if err := ctx.Err(); err != nil {
 		return func(ctx context.Context) (*sunlight.LogEntry, error) {
 			return nil, fmtErrorf("context canceled while queued for the pool: %w", err)

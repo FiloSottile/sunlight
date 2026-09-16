@@ -9,6 +9,7 @@ import (
 
 var ErrEvicted = errEvicted
 var ErrPoolFull = errPoolFull
+var ErrTimeout = errTimeout
 
 type WaitEntryFunc = waitEntryFunc
 

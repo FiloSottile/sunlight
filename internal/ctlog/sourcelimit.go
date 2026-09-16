@@ -44,9 +44,6 @@ const (
 // which set they land in.
 var sourceLimiterSeed = maphash.MakeSeed()
 
-// limitedSources counts the requests rejected by a sourceLimiter per source,
-// tracking the log name and User-Agent of the latest one, for the
-// /debug/sourcelimit endpoint.
 var limitedSources = frequent.New(200)
 
 // LimitedSourcesHandler is a debug endpoint that lists the 100 sources with the
@@ -116,8 +113,7 @@ func (l *sourceLimiter) Allow(remoteAddr string) (receipt sourceReceipt, ok bool
 	// the next request is rejected.
 	window := l.interval * time.Duration(l.burst-1)
 	if e.tat.After(now.Add(window)) {
-		// The zero tat makes the receipt a no-op to refund, while the source
-		// lets the caller report who was rejected.
+		// The zero tat makes the receipt a no-op to refund.
 		return sourceReceipt{source: source}, false
 	}
 	if e.tat.Before(now) {
@@ -131,8 +127,7 @@ func (l *sourceLimiter) Allow(remoteAddr string) (receipt sourceReceipt, ok bool
 // a request that turned out not to be chargeable.
 func (l *sourceLimiter) Refund(receipt sourceReceipt) {
 	// If the end of the charge's interval has already passed, the charge
-	// drained on its own and there is nothing to refund. This also covers the
-	// zero receipt of a request that was never charged.
+	// drained on its own and there is nothing to refund.
 	now := time.Now()
 	if !receipt.tat.After(now) {
 		return
