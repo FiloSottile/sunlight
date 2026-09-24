@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -18,7 +19,6 @@ import (
 	"os"
 
 	"filippo.io/keygen"
-	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/immutable"
 	"filippo.io/torchwood"
 	"golang.org/x/crypto/hkdf"

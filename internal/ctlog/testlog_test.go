@@ -7,6 +7,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -29,7 +30,6 @@ import (
 	"testing"
 	"time"
 
-	"filippo.io/mldsa"
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/torchwood"

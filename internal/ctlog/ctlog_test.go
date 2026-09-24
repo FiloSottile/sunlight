@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -21,7 +22,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"filippo.io/mldsa"
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
 	ct "github.com/google/certificate-transparency-go"

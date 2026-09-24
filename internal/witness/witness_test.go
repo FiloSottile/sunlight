@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,7 +20,6 @@ import (
 	"sync"
 	"testing"
 
-	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/torchwood"
 	"github.com/prometheus/client_golang/prometheus"

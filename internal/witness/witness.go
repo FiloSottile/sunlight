@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/cipher"
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/asn1"
@@ -27,7 +28,6 @@ import (
 	"sync"
 	"time"
 
-	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/sunlight/internal/xaes256gcm"
 	"filippo.io/torchwood"

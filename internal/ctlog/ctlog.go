@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -25,7 +26,6 @@ import (
 	"time"
 
 	"crawshaw.io/sqlite"
-	"filippo.io/mldsa"
 	"filippo.io/sunlight"
 	"filippo.io/torchwood"
 	ct "github.com/google/certificate-transparency-go"

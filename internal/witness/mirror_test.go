@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -23,7 +24,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"filippo.io/mldsa"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/note"
