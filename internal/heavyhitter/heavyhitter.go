@@ -1,18 +1,17 @@
 // Package heavyhitter registers two endpoints /debug/heavyhitter/useragents and
 // /debug/heavyhitter/ips as a side-effect. They returns the 100 most frequent
-// User-Agent strings and IP addresses (see [Source]), respectively, observed by
-// Handlers wrapped with NewHandler. /debug/heavyhitter/useragents-bytes and
-// /debug/heavyhitter/ips-bytes return the 100 that were served the most
+// User-Agent strings and IP addresses (see [clientaddr.Source]), respectively,
+// observed by Handlers wrapped with NewHandler. /debug/heavyhitter/useragents-bytes
+// and /debug/heavyhitter/ips-bytes return the 100 that were served the most
 // response body bytes instead.
 package heavyhitter
 
 import (
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/netip"
 
+	"filippo.io/sunlight/internal/clientaddr"
 	"filippo.io/sunlight/internal/frequent"
 )
 
@@ -22,7 +21,7 @@ var userAgentBytes, ipAddressBytes = frequent.New(200), frequent.New(200)
 func NewHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userAgent := r.UserAgent()
-		source := Source(r)
+		source := clientaddr.Source(r).String()
 		userAgents.Count(userAgent, source)
 		ipAddresses.Count(source, userAgent)
 		cw := &countingWriter{ResponseWriter: w}
@@ -36,21 +35,6 @@ func NewHandler(next http.Handler) http.Handler {
 		userAgentBytes.Add(userAgent, source, cw.written)
 		ipAddressBytes.Add(source, userAgent, cw.written)
 	})
-}
-
-// Source returns the client IP address of r. IPv6 addresses are truncated to
-// their /64, since a single client can use many addresses within it.
-func Source(r *http.Request) string {
-	ap, err := netip.ParseAddrPort(r.RemoteAddr)
-	if err != nil {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		return host
-	}
-	addr := ap.Addr().Unmap()
-	if addr.Is6() {
-		return netip.PrefixFrom(addr, 64).Masked().String()
-	}
-	return addr.String()
 }
 
 // countingWriter counts the response body bytes written through it.

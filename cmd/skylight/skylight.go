@@ -52,6 +52,7 @@ import (
 
 	"filippo.io/mlockexe"
 	"filippo.io/sunlight"
+	"filippo.io/sunlight/internal/clientaddr"
 	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/hyperloglog"
 	"filippo.io/sunlight/internal/keylog"
@@ -73,6 +74,12 @@ import (
 type Config struct {
 	// Listen are the addresses to listen on, e.g. ":443".
 	Listen []string
+
+	// TrustReverseProxy takes the client address from the X-Forwarded-For
+	// header, as set by a reverse proxy, for rate limiting and metrics.
+	// Optional. Every request must then go through the proxy, or clients could
+	// choose their own address. Using a reverse proxy is not recommended.
+	TrustReverseProxy bool
 
 	// ACME configures how Skylight automatically obtains certificates for its HTTPS
 	// endpoints. Optional. If missing, Skylight will listen for plain HTTP or h2c.
@@ -434,7 +441,7 @@ func (p *pathWindows) Estimates() map[pathKey]pathStats {
 func newClientPathsHandler(logName func(context.Context) string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
-		clientPaths.Add(logName(ctx), kindFromContext(ctx), familyFromContext(ctx), heavyhitter.Source(r), r.URL.Path)
+		clientPaths.Add(logName(ctx), kindFromContext(ctx), familyFromContext(ctx), clientaddr.Source(r).String(), r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -489,7 +496,7 @@ func newClientContextHandler(next http.Handler) http.Handler {
 		}
 		r = r.WithContext(context.WithValue(r.Context(), familyContextKey{}, family))
 
-		clientAddresses.Add(family, heavyhitter.Source(r))
+		clientAddresses.Add(family, clientaddr.Source(r).String())
 
 		next.ServeHTTP(w, r)
 	})
@@ -982,6 +989,7 @@ func main() {
 	handler = heavyhitter.NewHandler(handler)
 	handler = newClientContextHandler(handler)
 	handler = reused.NewHandler(handler)
+	handler = clientaddr.NewHandler(c.TrustReverseProxy, handler)
 	s := &http.Server{
 		Handler:      handler,
 		ConnContext:  reused.ConnContext,

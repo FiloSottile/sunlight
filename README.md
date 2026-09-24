@@ -42,6 +42,12 @@ acme:
 Sunlight listens on all the listed addresses (passed to [net.Listen](https://pkg.go.dev/net#Listen)), and automatically obtains TLS certificates for the logs hostnames via ACME.
 
 ```yaml
+trustreverseproxy: true
+```
+
+Running Sunlight or Skylight behind a reverse proxy is not recommended. If using such a configuration anyway, set `trustreverseproxy: true` in the configuration file to use the last entry of the `X-Forwarded-For` header for rate limits. Split setups where Sunlight/Skylight are reachable both directly and via a reverse proxy are not supported.
+
+```yaml
 checkpoints: /tank/shared/checkpoints.db
 ```
 
@@ -175,6 +181,8 @@ If you’re using the local filesystem backend, you could use any HTTP server, l
 - It automatically rate-limits clients that don’t provide a contact through the User-Agent, to make it easier to report client issues and to reduce the impact of non-malicious misbehaving clients.
 - It provides the same monitoring and logging capabilities as Sunlight (see below), including the same debug endpoints and copious public metrics.
 - It exposes a `/health` endpoint which only returns 200 OK if all logs have produced validly-signed checkpoints in the last five seconds. This is what powers the Tuscolo [status page](https://status.sunlight.geomys.org/).
+
+If Skylight runs behind a reverse proxy (which we don't recommend), set `trustreverseproxy` as for Sunlight.
 
 If using a different HTTP server, you should take care of setting the right `Content-Type`, `Content-Encoding`, `Cache-Control`, and ideally `Access-Control-Allow-Origin` headers. Feel free to inquire on the \#sunlight channel of the [transparency.dev Slack][] for help configuring other Static CT read path servers.
 

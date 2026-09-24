@@ -64,29 +64,12 @@ func TestBytesTable(t *testing.T) {
 			if item.Count != 1500 {
 				t.Errorf("counted %d bytes, want 1500", item.Count)
 			}
-			if item.Latest != "192.0.2.1" {
-				t.Errorf("latest source = %q, want 192.0.2.1", item.Latest)
+			if item.Latest != "192.0.2.1/32" {
+				t.Errorf("latest source = %q, want 192.0.2.1/32", item.Latest)
 			}
 		}
 	}
 	if !found {
 		t.Error("test User-Agent not found in the bytes table")
-	}
-}
-
-func TestSource(t *testing.T) {
-	for _, tc := range []struct{ remoteAddr, want string }{
-		{"192.0.2.1:1234", "192.0.2.1"},
-		{"[::ffff:192.0.2.1]:1234", "192.0.2.1"},
-		{"[2001:db8:1:2:3:4:5:6]:1234", "2001:db8:1:2::/64"},
-		{"[2001:db8:1:2::]:1234", "2001:db8:1:2::/64"},
-		{"[fe80::1%eth0]:1234", "fe80::/64"},
-		{"not an address", ""},
-	} {
-		r := httptest.NewRequest("GET", "/", nil)
-		r.RemoteAddr = tc.remoteAddr
-		if got := Source(r); got != tc.want {
-			t.Errorf("Source(%q) = %q, want %q", tc.remoteAddr, got, tc.want)
-		}
 	}
 }

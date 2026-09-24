@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"slices"
 	"time"
 
 	"filippo.io/sunlight"
+	"filippo.io/sunlight/internal/clientaddr"
 	"filippo.io/sunlight/internal/reused"
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/asn1"
@@ -59,7 +61,7 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), r.RemoteAddr, func(le *PendingLogEntry) error {
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), clientaddr.Source(r), func(le *PendingLogEntry) error {
 		if le.IsPrecert {
 			return fmtErrorf("pre-certificate submitted to add-chain")
 		}
@@ -87,7 +89,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), r.RemoteAddr, func(le *PendingLogEntry) error {
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), clientaddr.Source(r), func(le *PendingLogEntry) error {
 		if !le.IsPrecert {
 			return fmtErrorf("final certificate submitted to add-pre-chain")
 		}
@@ -111,7 +113,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 // required on mark certificates by the BIMI Guidelines.
 var markCertificateEKU = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 31}
 
-func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, userAgent, remoteAddr string, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
+func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, userAgent string, client netip.Prefix, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
 		"precert": "", "preissuer": "", "chain_len": "", "low_priority": "", "source": ""}
 	defer func() {
@@ -218,10 +220,10 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 	// the limit. High-priority requests are never charged nor rejected.
 	var source string
 	if lowPriority && l.sourceLimiter != nil {
-		receipt, ok := l.sourceLimiter.Allow(remoteAddr)
+		receipt, ok := l.sourceLimiter.Allow(client)
 		if !ok {
 			labels["source"] = "duplimit"
-			limitedSources.Count(receipt.source.String(), fmt.Sprintf("%s %q", l.c.Name, userAgent))
+			limitedSources.Count(client.String(), fmt.Sprintf("%s %q", l.c.Name, userAgent))
 			return nil, http.StatusTooManyRequests, fmtErrorf("source rate limited: too many submissions of entries already in the log")
 		}
 		defer func() {

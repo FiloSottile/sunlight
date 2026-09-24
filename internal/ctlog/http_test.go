@@ -19,6 +19,7 @@ import (
 	"testing/iotest"
 	"time"
 
+	"filippo.io/sunlight/internal/clientaddr"
 	ct "github.com/google/certificate-transparency-go"
 )
 
@@ -107,16 +108,26 @@ func TestStoppedSequencerIsServerError(t *testing.T) {
 // until the request completes, and returns the response.
 func submitChain(t *testing.T, tl *TestLog, remoteAddr, userAgent string, chain [][]byte) *httptest.ResponseRecorder {
 	t.Helper()
+	return submitChainThrough(t, tl, tl.Log.Handler(), remoteAddr, "", userAgent, chain)
+}
+
+// submitChainThrough is like submitChain, but serves the request through
+// handler and sets the X-Forwarded-For header to forwardedFor, if not empty.
+func submitChainThrough(t *testing.T, tl *TestLog, handler http.Handler, remoteAddr, forwardedFor, userAgent string, chain [][]byte) *httptest.ResponseRecorder {
+	t.Helper()
 	body, err := json.Marshal(map[string][][]byte{"chain": chain})
 	fatalIfErr(t, err)
 	req := httptest.NewRequest("POST", "/ct/v1/add-chain", bytes.NewReader(body))
 	req.RemoteAddr = remoteAddr
+	if forwardedFor != "" {
+		req.Header.Set("X-Forwarded-For", forwardedFor)
+	}
 	req.Header.Set("User-Agent", userAgent)
 	rr := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tl.Log.Handler().ServeHTTP(rr, req)
+		handler.ServeHTTP(rr, req)
 	}()
 	for {
 		select {
@@ -184,6 +195,31 @@ func TestDuplicateLimit(t *testing.T) {
 		// rejected while its budget refills.
 		if rr := submitChain(t, tl, a, crossPoster, chain); rr.Code != http.StatusTooManyRequests {
 			t.Fatalf("got status %d, expected 429: %s", rr.Code, rr.Body)
+		}
+	})
+
+	t.Run("BehindProxy", func(t *testing.T) {
+		tl := NewEmptyTestLog(t)
+		tl.Log.SetDuplicateLimit(time.Minute, 2)
+		const proxy = "10.0.0.1:1234"
+		h := clientaddr.NewHandler(true, tl.Log.Handler())
+
+		// Use up the budget of the client forwarded by the proxy.
+		for i := range 3 {
+			if rr := submitChainThrough(t, tl, h, proxy, "192.0.2.1", crossPoster, chain); rr.Code != http.StatusOK {
+				t.Fatalf("submission %d: got status %d, expected 200: %s", i, rr.Code, rr.Body)
+			}
+		}
+		if rr := submitChainThrough(t, tl, h, proxy, "192.0.2.1", crossPoster, chain); rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("got status %d, expected 429: %s", rr.Code, rr.Body)
+		}
+		// Other clients behind the same proxy are unaffected, and only the
+		// entry appended by the proxy counts.
+		if rr := submitChainThrough(t, tl, h, proxy, "192.0.2.2", crossPoster, chain); rr.Code != http.StatusOK {
+			t.Fatalf("got status %d from another client, expected 200: %s", rr.Code, rr.Body)
+		}
+		if rr := submitChainThrough(t, tl, h, proxy, "192.0.2.3, 192.0.2.1", crossPoster, chain); rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("got status %d with client-supplied entries, expected 429: %s", rr.Code, rr.Body)
 		}
 	})
 }

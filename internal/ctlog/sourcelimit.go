@@ -73,20 +73,6 @@ func newSourceLimiter(interval time.Duration, burst int) *sourceLimiter {
 	}
 }
 
-// sourcePrefix returns the key under which the client at remoteAddr is
-// tracked. IPv6 addresses are truncated to their /64.
-func sourcePrefix(remoteAddr string) (netip.Prefix, bool) {
-	ap, err := netip.ParseAddrPort(remoteAddr)
-	if err != nil {
-		return netip.Prefix{}, false
-	}
-	addr := ap.Addr().Unmap()
-	if addr.Is6() {
-		return netip.PrefixFrom(addr, 64).Masked(), true
-	}
-	return netip.PrefixFrom(addr, 32), true
-}
-
 // sourceReceipt identifies a charge made by Allow, to refund it with.
 type sourceReceipt struct {
 	source netip.Prefix
@@ -94,11 +80,11 @@ type sourceReceipt struct {
 	tat time.Time
 }
 
-// Allow reports whether a request from the client at remoteAddr should be
-// served, and if so charges it, returning a receipt to refund the charge with.
-func (l *sourceLimiter) Allow(remoteAddr string) (receipt sourceReceipt, ok bool) {
-	source, ok := sourcePrefix(remoteAddr)
-	if !ok {
+// Allow reports whether a request from source (see [clientaddr.Source])
+// should be served, and if so charges it, returning a receipt to refund the
+// charge with. Requests from an unknown (zero) source are always served.
+func (l *sourceLimiter) Allow(source netip.Prefix) (receipt sourceReceipt, ok bool) {
+	if !source.IsValid() {
 		return sourceReceipt{}, true
 	}
 	now := time.Now()

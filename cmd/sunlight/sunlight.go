@@ -50,6 +50,7 @@ import (
 
 	"filippo.io/keygen"
 	"filippo.io/mlockexe"
+	"filippo.io/sunlight/internal/clientaddr"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/sunlight/internal/heavyhitter"
 	"filippo.io/sunlight/internal/keylog"
@@ -81,6 +82,12 @@ type Config struct {
 
 	// Listen are the addresses to listen on, e.g. ":443".
 	Listen []string
+
+	// TrustReverseProxy takes the client address from the X-Forwarded-For
+	// header, as set by a reverse proxy, for rate limiting and metrics.
+	// Optional. Every request must then go through the proxy, or clients could
+	// choose their own address. Using a reverse proxy is not recommended.
+	TrustReverseProxy bool
 
 	// ACME configures how Sunlight automatically obtains certificates for its HTTPS
 	// endpoints. Optional. If missing, Sunlight will listen for plain HTTP or h2c.
@@ -1148,6 +1155,7 @@ func main() {
 
 	handler := reused.NewHandler(mux)
 	handler = heavyhitter.NewHandler(handler)
+	handler = clientaddr.NewHandler(c.TrustReverseProxy, handler)
 	s := &http.Server{
 		Handler:      handler,
 		ConnContext:  reused.ConnContext,

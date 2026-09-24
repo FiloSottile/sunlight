@@ -13,7 +13,7 @@ func TestSourceLimiter(t *testing.T) {
 		const interval = 60 * time.Millisecond
 		const burst = 1000
 		l := newSourceLimiter(interval, burst)
-		src := "[2001:db8::1]:1234"
+		src := netip.MustParsePrefix("2001:db8::/64")
 
 		// A source can burn a full burst of charges before being limited.
 		for i := range burst {
@@ -83,7 +83,7 @@ func TestSourceLimiterRefund(t *testing.T) {
 		const interval = 60 * time.Millisecond
 		const burst = 1000
 		l := newSourceLimiter(interval, burst)
-		src := "192.0.2.1:1234"
+		src := netip.MustParsePrefix("192.0.2.1/32")
 
 		// Refunded requests don't count against the budget.
 		for range burst * 10 {
@@ -178,15 +178,15 @@ func TestSourceLimiterRefund(t *testing.T) {
 	})
 }
 
-func TestSourceLimiterUnparseable(t *testing.T) {
+func TestSourceLimiterUnknown(t *testing.T) {
 	l := newSourceLimiter(time.Second, 1)
 	for range 10 {
-		receipt, ok := l.Allow("not an address")
+		receipt, ok := l.Allow(netip.Prefix{})
 		if !ok {
-			t.Fatal("unparseable address limited")
+			t.Fatal("unknown source limited")
 		}
 		if receipt != (sourceReceipt{}) {
-			t.Fatal("unparseable address charged")
+			t.Fatal("unknown source charged")
 		}
 		l.Refund(receipt)
 	}
@@ -199,18 +199,12 @@ func TestSourceLimiterEviction(t *testing.T) {
 		l := newSourceLimiter(interval, burst)
 
 		// Find enough sources that hash to the same set to overflow it.
-		var sources []string
-		var prefixes []netip.Prefix
+		var sources []netip.Prefix
 		target := sourceLimiterSet(netip.MustParsePrefix("192.0.2.0/32"))
 		for i := 0; len(sources) < sourceLimiterWays+2; i++ {
-			src := fmt.Sprintf("10.%d.%d.%d:1234", i>>16, i>>8&0xff, i&0xff)
-			prefix, ok := sourcePrefix(src)
-			if !ok {
-				t.Fatalf("sourcePrefix(%q) failed", src)
-			}
-			if sourceLimiterSet(prefix) == target {
+			src := netip.MustParsePrefix(fmt.Sprintf("10.%d.%d.%d/32", i>>16, i>>8&0xff, i&0xff))
+			if sourceLimiterSet(src) == target {
 				sources = append(sources, src)
-				prefixes = append(prefixes, prefix)
 			}
 		}
 
@@ -233,14 +227,14 @@ func TestSourceLimiterEviction(t *testing.T) {
 		if _, ok := l.Allow(sources[sourceLimiterWays]); !ok {
 			t.Fatal("new source limited")
 		}
-		if l.lookup(prefixes[sourceLimiterWays]) == nil {
+		if l.lookup(sources[sourceLimiterWays]) == nil {
 			t.Fatal("new source not inserted")
 		}
-		if l.lookup(prefixes[0]) == nil {
+		if l.lookup(sources[0]) == nil {
 			t.Fatal("most offending source evicted")
 		}
 		evicted := 0
-		for _, prefix := range prefixes[1:sourceLimiterWays] {
+		for _, prefix := range sources[1:sourceLimiterWays] {
 			if l.lookup(prefix) == nil {
 				evicted++
 			}
@@ -255,7 +249,7 @@ func TestSourceLimiterEviction(t *testing.T) {
 		if !ok {
 			t.Fatal("new source limited")
 		}
-		e := l.lookup(prefixes[sourceLimiterWays+1])
+		e := l.lookup(sources[sourceLimiterWays+1])
 		if e == nil {
 			t.Fatal("new source not inserted")
 		}
@@ -265,40 +259,11 @@ func TestSourceLimiterEviction(t *testing.T) {
 	})
 }
 
-func TestSourcePrefix(t *testing.T) {
-	tests := []struct {
-		remoteAddr string
-		want       string
-	}{
-		{"192.0.2.1:1234", "192.0.2.1/32"},
-		{"[::ffff:192.0.2.1]:1234", "192.0.2.1/32"},
-		{"[2001:db8:1:2:3:4:5:6]:1234", "2001:db8:1:2::/64"},
-		{"[2001:db8:1:2::]:1234", "2001:db8:1:2::/64"},
-		{"[fe80::1%eth0]:1234", "fe80::/64"},
-		{"192.0.2.1", ""},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.remoteAddr, func(t *testing.T) {
-			got, ok := sourcePrefix(tt.remoteAddr)
-			if tt.want == "" {
-				if ok {
-					t.Fatalf("sourcePrefix(%q) = %v, want failure", tt.remoteAddr, got)
-				}
-				return
-			}
-			if !ok || got.String() != tt.want {
-				t.Fatalf("sourcePrefix(%q) = %v, %v, want %v", tt.remoteAddr, got, ok, tt.want)
-			}
-		})
-	}
-}
-
 func BenchmarkSourceLimiter(b *testing.B) {
 	l := newSourceLimiter(60*time.Millisecond, 1000)
-	var sources [64]string
+	var sources [64]netip.Prefix
 	for i := range sources {
-		sources[i] = fmt.Sprintf("[2001:db8:%x::1]:1234", i)
+		sources[i] = netip.MustParsePrefix(fmt.Sprintf("2001:db8:%x::/64", i))
 	}
 	for i := range b.N {
 		src := sources[i%len(sources)]
