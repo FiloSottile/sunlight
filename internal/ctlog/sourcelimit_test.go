@@ -33,11 +33,11 @@ func TestSourceLimiter(t *testing.T) {
 		}
 
 		// One request is allowed once an interval has passed, and not before.
-		time.Sleep(interval - 1)
+		time.Sleep(interval - time.Nanosecond)
 		if _, ok := l.Allow(src); ok {
 			t.Fatal("source allowed before an interval passed")
 		}
-		time.Sleep(1)
+		time.Sleep(time.Nanosecond)
 		if _, ok := l.Allow(src); !ok {
 			t.Fatal("source not allowed after an interval passed")
 		}
