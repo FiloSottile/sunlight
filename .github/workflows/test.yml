@@ -30,7 +30,7 @@ jobs:
         with:
           go-version: ${{ matrix.go.go-version }}
           go-version-file: ${{ matrix.go.go-version-file }}
-      - uses: geomys/sandboxed-step@v1.2.0
+      - uses: geomys/sandboxed-step@v1.2.2
         with:
           run: |
             if [ "${{ matrix.deps }}" = "latest" ]; then
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: stable
-      - uses: geomys/sandboxed-step@v1.2.0
+      - uses: geomys/sandboxed-step@v1.2.2
         with:
           run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
   govulncheck:
@@ -59,6 +59,6 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: stable
-      - uses: geomys/sandboxed-step@v1.2.0
+      - uses: geomys/sandboxed-step@v1.2.2
         with:
           run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
