@@ -1039,7 +1039,7 @@ func (w *Witness) serveAddEntries(rw http.ResponseWriter, r *http.Request) {
 		body = gz
 	}
 
-	origin, err := readUint16LengthPrefixed(body)
+	origin, err := readUint8LengthPrefixed(body)
 	if err != nil || len(origin) == 0 {
 		httpError("failed to read origin", http.StatusBadRequest)
 		return
@@ -1657,6 +1657,18 @@ func (w *Witness) ensureCutTiles(ctx context.Context, pending *parsedCheckpoint,
 	w.m.MirrorTiles.WithLabelValues(pending.Origin, "true").Inc()
 
 	return nil
+}
+
+func readUint8LengthPrefixed(r io.Reader) ([]byte, error) {
+	n, err := readUint8(r)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 func readUint16LengthPrefixed(r io.Reader) ([]byte, error) {

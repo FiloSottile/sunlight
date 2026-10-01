@@ -233,8 +233,11 @@ func (l *testMirrorLog) addCheckpointBody(t *testing.T, oldSize, newSize int64) 
 // included, as a deliberate prefix upload.
 func (l *testMirrorLog) addEntriesBody(t *testing.T, start, end, treeSize int64, ticket []byte, maxPackages int) []byte {
 	t.Helper()
+	if len(l.origin) == 0 || len(l.origin) > 255 {
+		t.Fatalf("invalid origin length: %d", len(l.origin))
+	}
 	var b []byte
-	b = binary.BigEndian.AppendUint16(b, uint16(len(l.origin)))
+	b = append(b, byte(len(l.origin)))
 	b = append(b, l.origin...)
 	b = binary.BigEndian.AppendUint64(b, uint64(start))
 	b = binary.BigEndian.AppendUint64(b, uint64(end))
@@ -450,6 +453,32 @@ func checkMirrorTree(t *testing.T, w *Witness, log *testMirrorLog, size int64) {
 	}
 }
 
+// TestMirrorOriginLength exercises both ends of the uint8 origin length range,
+// including a multi-byte origin to check that the length counts bytes.
+func TestMirrorOriginLength(t *testing.T) {
+	for _, origin := range []string{"a", strings.Repeat("a", 255), strings.Repeat("é", 127) + "a"} {
+		t.Run(origin, func(t *testing.T) {
+			log := newTestMirrorLog(t, origin)
+			w := newTestMirrorWitness(t, log)
+			log.grow(t, 1)
+			code, body := addCheckpoint(t, w, log.addCheckpointBody(t, 0, 1))
+			if code != http.StatusOK {
+				t.Fatalf("add-checkpoint: got %d, body %q", code, body)
+			}
+			request := log.addEntriesBody(t, 0, 1, 1, nil, 0)
+			if request[0] != byte(len(origin)) || string(request[1:1+len(origin)]) != origin {
+				t.Fatal("origin is not encoded with a uint8 length prefix")
+			}
+			code, body = postAddEntries(t, w, request)
+			if code != http.StatusOK {
+				t.Fatalf("add-entries: got %d, body %q", code, body)
+			}
+			checkMirrorSigs(t, w, log, 1, body)
+			checkMirrorTree(t, w, log, 1)
+		})
+	}
+}
+
 func TestMirrorEndToEnd(t *testing.T) {
 	log := newTestMirrorLog(t, "example.com/testlog")
 	w := newTestMirrorWitness(t, log)
@@ -623,7 +652,7 @@ func TestMirrorBadProof(t *testing.T) {
 	// A corrupted entry makes the reconstructed subtree hash mismatch the
 	// proof, and nothing is saved.
 	b := log.addEntriesBody(t, 0, 300, 300, nil, 0)
-	headerLen := 2 + len(log.origin) + 8 + 8 + 2
+	headerLen := 1 + len(log.origin) + 8 + 8 + 2
 	b[headerLen+2] ^= 1 // corrupt the first byte of the first entry
 	code, body = postAddEntries(t, w, b)
 	if code != http.StatusUnprocessableEntity {
@@ -667,7 +696,7 @@ func TestMirrorPrefix(t *testing.T) {
 
 	// A body that ends before the first package is a 400.
 	full := log.addEntriesBody(t, 0, 600, 600, nil, 0)
-	headerLen := 2 + len(log.origin) + 8 + 8 + 2
+	headerLen := 1 + len(log.origin) + 8 + 8 + 2
 	code, body = postAddEntries(t, w, full[:headerLen])
 	if code != http.StatusBadRequest {
 		t.Errorf("empty prefix: got %d, want 400 (body %q)", code, body)
@@ -1422,12 +1451,12 @@ func TestMirrorAddEntriesRequestErrors(t *testing.T) {
 		t.Fatalf("add-checkpoint: got %d, body %q", code, body)
 	}
 	valid := log.addEntriesBody(t, 0, 600, 600, nil, 0)
-	headerLen := 2 + len(log.origin) + 8 + 8 + 2
+	headerLen := 1 + len(log.origin) + 8 + 8 + 2
 
 	// header builds an add-entries request header with arbitrary values.
 	header := func(origin string, start, end uint64, ticket []byte) []byte {
 		var b []byte
-		b = binary.BigEndian.AppendUint16(b, uint16(len(origin)))
+		b = append(b, byte(len(origin)))
 		b = append(b, origin...)
 		b = binary.BigEndian.AppendUint64(b, start)
 		b = binary.BigEndian.AppendUint64(b, end)
@@ -1470,6 +1499,15 @@ func TestMirrorAddEntriesRequestErrors(t *testing.T) {
 	t.Run("missing declared ticket", func(t *testing.T) {
 		b := header(log.origin, 0, 600, []byte("ticket"))
 		code, body := postAddEntries(t, w, b[:len(b)-3])
+		if code != http.StatusBadRequest {
+			t.Errorf("got %d, want 400 (body %q)", code, body)
+		}
+	})
+
+	t.Run("uint16 origin length", func(t *testing.T) {
+		// The old wire format starts with a zero byte for origins up to 255
+		// bytes, which must now be rejected as an empty origin.
+		code, body := postAddEntries(t, w, append([]byte{0}, valid...))
 		if code != http.StatusBadRequest {
 			t.Errorf("got %d, want 400 (body %q)", code, body)
 		}
@@ -1549,7 +1587,7 @@ func TestMirrorAddEntriesDeadline(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			w, log := setup(t)
 			full := log.addEntriesBody(t, 0, 600, 600, nil, 0)
-			headerLen := 2 + len(log.origin) + 8 + 8 + 2
+			headerLen := 1 + len(log.origin) + 8 + 8 + 2
 			resp := stallAddEntries(t, w, len(full), full[:headerLen+10])
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Errorf("got %d, want 400", resp.StatusCode)
