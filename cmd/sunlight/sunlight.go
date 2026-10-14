@@ -374,6 +374,8 @@ type LogConfig struct {
 	// 3 × PoolSize submissions of lower-priority entries that are already in the
 	// log per minute. Once over that limit, every lower-priority submission
 	// from the source is rate-limited at approximately 3 × PoolSize per minute.
+	// All Tor exit relays, as listed by https://onionoo.torproject.org/ and
+	// refreshed hourly, count together as the single source 100::/64.
 	PoolSize int
 
 	// S3Region is the AWS region for the S3 bucket.
@@ -666,6 +668,33 @@ func main() {
 		}
 	})
 	mux.Handle("/{$}", homeHandler)
+
+	if len(c.Logs) > 0 {
+		torExitFetches := prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "tor_exit_fetches_total",
+				Help: "Tor exit list fetches, by outcome.",
+			},
+			[]string{"outcome"},
+		)
+		sunlightMetrics.MustRegister(torExitFetches)
+		serveGroup.Go(func() error {
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for {
+				outcome, err := clientaddr.RefreshTorExits(ctx)
+				torExitFetches.WithLabelValues(outcome).Inc()
+				if err != nil {
+					logger.Error("failed to load Tor exit list", "outcome", outcome, "err", err)
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-ticker.C:
+				}
+			}
+		})
+	}
 
 	var blockedSPKIs [][32]byte
 	for _, s := range slices.Concat(defaultBlockedSPKIs, c.BlockedSPKIs) {

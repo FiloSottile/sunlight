@@ -205,13 +205,13 @@ GET /debug/heavyhitter/useragents-bytes
 GET /debug/heavyhitter/ips-bytes
 ```
 
-The 100 most common client IP addresses and User-Agents, by number of requests and by response bytes, tracked with the Space-Saving algorithm.
+The 100 most common client IP addresses and User-Agents, by number of requests and by response bytes, tracked with the Space-Saving algorithm. All Tor exit relays are tracked together as the single address `100::/64`.
 
 ```
 GET /debug/sourcelimit
 ```
 
-The 100 sources (IPv4 addresses or IPv6 /64s) with the most low-priority submissions rejected by the per-source rate limit, with the log and User-Agent of their latest rejected request.
+The 100 sources (IPv4 addresses or IPv6 /64s) with the most low-priority submissions rejected by the per-source rate limit, with the log and User-Agent of their latest rejected request. All Tor exit relays are tracked together as the single source `100::/64`.
 
 ```
 POST /debug/keylog/on
