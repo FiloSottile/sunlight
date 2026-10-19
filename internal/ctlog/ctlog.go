@@ -125,6 +125,11 @@ type Config struct {
 	// MarkCertificates requires submitted certificates to have the Verified
 	// Mark Certificate EKU, instead of the serverAuth EKU.
 	MarkCertificates bool
+
+	// BlockedSPKIs are SHA-256 hashes of SubjectPublicKeyInfo values. Chains
+	// that include a certificate with one of these keys, including the root,
+	// are rejected.
+	BlockedSPKIs [][32]byte
 }
 
 var ErrLogExists = errors.New("checkpoint already exist, refusing to initialize log")

@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -222,6 +223,54 @@ func TestDuplicateLimit(t *testing.T) {
 			t.Fatalf("got status %d with client-supplied entries, expected 429: %s", rr.Code, rr.Body)
 		}
 	})
+}
+
+func TestBlockedSPKIs(t *testing.T) {
+	spki := func(der []byte) [32]byte {
+		cert, err := x509.ParseCertificate(der)
+		fatalIfErr(t, err)
+		return sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	}
+	leChain := [][]byte{testLeaf, testIntermediate, testRoot}
+	hpChain, hpRoot := makeHighPriorityChain(t)
+	const client = "192.0.2.1:1234"
+
+	tl := NewEmptyTestLog(t)
+	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(), append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: testRoot}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: hpRoot})...)))
+
+	// Block the intermediate of one chain and the root of the other, which
+	// must be checked even if omitted from the submission.
+	tl.Config.BlockedSPKIs = [][32]byte{spki(testIntermediate), spki(hpRoot)}
+	for _, chain := range [][][]byte{leChain, hpChain, hpChain[:1]} {
+		rr := submitChain(t, tl, client, "test", chain)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("got status %d for chain of length %d, expected 400: %s", rr.Code, len(chain), rr.Body)
+		}
+		if !strings.Contains(rr.Body.String(), "blocked key in chain") {
+			t.Errorf("unexpected response body: %s", rr.Body)
+		}
+	}
+	// Rejected chains must not have reached the pool.
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(0)
+
+	tl.Config.BlockedSPKIs = [][32]byte{spki(hpChain[0])}
+	if rr := submitChain(t, tl, client, "test", hpChain); rr.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d with blocked leaf key, expected 400: %s", rr.Code, rr.Body)
+	}
+	if rr := submitChain(t, tl, client, "test", leChain); rr.Code != http.StatusOK {
+		t.Fatalf("got status %d for unrelated chain, expected 200: %s", rr.Code, rr.Body)
+	}
+	tl.CheckLog(1)
+
+	// Chains already in the log are rejected too, rather than deduplicated.
+	tl.Config.BlockedSPKIs = [][32]byte{spki(testIntermediate)}
+	if rr := submitChain(t, tl, client, "test", leChain); rr.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d for logged chain, expected 400: %s", rr.Code, rr.Body)
+	}
+	tl.CheckLog(1)
 }
 
 // makeHighPriorityChain returns a freshly issued certificate chain, which is

@@ -208,6 +208,12 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 			e.IssuerKeyHash = sha256.Sum256(chain[1].RawSubjectPublicKeyInfo)
 		}
 	}
+	for _, c := range chain {
+		if slices.Contains(l.c.BlockedSPKIs, sha256.Sum256(c.RawSubjectPublicKeyInfo)) {
+			return nil, http.StatusBadRequest, fmtErrorf("blocked key in chain: %s", x509util.NameToString(c.Subject))
+		}
+	}
+
 	if err := checkType(e); err != nil {
 		return nil, http.StatusBadRequest, err
 	}

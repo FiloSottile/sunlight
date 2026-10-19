@@ -27,6 +27,7 @@ import (
 	"crypto/x509"
 	_ "embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -235,6 +236,12 @@ type Config struct {
 		// must be consistent.
 		MirrorLogLists []string
 	}
+
+	// BlockedSPKIs is a list of hex-encoded SHA-256 hashes of
+	// SubjectPublicKeyInfo values. Submissions to any log that chain through a
+	// certificate with one of these keys, including the root, are rejected.
+	// Optional.
+	BlockedSPKIs []string
 
 	Logs []LogConfig
 }
@@ -649,6 +656,15 @@ func main() {
 	})
 	mux.Handle("/{$}", homeHandler)
 
+	var blockedSPKIs [][32]byte
+	for _, s := range c.BlockedSPKIs {
+		h, err := hex.DecodeString(s)
+		if err != nil || len(h) != sha256.Size {
+			fatalError(logger, "BlockedSPKIs entries must be hex-encoded SHA-256 hashes", "entry", s)
+		}
+		blockedSPKIs = append(blockedSPKIs, [32]byte(h))
+	}
+
 	var acmeHosts []string
 	for _, lc := range c.Logs {
 		if lc.ShortName == "" {
@@ -774,6 +790,7 @@ func main() {
 			NotAfterStart:    notAfterStart,
 			NotAfterLimit:    notAfterLimit,
 			MarkCertificates: lc.CertificateProfile == "mark",
+			BlockedSPKIs:     blockedSPKIs,
 		}
 
 		if time.Now().Format(time.DateOnly) == lc.Inception {
