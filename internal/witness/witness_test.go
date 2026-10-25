@@ -626,6 +626,19 @@ func subtreeRequest(start, end int64, subtreeHash tlog.Hash, proof torchwood.Sub
 	return b.String()
 }
 
+// decodeSubtreeSig decodes a sign-subtree response body, which must be a single
+// base64-encoded subtree cosignature followed by a newline.
+func decodeSubtreeSig(t *testing.T, body string) []byte {
+	t.Helper()
+	b64, ok := strings.CutSuffix(body, "\n")
+	if !ok || strings.Contains(b64, "\n") {
+		t.Fatalf("response is not a single line: %q", body)
+	}
+	sig, err := base64.StdEncoding.DecodeString(b64)
+	fatalIfErr(t, err)
+	return sig
+}
+
 // witnessSigLines splits an add-checkpoint response body into the witness's
 // Ed25519 and ML-DSA-44 cosignature lines, identified by key hash. The
 // returned lines include the trailing newline.
@@ -659,18 +672,18 @@ func TestSignSubtree(t *testing.T) {
 	w := newTestWitness(t, origin, vkey)
 
 	// Get the witness to cosign a size-5 checkpoint, and build the reference
-	// checkpoint carrying the log's signature and the witness's cosignatures.
+	// checkpoint carrying only the witness's ML-DSA-44 cosignature.
 	leaves := [][]byte{{1}, {2}, {3}, {4}, {5}}
 	cp := signCheckpoint(t, logSigner, origin, leaves, "")
 	code, cosigs := addCheckpoint(t, w, request(0, nil, cp))
 	if code != http.StatusOK {
 		t.Fatalf("add-checkpoint: got %d, body %q", code, cosigs)
 	}
-	witnessed := string(cp) + cosigs
 	ed25519Line, mldsaLine := witnessSigLines(t, w, cosigs)
 	text := torchwood.Checkpoint{
 		Origin: origin, Tree: tlog.Tree{N: 5, Hash: treeHash(t, leaves)},
 	}.String()
+	witnessed := text + "\n" + mldsaLine
 
 	otherSigner, _ := newTestLog(t, "example.com/other")
 	otherCp := signCheckpoint(t, otherSigner, "example.com/other", leaves, "")
@@ -695,29 +708,31 @@ func TestSignSubtree(t *testing.T) {
 			name:     "leaf subtree",
 			body:     subtreeRequest(4, 5, hash45, proof45, witnessed),
 			wantCode: http.StatusOK,
-			wantBody: "— example.com/witness",
 			start:    4, end: 5, hash: hash45,
 		},
 		{
 			name:     "inner subtree",
 			body:     subtreeRequest(0, 4, hash04, proof04, witnessed),
 			wantCode: http.StatusOK,
-			wantBody: "— example.com/witness",
 			start:    0, end: 4, hash: hash04,
 		},
 		{
 			name:     "full tree subtree with empty proof",
 			body:     subtreeRequest(0, 5, hash05, proof05, witnessed),
 			wantCode: http.StatusOK,
-			wantBody: "— example.com/witness",
 			start:    0, end: 5, hash: hash05,
 		},
 		{
-			name:     "ML-DSA-44 witness cosignature only",
-			body:     subtreeRequest(4, 5, hash45, proof45, text+"\n"+mldsaLine),
-			wantCode: http.StatusOK,
-			wantBody: "— example.com/witness",
-			start:    4, end: 5, hash: hash45,
+			name:     "log and witness signatures",
+			body:     subtreeRequest(4, 5, hash45, proof45, string(cp)+cosigs),
+			wantCode: http.StatusBadRequest,
+			wantBody: "invalid input",
+		},
+		{
+			name:     "Ed25519 and ML-DSA-44 witness cosignatures",
+			body:     subtreeRequest(4, 5, hash45, proof45, text+"\n"+ed25519Line+mldsaLine),
+			wantCode: http.StatusBadRequest,
+			wantBody: "invalid input",
 		},
 		{
 			name:     "misaligned subtree range",
@@ -789,26 +804,10 @@ func TestSignSubtree(t *testing.T) {
 			if tt.wantCode != http.StatusOK {
 				return
 			}
-			// A success response must be exactly one subtree cosignature from
-			// the witness's ML-DSA-44 key, with a zero timestamp.
-			var lines int
-			for line := range strings.Lines(body) {
-				lines++
-				if !w.s2.Verifier().VerifySubtree(origin, tt.start, tt.end, tt.hash, []byte(line)) {
-					t.Errorf("cosignature does not verify over subtree [%d, %d): %q", tt.start, tt.end, line)
-				}
-				b64, ok := strings.CutPrefix(strings.TrimSuffix(line, "\n"), "— "+w.s2.Verifier().Name()+" ")
-				if !ok {
-					t.Fatalf("unexpected signature line: %q", line)
-				}
-				blob, err := base64.StdEncoding.DecodeString(b64)
-				fatalIfErr(t, err)
-				if ts := binary.BigEndian.Uint64(blob[4:12]); ts != 0 {
-					t.Errorf("cosignature timestamp is %d, want 0", ts)
-				}
-			}
-			if lines != 1 {
-				t.Errorf("response has %d signature lines, want 1: %q", lines, body)
+			// A success response must be exactly one base64-encoded subtree
+			// cosignature from the witness's ML-DSA-44 key.
+			if !w.s2.Verifier().VerifySubtreeRaw(origin, tt.start, tt.end, tt.hash, decodeSubtreeSig(t, body)) {
+				t.Errorf("cosignature does not verify over subtree [%d, %d): %q", tt.start, tt.end, body)
 			}
 		})
 	}

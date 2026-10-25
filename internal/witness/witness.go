@@ -932,42 +932,42 @@ func (w *Witness) processSignSubtreeRequest(ctx context.Context, body []byte) (c
 	if c.N < end {
 		return nil, errBadRequest
 	}
+	if len(n.Sigs)+len(n.UnverifiedSigs) != 1 {
+		return nil, errBadRequest
+	}
 
 	if torchwood.CheckSubtree(proof, c.N, c.Hash, start, end, subtreeHash) != nil {
 		return nil, errProof
 	}
 
-	var signers []*torchwood.CosignatureSigner
-	for _, sig := range n.Sigs {
-		if w.s2.Name() == sig.Name && w.s2.KeyHash() == sig.Hash {
-			signers = append(signers, w.s2)
-		}
-		if w.sm != nil && w.sm.Name() == sig.Name && w.sm.KeyHash() == sig.Hash {
-			signers = append(signers, w.sm)
-		}
+	var s *torchwood.CosignatureSigner
+	switch sig := n.Sigs[0]; {
+	case w.s2.Name() == sig.Name && w.s2.KeyHash() == sig.Hash:
+		s = w.s2
+	case w.sm != nil && w.sm.Name() == sig.Name && w.sm.KeyHash() == sig.Hash:
+		s = w.sm
+	default:
+		return nil, fmtErrorf("internal error: signature from unexpected key %q", sig.Name)
 	}
-	var sigs []byte
-	for _, s := range signers {
-		// Safety check, for each signer we are about to use, we re-verify the
-		// signature on the re-serialized checkpoint using only its verifier.
-		noteSigs, err := splitSignatures(noteBytes, s.Name())
-		if err != nil {
-			return nil, fmtErrorf("internal error: failed to split signatures for signer %q", s.Name())
-		}
-		n := []byte(c.String())
-		n = append(n, []byte("\n")...)
-		n = append(n, noteSigs...)
-		if _, err := note.Open(n, note.VerifierList(s.Verifier())); err != nil {
-			return nil, fmtErrorf("internal error: failed to re-verify signature for signer %q", s.Name())
-		}
 
-		sig, err := s.SignSubtree(c.Origin, start, end, subtreeHash)
-		if err != nil {
-			return nil, fmtErrorf("internal error: failed to sign subtree for signer %q", s.Name())
-		}
-		sigs = append(sigs, sig...)
+	// Safety check, we re-verify the signature on the re-serialized checkpoint
+	// using only the verifier of the signer we are about to use.
+	noteSigs, err := splitSignatures(noteBytes, s.Name())
+	if err != nil {
+		return nil, fmtErrorf("internal error: failed to split signatures for signer %q", s.Name())
 	}
-	return sigs, nil
+	reserialized := []byte(c.String())
+	reserialized = append(reserialized, []byte("\n")...)
+	reserialized = append(reserialized, noteSigs...)
+	if _, err := note.Open(reserialized, note.VerifierList(s.Verifier())); err != nil {
+		return nil, fmtErrorf("internal error: failed to re-verify signature for signer %q", s.Name())
+	}
+
+	sig, err := s.SignSubtreeRaw(c.Origin, start, end, subtreeHash)
+	if err != nil {
+		return nil, fmtErrorf("internal error: failed to sign subtree for signer %q", s.Name())
+	}
+	return []byte(base64.StdEncoding.EncodeToString(sig) + "\n"), nil
 }
 
 func splitSignatures(note []byte, name string) ([]byte, error) {

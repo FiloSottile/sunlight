@@ -538,9 +538,9 @@ func TestMirrorEndToEnd(t *testing.T) {
 
 // TestSignSubtreeMirror checks the sign-subtree endpoint of a witness that
 // also provides a mirror service. Per c2sp.org/tlog-mirror, the subtree must
-// be signed with the same identities that signed the reference checkpoint: in
-// particular, a checkpoint signed only with the witness keys must not be
-// exchanged for a subtree signed by the mirror key.
+// be signed with the same identity that signed the reference checkpoint: in
+// particular, a checkpoint signed with the witness key must not be exchanged
+// for a subtree signed by the mirror key.
 func TestSignSubtreeMirror(t *testing.T) {
 	log := newTestMirrorLog(t, "example.com/testlog")
 	w := newTestMirrorWitness(t, log)
@@ -562,61 +562,55 @@ func TestSignSubtreeMirror(t *testing.T) {
 	fatalIfErr(t, err)
 
 	hash, proof := proveSubtree(t, log.entries, 256, 512)
+	mirrorSigned := onlySignatureFrom(t, string(mirrorCheckpoint), w.sm)
+	witnessSigned := onlySignatureFrom(t, string(pendingCheckpoint), w.s2)
 
-	// checkSubtreeSigs verifies that body is exactly the subtree cosignatures
-	// of the given signers, in any order.
-	checkSubtreeSigs := func(t *testing.T, body string, signers ...*torchwood.CosignatureSigner) {
+	// checkSubtreeSig verifies that body is exactly a subtree cosignature from
+	// want, and not from the other signer.
+	checkSubtreeSig := func(t *testing.T, body string, want, other *torchwood.CosignatureSigner) {
 		t.Helper()
-		var lines int
-		for line := range strings.Lines(body) {
-			lines++
-			verified := 0
-			for _, s := range signers {
-				if s.Verifier().VerifySubtree(log.origin, 256, 512, hash, []byte(line)) {
-					verified++
-				}
-			}
-			if verified != 1 {
-				t.Errorf("signature line verifies with %d of the expected signers: %q", verified, line)
-			}
+		sig := decodeSubtreeSig(t, body)
+		if !want.Verifier().VerifySubtreeRaw(log.origin, 256, 512, hash, sig) {
+			t.Errorf("cosignature does not verify with %q: %q", want.Name(), body)
 		}
-		if lines != len(signers) {
-			t.Errorf("response has %d signature lines, want %d: %q", lines, len(signers), body)
+		if other.Verifier().VerifySubtreeRaw(log.origin, 256, 512, hash, sig) {
+			t.Errorf("cosignature verifies with %q: %q", other.Name(), body)
 		}
 	}
 
 	t.Run("mirror checkpoint", func(t *testing.T) {
-		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, string(mirrorCheckpoint)))
+		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, mirrorSigned))
 		if code != http.StatusOK {
 			t.Fatalf("got status %d, body %q", code, body)
 		}
-		if strings.Contains(body, "— example.com/witness ") {
-			t.Errorf("mirror checkpoint was exchanged for a witness cosignature: %q", body)
-		}
-		checkSubtreeSigs(t, body, w.sm)
+		checkSubtreeSig(t, body, w.sm, w.s2)
 	})
 
 	t.Run("pending checkpoint", func(t *testing.T) {
-		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, string(pendingCheckpoint)))
+		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, witnessSigned))
 		if code != http.StatusOK {
 			t.Fatalf("got status %d, body %q", code, body)
 		}
-		if strings.Contains(body, "— example.com/mirror ") {
-			t.Errorf("witness-signed checkpoint was exchanged for a mirror cosignature: %q", body)
-		}
-		checkSubtreeSigs(t, body, w.s2)
+		checkSubtreeSig(t, body, w.s2, w.sm)
 	})
 
 	t.Run("mirror and witness signatures", func(t *testing.T) {
 		// The mirror checkpoint and the add-checkpoint cosignatures are over
 		// the same re-encoded checkpoint text, so they can be combined into a
-		// single note carrying both identities.
-		combined := string(mirrorCheckpoint) + witnessSigs
+		// single note carrying both identities, which must be rejected.
+		combined := mirrorSigned + witnessSigs
 		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, combined))
-		if code != http.StatusOK {
-			t.Fatalf("got status %d, body %q", code, body)
+		if code != http.StatusBadRequest {
+			t.Fatalf("got status %d, want 400 (body %q)", code, body)
 		}
-		checkSubtreeSigs(t, body, w.s2, w.sm)
+	})
+
+	t.Run("stored mirror checkpoint", func(t *testing.T) {
+		// The mirror checkpoint as served also carries the log signature.
+		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, string(mirrorCheckpoint)))
+		if code != http.StatusBadRequest {
+			t.Fatalf("got status %d, want 400 (body %q)", code, body)
+		}
 	})
 
 	// The mirror moves on to size 1200, but the size-600 checkpoints remain
@@ -632,12 +626,38 @@ func TestSignSubtreeMirror(t *testing.T) {
 	}
 
 	t.Run("past mirror checkpoint", func(t *testing.T) {
-		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, string(mirrorCheckpoint)))
+		code, body := signSubtree(t, w, subtreeRequest(256, 512, hash, proof, mirrorSigned))
 		if code != http.StatusOK {
 			t.Fatalf("got status %d, body %q", code, body)
 		}
-		checkSubtreeSigs(t, body, w.sm)
+		checkSubtreeSig(t, body, w.sm, w.s2)
 	})
+}
+
+// onlySignatureFrom returns signed with all signatures removed except the one
+// from s, which must be present.
+func onlySignatureFrom(t *testing.T, signed string, s *torchwood.CosignatureSigner) string {
+	t.Helper()
+	text, sigs, ok := strings.Cut(signed, "\n\n")
+	if !ok {
+		t.Fatalf("malformed note: %q", signed)
+	}
+	var out string
+	for line := range strings.Lines(sigs) {
+		b64, ok := strings.CutPrefix(strings.TrimSuffix(line, "\n"), "— "+s.Name()+" ")
+		if !ok {
+			continue
+		}
+		blob, err := base64.StdEncoding.DecodeString(b64)
+		fatalIfErr(t, err)
+		if binary.BigEndian.Uint32(blob[:4]) == s.KeyHash() {
+			out = text + "\n\n" + line
+		}
+	}
+	if out == "" {
+		t.Fatalf("no signature from %q in %q", s.Name(), signed)
+	}
+	return out
 }
 
 func TestMirrorBadProof(t *testing.T) {
