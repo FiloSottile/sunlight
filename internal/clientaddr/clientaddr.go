@@ -19,7 +19,8 @@ import (
 // NewHandler returns a handler that, if trustReverseProxy is true, replaces
 // the RemoteAddr of each request with the last entry of the X-Forwarded-For
 // header, and then replaces the RemoteAddr of requests from Tor exit relays
-// (see [RefreshTorExits]) with [TorRemoteAddr].
+// (see [RefreshTorExits]) with [TorRemoteAddr], and of requests from
+// Cloudflare Workers with [CloudflareWorkerRemoteAddr].
 func NewHandler(trustReverseProxy bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if trustReverseProxy {
@@ -29,6 +30,9 @@ func NewHandler(trustReverseProxy bool, next http.Handler) http.Handler {
 		}
 		if isTorExit(r.RemoteAddr) {
 			r.RemoteAddr = TorRemoteAddr
+		}
+		if r.Header.Get("CF-Worker") != "" {
+			r.RemoteAddr = CloudflareWorkerRemoteAddr
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -68,11 +72,19 @@ func Source(r *http.Request) netip.Prefix {
 }
 
 // TorRemoteAddr is the RemoteAddr assigned to requests from Tor exit relays.
-// It's in the IPv6 discard-only prefix (RFC 6666).
-const TorRemoteAddr = "[100::]:0"
+// It's in 100::/8, which is reserved by the IETF and not routed.
+const TorRemoteAddr = "[100:0:0:70::]:0"
 
 // TorSource is the [Source] of requests from Tor exit relays.
-var TorSource = netip.MustParsePrefix("100::/64")
+var TorSource = netip.MustParsePrefix("100:0:0:70::/64")
+
+// CloudflareWorkerRemoteAddr is the RemoteAddr assigned to requests from
+// Cloudflare Workers. It's in 100::/8, which is reserved by the IETF and not
+// routed.
+const CloudflareWorkerRemoteAddr = "[100:0:0:cf::]:0"
+
+// CloudflareWorkerSource is the [Source] of requests from Cloudflare Workers.
+var CloudflareWorkerSource = netip.MustParsePrefix("100:0:0:cf::/64")
 
 // torExits is the set of Tor exit relay addresses.
 var torExits atomic.Pointer[torExitSet]

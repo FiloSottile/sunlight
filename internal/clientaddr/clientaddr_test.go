@@ -126,6 +126,56 @@ func TestTorExits(t *testing.T) {
 	}
 }
 
+func TestCloudflareWorker(t *testing.T) {
+	torExits.Store(&torExitSet{exits: map[netip.Addr]bool{
+		netip.MustParseAddr("198.51.100.77"): true,
+	}})
+	t.Cleanup(func() { torExits.Store(nil) })
+
+	tests := []struct {
+		name       string
+		trust      bool
+		remoteAddr string
+		forwarded  []string
+		worker     string
+		want       string
+	}{
+		{"direct worker", false, "172.64.198.91:1234", nil, "example.workers.dev", CloudflareWorkerRemoteAddr},
+		{"direct, no header", false, "172.64.198.91:1234", nil, "", "172.64.198.91:1234"},
+		{"proxy worker", true, "10.1.2.3:1234", []string{"172.64.198.91"}, "example.com", CloudflareWorkerRemoteAddr},
+		{"tor worker", false, "198.51.100.77:1234", nil, "example.com", CloudflareWorkerRemoteAddr},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			h := NewHandler(tt.trust, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.RemoteAddr
+			}))
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = tt.remoteAddr
+			for _, f := range tt.forwarded {
+				r.Header.Add("X-Forwarded-For", f)
+			}
+			if tt.worker != "" {
+				r.Header.Set("CF-Worker", tt.worker)
+			}
+			h.ServeHTTP(httptest.NewRecorder(), r)
+			if got != tt.want {
+				t.Fatalf("RemoteAddr = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = CloudflareWorkerRemoteAddr
+	if got := Source(r); got != CloudflareWorkerSource {
+		t.Errorf("Source(CloudflareWorkerRemoteAddr) = %v, want %v", got, CloudflareWorkerSource)
+	}
+	if CloudflareWorkerSource == TorSource {
+		t.Error("CloudflareWorkerSource == TorSource")
+	}
+}
+
 func setTorExitListURL(t *testing.T, url string) {
 	orig := torExitListURL
 	torExitListURL = url

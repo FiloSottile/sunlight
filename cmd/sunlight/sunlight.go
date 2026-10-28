@@ -375,7 +375,8 @@ type LogConfig struct {
 	// log per minute. Once over that limit, every lower-priority submission
 	// from the source is rate-limited at approximately 3 × PoolSize per minute.
 	// All Tor exit relays, as listed by https://onionoo.torproject.org/ and
-	// refreshed hourly, count together as the single source 100::/64.
+	// refreshed hourly, count together as the single source 100:0:0:70::/64,
+	// and all Cloudflare Workers as the single source 100:0:0:cf::/64.
 	PoolSize int
 
 	// S3Region is the AWS region for the S3 bucket.
