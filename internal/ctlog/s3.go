@@ -95,7 +95,7 @@ func NewS3Backend(ctx context.Context, region, bucket, endpoint, keyPrefix strin
 		}),
 		bucket:        bucket,
 		keyPrefix:     keyPrefix,
-		metrics:       []prometheus.Collector{duration, uploadSize, hedgeRequests, hedgeWins},
+		metrics:       []prometheus.Collector{duration, errors, uploadSize, hedgeRequests, hedgeWins},
 		uploadSize:    uploadSize,
 		hedgeRequests: hedgeRequests,
 		hedgeWins:     hedgeWins,
