@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -307,4 +308,104 @@ func makeHighPriorityChain(t *testing.T) (chain [][]byte, root []byte) {
 	leaf, err := x509.CreateCertificate(rand.Reader, leafTmpl, rootCert, &leafKey.PublicKey, rootKey)
 	fatalIfErr(t, err)
 	return [][]byte{leaf, root}, root
+}
+
+func TestPrecertSigningCertificate(t *testing.T) {
+	newKey := func() *ecdsa.PrivateKey {
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		fatalIfErr(t, err)
+		return k
+	}
+	issue := func(tmpl, parent *x509.Certificate, pub, priv any) *x509.Certificate {
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, pub, priv)
+		fatalIfErr(t, err)
+		cert, err := x509.ParseCertificate(der)
+		fatalIfErr(t, err)
+		return cert
+	}
+
+	rootKey := newKey()
+	rootTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test Precert Root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	root := issue(rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+
+	preIssuerKey := newKey()
+	preIssuer := issue(&x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "Test Precertificate Signing Certificate"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		UnknownExtKeyUsage:    []asn1.ObjectIdentifier{{1, 3, 6, 1, 4, 1, 11129, 2, 4, 4}},
+	}, root, &preIssuerKey.PublicKey, rootKey)
+
+	leafKey := newKey()
+	precertTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject:      pkix.Name{CommonName: "precert.example.com"},
+		DNSNames:     []string{"precert.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(12 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtraExtensions: []pkix.Extension{{
+			Id:       asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 4, 3},
+			Critical: true,
+			Value:    asn1.NullBytes,
+		}},
+	}
+
+	tl := NewEmptyTestLog(t)
+	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw})))
+	submit := func(chain ...*x509.Certificate) *httptest.ResponseRecorder {
+		var ders [][]byte
+		for _, c := range chain {
+			ders = append(ders, c.Raw)
+		}
+		body, err := json.Marshal(map[string][][]byte{"chain": ders})
+		fatalIfErr(t, err)
+		req := httptest.NewRequest("POST", "/ct/v1/add-pre-chain", bytes.NewReader(body))
+		rr := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			tl.Log.Handler().ServeHTTP(rr, req)
+		}()
+		for {
+			select {
+			case <-done:
+				return rr
+			case <-time.After(10 * time.Millisecond):
+				fatalIfErr(t, tl.Log.Sequence())
+			}
+		}
+	}
+
+	precert := issue(precertTmpl, preIssuer, &leafKey.PublicKey, preIssuerKey)
+	rr := submit(precert, preIssuer, root)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("got status %d, expected 400: %s", rr.Code, rr.Body)
+	}
+	if !strings.Contains(rr.Body.String(), "precertificate signing certificates are not supported") {
+		t.Errorf("unexpected response body: %s", rr.Body)
+	}
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(0)
+
+	// The same precertificate issued directly by the root is accepted.
+	precert = issue(precertTmpl, root, &leafKey.PublicKey, rootKey)
+	if rr := submit(precert, root); rr.Code != http.StatusOK {
+		t.Fatalf("got status %d, expected 200: %s", rr.Code, rr.Body)
+	}
+	tl.CheckLog(1)
 }

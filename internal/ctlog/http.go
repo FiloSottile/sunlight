@@ -115,7 +115,7 @@ var markCertificateEKU = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 31}
 
 func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, userAgent string, client netip.Prefix, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
-		"precert": "", "preissuer": "", "chain_len": "", "low_priority": "", "source": ""}
+		"precert": "", "chain_len": "", "low_priority": "", "source": ""}
 	defer func() {
 		// If the client went away before a response could be served, log a
 		// non-standard status code to distinguish it from server errors.
@@ -182,18 +182,13 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 			return nil, http.StatusBadRequest, fmtErrorf("missing precertificate issuer")
 		}
 
-		var preIssuer *x509.Certificate
+		// Precertificate Signing Certificates are not supported, as allowed
+		// by c2sp.org/static-ct-api@v1.1.0.
 		if ct.IsPreIssuer(chain[1]) {
-			preIssuer = chain[1]
-			labels["preissuer"] = "true"
-			labels["issuer"] = x509util.NameToString(preIssuer.Issuer)
-			if len(chain) < 3 {
-				l.c.Log.WarnContext(ctx, "missing precertificate signing certificate issuer", "err", err, "body", body)
-				return nil, http.StatusBadRequest, fmtErrorf("missing precertificate signing certificate issuer")
-			}
+			return nil, http.StatusBadRequest, fmtErrorf("precertificate signing certificates are not supported")
 		}
 
-		defangedTBS, err := x509.BuildPrecertTBS(chain[0].RawTBSCertificate, preIssuer)
+		defangedTBS, err := x509.RemoveCTPoison(chain[0].RawTBSCertificate)
 		if err != nil {
 			l.c.Log.ErrorContext(ctx, "failed to build TBSCertificate", "err", err, "body", body)
 			return nil, http.StatusInternalServerError, fmtErrorf("failed to build TBSCertificate: %w", err)
@@ -202,11 +197,7 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 		e.IsPrecert = true
 		e.Certificate = defangedTBS
 		e.PreCertificate = chain[0].Raw
-		if preIssuer != nil {
-			e.IssuerKeyHash = sha256.Sum256(chain[2].RawSubjectPublicKeyInfo)
-		} else {
-			e.IssuerKeyHash = sha256.Sum256(chain[1].RawSubjectPublicKeyInfo)
-		}
+		e.IssuerKeyHash = sha256.Sum256(chain[1].RawSubjectPublicKeyInfo)
 	}
 	for _, c := range chain {
 		if slices.Contains(l.c.BlockedSPKIs, sha256.Sum256(c.RawSubjectPublicKeyInfo)) {
