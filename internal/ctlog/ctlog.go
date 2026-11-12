@@ -483,6 +483,23 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	return nil
 }
 
+func marshalRoots(pool *x509util.PEMCertPool) ([]byte, error) {
+	roots := pool.RawCertificates()
+	var res struct {
+		Certificates [][]byte `json:"certificates"`
+	}
+	res.Certificates = make([][]byte, 0, len(roots))
+	for _, r := range roots {
+		res.Certificates = append(res.Certificates, r.Raw)
+	}
+
+	response, err := json.Marshal(res)
+	if err != nil {
+		return nil, err
+	}
+	return append(response, '\n'), nil
+}
+
 func sameRootSet(a, b *x509util.PEMCertPool) bool {
 	if len(a.RawCertificates()) != len(b.RawCertificates()) {
 		return false

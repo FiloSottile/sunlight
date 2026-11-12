@@ -288,23 +288,6 @@ func lowPriorityLeaf(c *x509.Certificate) bool {
 	return len(c.SCTList.SCTList) > 0
 }
 
-func marshalRoots(pool *x509util.PEMCertPool) ([]byte, error) {
-	roots := pool.RawCertificates()
-	var res struct {
-		Certificates [][]byte `json:"certificates"`
-	}
-	res.Certificates = make([][]byte, 0, len(roots))
-	for _, r := range roots {
-		res.Certificates = append(res.Certificates, r.Raw)
-	}
-
-	response, err := json.Marshal(res)
-	if err != nil {
-		return nil, err
-	}
-	return append(response, '\n'), nil
-}
-
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {
 	l.rootsMu.RLock()
 	response := l.rootsJSON
