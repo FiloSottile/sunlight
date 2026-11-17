@@ -78,11 +78,13 @@ type Log struct {
 	issuersMu sync.RWMutex
 	issuers   map[[32]byte]bool
 
-	// roots are the trusted roots, and are always modified by swapping, so the
-	// pointer can be used without holding rootsMu after being obtained.
-	rootsMu  sync.RWMutex
-	roots    *x509util.PEMCertPool
-	rootsPEM []byte
+	// roots, rootsPEM, and rootsJSON are immutable snapshots of the trusted
+	// roots. They are swapped together under rootsMu and can be used without
+	// holding the lock after being obtained.
+	rootsMu   sync.RWMutex
+	roots     *x509util.PEMCertPool
+	rootsPEM  []byte
+	rootsJSON []byte
 
 	// sourceLimiter limits how many low-priority submissions of entries that
 	// are already in the log a single source (an IPv4 address or an IPv6 /64)
@@ -338,6 +340,11 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		}
 	}
 
+	rootsJSON, err := marshalRoots(roots)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't encode roots: %w", err)
+	}
+
 	config.Log.InfoContext(ctx, "loaded log", "logID", base64.StdEncoding.EncodeToString(logID[:]),
 		"size", c.N, "timestamp", timestamp)
 
@@ -373,6 +380,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		issuers:        make(map[[32]byte]bool),
 		roots:          roots,
 		rootsPEM:       rootsPEM,
+		rootsJSON:      rootsJSON,
 	}, nil
 }
 
@@ -444,6 +452,12 @@ func (l *Log) RootsPEM() []byte {
 	return l.rootsPEM
 }
 
+func (l *Log) rootsResponse() []byte {
+	l.rootsMu.RLock()
+	defer l.rootsMu.RUnlock()
+	return l.rootsJSON
+}
+
 func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	if bytes.Equal(pemBytes, l.RootsPEM()) {
 		return nil
@@ -451,6 +465,10 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	roots := x509util.NewPEMCertPool()
 	if !roots.AppendCertsFromPEM(pemBytes) {
 		return errors.New("failed to parse the PEM root certificates")
+	}
+	rootsJSON, err := marshalRoots(roots)
+	if err != nil {
+		return fmt.Errorf("couldn't encode roots: %w", err)
 	}
 	l.rootsMu.Lock()
 	defer l.rootsMu.Unlock()
@@ -460,7 +478,20 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	l.m.ConfigRoots.Set(float64(len(roots.RawCertificates())))
 	l.roots = roots
 	l.rootsPEM = bytes.Clone(pemBytes)
+	l.rootsJSON = rootsJSON
 	return nil
+}
+
+func marshalRoots(pool *x509util.PEMCertPool) ([]byte, error) {
+	roots := pool.RawCertificates()
+	var res struct {
+		Certificates [][]byte `json:"certificates"`
+	}
+	res.Certificates = make([][]byte, 0, len(roots))
+	for _, r := range roots {
+		res.Certificates = append(res.Certificates, r.Raw)
+	}
+	return json.Marshal(res)
 }
 
 // ReadOnlyAfter is how long after the end of the shard window

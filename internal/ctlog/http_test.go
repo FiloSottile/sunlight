@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -408,4 +409,53 @@ func TestPrecertSigningCertificate(t *testing.T) {
 		t.Fatalf("got status %d, expected 200: %s", rr.Code, rr.Body)
 	}
 	tl.CheckLog(1)
+}
+
+func TestGetRoots(t *testing.T) {
+	rootsPEM := func(certs ...[]byte) []byte {
+		var buf bytes.Buffer
+		for _, cert := range certs {
+			fatalIfErr(t, pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: cert}))
+		}
+		return buf.Bytes()
+	}
+	expectRoots := func(tl *TestLog, expected ...[]byte) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		tl.Log.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/ct/v1/get-roots", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("got status %d, expected 200: %s", rr.Code, rr.Body)
+		}
+		var res struct {
+			Certificates [][]byte `json:"certificates"`
+		}
+		fatalIfErr(t, json.Unmarshal(rr.Body.Bytes(), &res))
+		if !slices.EqualFunc(res.Certificates, expected, bytes.Equal) {
+			t.Errorf("got %d roots, expected %d: %s", len(res.Certificates), len(expected), rr.Body)
+		}
+	}
+
+	tl := NewEmptyTestLog(t)
+	expectRoots(tl, testRoot)
+
+	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(), rootsPEM(testRoot, testIntermediate)))
+	expectRoots(tl, testRoot, testIntermediate)
+
+	// An update that fails to persist doesn't take effect.
+	backend := tl.Config.Backend.(*MemoryBackend)
+	backend.UploadCallback = func(key string, data []byte) (apply bool, err error) {
+		return false, errors.New("upload failed")
+	}
+	if err := tl.Log.SetRootsFromPEM(t.Context(), rootsPEM(testRoot)); err == nil {
+		t.Fatal("expected roots update to fail")
+	}
+	backend.UploadCallback = nil
+	expectRoots(tl, testRoot, testIntermediate)
+
+	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(), rootsPEM(testIntermediate)))
+	expectRoots(tl, testIntermediate)
+
+	// The roots are persisted and served again after a restart.
+	tl = ReloadLog(t, tl)
+	expectRoots(tl, testIntermediate)
 }
