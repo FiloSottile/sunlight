@@ -289,13 +289,9 @@ func lowPriorityLeaf(c *x509.Certificate) bool {
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {
-	l.rootsMu.RLock()
-	response := l.rootsJSON
-	l.rootsMu.RUnlock()
-
 	rw.Header().Set("Access-Control-Allow-Origin", "*")
 	rw.Header().Set("Content-Type", "application/json")
-	if _, err := rw.Write(response); err != nil {
+	if _, err := rw.Write(l.rootsResponse()); err != nil {
 		l.c.Log.DebugContext(r.Context(), "failed to write get-roots response", "err", err)
 	}
 }

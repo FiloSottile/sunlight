@@ -78,9 +78,9 @@ type Log struct {
 	issuersMu sync.RWMutex
 	issuers   map[[32]byte]bool
 
-	// roots and rootsJSON are immutable snapshots of the trusted roots and the
-	// get-roots response. They are swapped together under rootsMu and can be
-	// used without holding the lock after being obtained.
+	// roots, rootsPEM, and rootsJSON are immutable snapshots of the trusted
+	// roots. They are swapped together under rootsMu and can be used without
+	// holding the lock after being obtained.
 	rootsMu   sync.RWMutex
 	roots     *x509util.PEMCertPool
 	rootsPEM  []byte
@@ -452,6 +452,12 @@ func (l *Log) RootsPEM() []byte {
 	return l.rootsPEM
 }
 
+func (l *Log) rootsResponse() []byte {
+	l.rootsMu.RLock()
+	defer l.rootsMu.RUnlock()
+	return l.rootsJSON
+}
+
 func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	if bytes.Equal(pemBytes, l.RootsPEM()) {
 		return nil
@@ -460,19 +466,12 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	if !roots.AppendCertsFromPEM(pemBytes) {
 		return errors.New("failed to parse the PEM root certificates")
 	}
+	rootsJSON, err := marshalRoots(roots)
+	if err != nil {
+		return fmt.Errorf("couldn't encode roots: %w", err)
+	}
 	l.rootsMu.Lock()
 	defer l.rootsMu.Unlock()
-	if bytes.Equal(pemBytes, l.rootsPEM) {
-		return nil
-	}
-	rootsJSON := l.rootsJSON
-	if !sameRootSet(l.roots, roots) {
-		var err error
-		rootsJSON, err = marshalRoots(roots)
-		if err != nil {
-			return fmt.Errorf("couldn't encode roots: %w", err)
-		}
-	}
 	if err := l.c.Backend.Upload(ctx, "_roots.pem", pemBytes, optsRoots); err != nil {
 		return fmt.Errorf("couldn't upload roots: %w", err)
 	}
@@ -492,24 +491,7 @@ func marshalRoots(pool *x509util.PEMCertPool) ([]byte, error) {
 	for _, r := range roots {
 		res.Certificates = append(res.Certificates, r.Raw)
 	}
-
-	response, err := json.Marshal(res)
-	if err != nil {
-		return nil, err
-	}
-	return append(response, '\n'), nil
-}
-
-func sameRootSet(a, b *x509util.PEMCertPool) bool {
-	if len(a.RawCertificates()) != len(b.RawCertificates()) {
-		return false
-	}
-	for _, cert := range a.RawCertificates() {
-		if !b.Included(cert) {
-			return false
-		}
-	}
-	return true
+	return json.Marshal(res)
 }
 
 // ReadOnlyAfter is how long after the end of the shard window
