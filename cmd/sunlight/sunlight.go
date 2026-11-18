@@ -376,7 +376,8 @@ type LogConfig struct {
 	// from the source is rate-limited at approximately 3 × PoolSize per minute.
 	// All Tor exit relays, as listed by https://onionoo.torproject.org/ and
 	// refreshed hourly, count together as the single source 100:0:0:70::/64,
-	// and all Cloudflare Workers as the single source 100:0:0:cf::/64.
+	// all Cloudflare Workers as the single source 100:0:0:cf::/64, and other
+	// Cloudflare egress addresses as the single source 100:0:0:cf1::/64.
 	PoolSize int
 
 	// S3Region is the AWS region for the S3 bucket.

@@ -176,6 +176,68 @@ func TestCloudflareWorker(t *testing.T) {
 	}
 }
 
+func TestCloudflareWARP(t *testing.T) {
+	tests := []struct {
+		name       string
+		trust      bool
+		remoteAddr string
+		forwarded  []string
+		worker     string
+		want       string
+	}{
+		{"direct", false, "[2a09:bac1:5b80:d60::1c8:a2]:1234", nil, "", CloudflareWARPRemoteAddr},
+		{"direct, first address", false, "[2a09:bac0::]:1234", nil, "", CloudflareWARPRemoteAddr},
+		{"direct, last address", false, "[2a09:bac7:ffff:ffff:ffff:ffff:ffff:ffff]:1234", nil, "", CloudflareWARPRemoteAddr},
+		{"direct, after last address", false, "[2a09:bac8::]:1234", nil, "", "[2a09:bac8::]:1234"},
+		{"direct, 2606:54c0::/30", false, "[2606:54c1:7:8::9]:1234", nil, "", CloudflareWARPRemoteAddr},
+		{"direct, after 2606:54c0::/30", false, "[2606:54c4::1]:1234", nil, "", "[2606:54c4::1]:1234"},
+		{"direct ipv4", false, "104.28.161.152:1234", nil, "", CloudflareWARPRemoteAddr},
+		{"direct mapped ipv4", false, "[::ffff:104.31.255.255]:1234", nil, "", CloudflareWARPRemoteAddr},
+		{"direct, before ipv4 range", false, "104.27.255.255:1234", nil, "", "104.27.255.255:1234"},
+		{"direct, after ipv4 range", false, "104.32.0.0:1234", nil, "", "104.32.0.0:1234"},
+		{"direct, Cloudflare Workers range", false, "[2a06:98c0:360c:c110::1]:1234", nil, "", "[2a06:98c0:360c:c110::1]:1234"},
+		{"direct, in ignored header", false, "203.0.113.1:1234", []string{"104.28.161.152"}, "", "203.0.113.1:1234"},
+		{"proxy", true, "10.1.2.3:1234", []string{"2a09:bac5:506d:2969::1"}, "", CloudflareWARPRemoteAddr},
+		{"proxy, other client", true, "10.1.2.3:1234", []string{"203.0.113.1"}, "", "203.0.113.1:0"},
+		{"worker", false, "104.28.161.152:1234", nil, "example.com", CloudflareWorkerRemoteAddr},
+		{"invalid address", false, "not an address", nil, "", "not an address"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			h := NewHandler(tt.trust, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.RemoteAddr
+			}))
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = tt.remoteAddr
+			for _, f := range tt.forwarded {
+				r.Header.Add("X-Forwarded-For", f)
+			}
+			if tt.worker != "" {
+				r.Header.Set("CF-Worker", tt.worker)
+			}
+			h.ServeHTTP(httptest.NewRecorder(), r)
+			if got != tt.want {
+				t.Fatalf("RemoteAddr = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = CloudflareWARPRemoteAddr
+	if got := Source(r); got != CloudflareWARPSource {
+		t.Errorf("Source(CloudflareWARPRemoteAddr) = %v, want %v", got, CloudflareWARPSource)
+	}
+	if CloudflareWARPSource == TorSource || CloudflareWARPSource == CloudflareWorkerSource {
+		t.Error("CloudflareWARPSource is not distinct")
+	}
+	for _, addr := range []string{TorRemoteAddr, CloudflareWorkerRemoteAddr, CloudflareWARPRemoteAddr} {
+		if isCloudflareWARP(addr) {
+			t.Errorf("isCloudflareWARP(%q) = true", addr)
+		}
+	}
+}
+
 func setTorExitListURL(t *testing.T, url string) {
 	orig := torExitListURL
 	torExitListURL = url

@@ -19,8 +19,9 @@ import (
 // NewHandler returns a handler that, if trustReverseProxy is true, replaces
 // the RemoteAddr of each request with the last entry of the X-Forwarded-For
 // header, and then replaces the RemoteAddr of requests from Tor exit relays
-// (see [RefreshTorExits]) with [TorRemoteAddr], and of requests from
-// Cloudflare Workers with [CloudflareWorkerRemoteAddr].
+// (see [RefreshTorExits]) with [TorRemoteAddr], of requests from Cloudflare
+// WARP with [CloudflareWARPRemoteAddr], and of requests from Cloudflare Workers
+// with [CloudflareWorkerRemoteAddr].
 func NewHandler(trustReverseProxy bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if trustReverseProxy {
@@ -30,6 +31,9 @@ func NewHandler(trustReverseProxy bool, next http.Handler) http.Handler {
 		}
 		if isTorExit(r.RemoteAddr) {
 			r.RemoteAddr = TorRemoteAddr
+		}
+		if isCloudflareWARP(r.RemoteAddr) {
+			r.RemoteAddr = CloudflareWARPRemoteAddr
 		}
 		if r.Header.Get("CF-Worker") != "" {
 			r.RemoteAddr = CloudflareWorkerRemoteAddr
@@ -71,20 +75,42 @@ func Source(r *http.Request) netip.Prefix {
 	return netip.PrefixFrom(addr, 32)
 }
 
-// TorRemoteAddr is the RemoteAddr assigned to requests from Tor exit relays.
-// It's in 100::/8, which is reserved by the IETF and not routed.
+// These are the RemoteAddr and [Source] values for special client types:
+// Tor exit relays, Cloudflare Workers, and Cloudflare WARP.
+// They are in 100::/8, which is reserved by the IETF and not routed.
+
 const TorRemoteAddr = "[100:0:0:70::]:0"
-
-// TorSource is the [Source] of requests from Tor exit relays.
-var TorSource = netip.MustParsePrefix("100:0:0:70::/64")
-
-// CloudflareWorkerRemoteAddr is the RemoteAddr assigned to requests from
-// Cloudflare Workers. It's in 100::/8, which is reserved by the IETF and not
-// routed.
 const CloudflareWorkerRemoteAddr = "[100:0:0:cf::]:0"
+const CloudflareWARPRemoteAddr = "[100:0:0:cf1::]:0"
 
-// CloudflareWorkerSource is the [Source] of requests from Cloudflare Workers.
+var TorSource = netip.MustParsePrefix("100:0:0:70::/64")
 var CloudflareWorkerSource = netip.MustParsePrefix("100:0:0:cf::/64")
+var CloudflareWARPSource = netip.MustParsePrefix("100:0:0:cf1::/64")
+
+// cloudflareWARPPrefixes are the ranges that hold nearly all the egress
+// addresses of Cloudflare WARP, which any client can connect through.
+// Cliudflare doesn't actually publish WARP ranges, so these are from
+// https://api.cloudflare.com/local-ip-ranges.csv. iCloud Private Relay and
+// potentially other services egress from the same ranges.
+var cloudflareWARPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("2a09:bac0::/29"),
+	netip.MustParsePrefix("2606:54c0::/30"),
+	netip.MustParsePrefix("104.28.0.0/14"),
+}
+
+func isCloudflareWARP(remoteAddr string) bool {
+	ap, err := netip.ParseAddrPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	addr := ap.Addr().Unmap()
+	for _, p := range cloudflareWARPPrefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
 
 // torExits is the set of Tor exit relay addresses.
 var torExits atomic.Pointer[torExitSet]
