@@ -329,15 +329,14 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 		config.Log.DebugContext(ctx, "edge tile", "tile", t)
 	}
 
-	roots := x509util.NewPEMCertPool()
 	rootsPEM, err := config.Backend.Fetch(ctx, "_roots.pem")
 	if err != nil {
 		config.Log.WarnContext(ctx, "failed to fetch previously trusted roots", "err", err)
-	} else if len(rootsPEM) > 0 {
-		if !roots.AppendCertsFromPEM(rootsPEM) {
-			config.Log.WarnContext(ctx, "failed to parse previously trusted roots",
-				"roots", string(rootsPEM))
-		}
+	}
+	roots, ok := parseRoots(ctx, config.Log, rootsPEM)
+	if !ok && len(rootsPEM) > 0 {
+		config.Log.WarnContext(ctx, "failed to parse previously trusted roots",
+			"roots", string(rootsPEM))
 	}
 
 	rootsJSON, err := marshalRoots(roots)
@@ -462,8 +461,8 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	if bytes.Equal(pemBytes, l.RootsPEM()) {
 		return nil
 	}
-	roots := x509util.NewPEMCertPool()
-	if !roots.AppendCertsFromPEM(pemBytes) {
+	roots, ok := parseRoots(ctx, l.c.Log, pemBytes)
+	if !ok {
 		return errors.New("failed to parse the PEM root certificates")
 	}
 	rootsJSON, err := marshalRoots(roots)
@@ -480,6 +479,23 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	l.rootsPEM = bytes.Clone(pemBytes)
 	l.rootsJSON = rootsJSON
 	return nil
+}
+
+// parseRoots parses PEM-encoded root certificates like AppendCertsFromPEM,
+// leaving out the ones that don't satisfy rsaOrECDSA.
+func parseRoots(ctx context.Context, log *slog.Logger, pemBytes []byte) (roots *x509util.PEMCertPool, ok bool) {
+	all := x509util.NewPEMCertPool()
+	ok = all.AppendCertsFromPEM(pemBytes)
+	roots = x509util.NewPEMCertPool()
+	for _, c := range all.RawCertificates() {
+		if !rsaOrECDSA(c) {
+			log.WarnContext(ctx, "ignoring root with unsupported key or signature algorithm",
+				"subject", x509util.NameToString(c.Subject))
+			continue
+		}
+		roots.AddCert(c)
+	}
+	return roots, ok
 }
 
 func marshalRoots(pool *x509util.PEMCertPool) ([]byte, error) {

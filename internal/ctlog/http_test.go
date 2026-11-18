@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
@@ -452,10 +453,96 @@ func TestGetRoots(t *testing.T) {
 	backend.UploadCallback = nil
 	expectRoots(tl, testRoot, testIntermediate)
 
-	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(), rootsPEM(testIntermediate)))
+	// Roots with keys other than RSA or ECDSA are left out.
+	_, edKey, err := ed25519.GenerateKey(rand.Reader)
+	fatalIfErr(t, err)
+	edTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test Ed25519 Root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	edRoot, err := x509.CreateCertificate(rand.Reader, edTmpl, edTmpl, edKey.Public(), edKey)
+	fatalIfErr(t, err)
+	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(), rootsPEM(edRoot, testIntermediate)))
 	expectRoots(tl, testIntermediate)
 
 	// The roots are persisted and served again after a restart.
 	tl = ReloadLog(t, tl)
 	expectRoots(tl, testIntermediate)
+}
+
+func TestUnsupportedAlgorithms(t *testing.T) {
+	issue := func(tmpl, parent *x509.Certificate, pub, priv any) *x509.Certificate {
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, pub, priv)
+		fatalIfErr(t, err)
+		cert, err := x509.ParseCertificate(der)
+		fatalIfErr(t, err)
+		return cert
+	}
+	caTmpl := func(name string) *x509.Certificate {
+		return &x509.Certificate{
+			SerialNumber:          big.NewInt(1),
+			Subject:               pkix.Name{CommonName: name},
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().Add(24 * time.Hour),
+			IsCA:                  true,
+			BasicConstraintsValid: true,
+			KeyUsage:              x509.KeyUsageCertSign,
+		}
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "algorithms.example.com"},
+		DNSNames:     []string{"algorithms.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(12 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	fatalIfErr(t, err)
+	root := issue(caTmpl("Test Root"), caTmpl("Test Root"), &rootKey.PublicKey, rootKey)
+	_, edIntermediateKey, err := ed25519.GenerateKey(rand.Reader)
+	fatalIfErr(t, err)
+	edIntermediate := issue(caTmpl("Test Ed25519 Intermediate"), root, edIntermediateKey.Public(), rootKey)
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	fatalIfErr(t, err)
+	_, edLeafKey, err := ed25519.GenerateKey(rand.Reader)
+	fatalIfErr(t, err)
+
+	tl := NewEmptyTestLog(t)
+	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw})))
+	expectRejected := func(chain ...*x509.Certificate) {
+		t.Helper()
+		var ders [][]byte
+		for _, c := range chain {
+			ders = append(ders, c.Raw)
+		}
+		rr := submitChain(t, tl, "192.0.2.1:1234", "test", ders)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("got status %d, expected 400: %s", rr.Code, rr.Body)
+		}
+		if !strings.Contains(rr.Body.String(), "unsupported key or signature algorithm in chain") {
+			t.Errorf("unexpected response body: %s", rr.Body)
+		}
+	}
+
+	// An Ed25519 leaf key with an ECDSA signature.
+	expectRejected(issue(leafTmpl, root, edLeafKey.Public(), rootKey), root)
+	// An ECDSA leaf key with an Ed25519 signature.
+	expectRejected(issue(leafTmpl, edIntermediate, &leafKey.PublicKey, edIntermediateKey), edIntermediate, root)
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(0)
+
+	leaf := issue(leafTmpl, root, &leafKey.PublicKey, rootKey)
+	if rr := submitChain(t, tl, "192.0.2.1:1234", "test", [][]byte{leaf.Raw, root.Raw}); rr.Code != http.StatusOK {
+		t.Fatalf("got status %d, expected 200: %s", rr.Code, rr.Body)
+	}
+	tl.CheckLog(1)
 }
