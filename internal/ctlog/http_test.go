@@ -24,7 +24,9 @@ import (
 	"time"
 
 	"filippo.io/sunlight/internal/clientaddr"
+	"filippo.io/sunlight/internal/ctlog"
 	ct "github.com/google/certificate-transparency-go"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func addPreChain(t *testing.T, tl *TestLog, ctx context.Context) *httptest.ResponseRecorder {
@@ -251,13 +253,17 @@ func TestBlockedSPKIs(t *testing.T) {
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("got status %d for chain of length %d, expected 400: %s", rr.Code, len(chain), rr.Body)
 		}
-		if !strings.Contains(rr.Body.String(), "blocked key in chain") {
+		if !strings.Contains(rr.Body.String(), "blocked key") {
 			t.Errorf("unexpected response body: %s", rr.Body)
 		}
 	}
 	// Rejected chains must not have reached the pool.
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog(0)
+	// The reason for the rejection is in the error label of the metrics.
+	if errs := addChainErrors(t, tl); !slices.Equal(errs, []string{"invalid chain: blocked-key"}) {
+		t.Errorf("unexpected error labels: %q", errs)
+	}
 
 	tl.Config.BlockedSPKIs = [][32]byte{spki(hpChain[0])}
 	if rr := submitChain(t, tl, client, "test", hpChain); rr.Code != http.StatusBadRequest {
@@ -274,6 +280,31 @@ func TestBlockedSPKIs(t *testing.T) {
 		t.Fatalf("got status %d for logged chain, expected 400: %s", rr.Code, rr.Body)
 	}
 	tl.CheckLog(1)
+}
+
+// addChainErrors returns the sorted non-empty values of the error label of the
+// add-chain requests counter.
+func addChainErrors(t *testing.T, tl *TestLog) []string {
+	t.Helper()
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(tl.Log.Metrics()...)
+	families, err := registry.Gather()
+	fatalIfErr(t, err)
+	var errs []string
+	for _, family := range families {
+		if family.GetName() != "addchain_requests_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "error" && label.GetValue() != "" {
+					errs = append(errs, label.GetValue())
+				}
+			}
+		}
+	}
+	slices.Sort(errs)
+	return slices.Compact(errs)
 }
 
 // makeHighPriorityChain returns a freshly issued certificate chain, which is
@@ -398,7 +429,7 @@ func TestPrecertSigningCertificate(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("got status %d, expected 400: %s", rr.Code, rr.Body)
 	}
-	if !strings.Contains(rr.Body.String(), "precertificate signing certificates are not supported") {
+	if !strings.Contains(rr.Body.String(), "Precertificate Signing Certificates are not supported") {
 		t.Errorf("unexpected response body: %s", rr.Body)
 	}
 	fatalIfErr(t, tl.Log.Sequence())
@@ -524,7 +555,7 @@ func TestUnsupportedAlgorithms(t *testing.T) {
 	tl := NewEmptyTestLog(t)
 	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(),
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: root.Raw})))
-	expectRejected := func(chain ...*x509.Certificate) {
+	expectRejected := func(reason string, chain ...*x509.Certificate) {
 		t.Helper()
 		var ders [][]byte
 		for _, c := range chain {
@@ -534,15 +565,15 @@ func TestUnsupportedAlgorithms(t *testing.T) {
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("got status %d, expected 400: %s", rr.Code, rr.Body)
 		}
-		if !strings.Contains(rr.Body.String(), "unsupported key or signature algorithm in chain") {
+		if !strings.Contains(rr.Body.String(), reason) {
 			t.Errorf("unexpected response body: %s", rr.Body)
 		}
 	}
 
 	// An Ed25519 leaf key with an ECDSA signature.
-	expectRejected(issue(leafTmpl, root, edLeafKey.Public(), rootKey), root)
+	expectRejected("unsupported public key algorithm", issue(leafTmpl, root, edLeafKey.Public(), rootKey), root)
 	// An ECDSA leaf key with an Ed25519 signature.
-	expectRejected(issue(leafTmpl, edIntermediate, &leafKey.PublicKey, edIntermediateKey), edIntermediate, root)
+	expectRejected("unsupported signature algorithm", issue(leafTmpl, edIntermediate, &leafKey.PublicKey, edIntermediateKey), edIntermediate, root)
 	fatalIfErr(t, tl.Log.Sequence())
 	tl.CheckLog(0)
 
@@ -551,4 +582,54 @@ func TestUnsupportedAlgorithms(t *testing.T) {
 		t.Fatalf("got status %d, expected 200: %s", rr.Code, rr.Body)
 	}
 	tl.CheckLog(1)
+}
+
+func TestNameString(t *testing.T) {
+	attribute := func(value string, oid ...int) pkix.RelativeDistinguishedNameSET {
+		return pkix.RelativeDistinguishedNameSET{{Type: oid, Value: value}}
+	}
+	for _, tt := range []struct {
+		name pkix.RDNSequence
+		want string
+	}{
+		{nil, ""},
+		{pkix.Name{Country: []string{"US"}, Organization: []string{"Let's Encrypt"}, CommonName: "E7"}.ToRDNSequence(),
+			"C=US, O=Let's Encrypt, CN=E7"},
+		{pkix.Name{
+			Country:            []string{"IT"},
+			Province:           []string{"RM"},
+			Locality:           []string{"Roma"},
+			StreetAddress:      []string{"Via Example 1"},
+			PostalCode:         []string{"00100"},
+			Organization:       []string{"Example"},
+			OrganizationalUnit: []string{"Unit 1", "Unit 2"},
+			CommonName:         "Example Root",
+			SerialNumber:       "123",
+		}.ToRDNSequence(), "C=IT, ST=RM, L=Roma, streetAddress=Via Example 1, postalCode=00100, " +
+			"O=Example, OU=Unit 1, OU=Unit 2, CN=Example Root, serialNumber=123"},
+		// The attributes are in the order of the encoding, and the ones
+		// without a name are listed by OID.
+		{pkix.RDNSequence{
+			attribute("ca@example.com", 1, 2, 840, 113549, 1, 9, 1),
+			attribute("Example Root", 2, 5, 4, 3),
+			attribute("VATIT-00000000000", 2, 5, 4, 97),
+			attribute("Example", 2, 5, 4, 10),
+			attribute("IT", 2, 5, 4, 6),
+		}, "1.2.840.113549.1.9.1=ca@example.com, CN=Example Root, 2.5.4.97=VATIT-00000000000, O=Example, C=IT"},
+	} {
+		der, err := asn1.Marshal(tt.name)
+		fatalIfErr(t, err)
+		if got := ctlog.NameString(der); got != tt.want {
+			t.Errorf("got %q, want %q", got, tt.want)
+		}
+	}
+	// A T61String is read as ISO 8859-1.
+	der := []byte{0x30, 0x0e, 0x31, 0x0c, 0x30, 0x0a, 0x06, 0x03, 0x55, 0x04, 0x03, 0x14, 0x03, 0xc4, 0xd6, 0xdc}
+	if got, want := ctlog.NameString(der), "CN=ÄÖÜ"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// A name that can't be parsed is returned in hex.
+	if got, want := ctlog.NameString([]byte("name")), "6e616d65"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
 }

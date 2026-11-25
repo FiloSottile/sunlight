@@ -11,6 +11,8 @@ var ErrEvicted = errEvicted
 var ErrPoolFull = errPoolFull
 var ErrTimeout = errTimeout
 
+var NameString = nameString
+
 type WaitEntryFunc = waitEntryFunc
 
 func (l *Log) AddLeafToPool(e *PendingLogEntry) (WaitEntryFunc, string) {

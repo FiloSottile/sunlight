@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -27,9 +28,9 @@ import (
 
 	"crawshaw.io/sqlite"
 	"filippo.io/sunlight"
+	"filippo.io/sunlight/chain"
 	"filippo.io/torchwood"
 	ct "github.com/google/certificate-transparency-go"
-	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
@@ -82,7 +83,7 @@ type Log struct {
 	// roots. They are swapped together under rootsMu and can be used without
 	// holding the lock after being obtained.
 	rootsMu   sync.RWMutex
-	roots     *x509util.PEMCertPool
+	roots     *chain.Roots
 	rootsPEM  []byte
 	rootsJSON []byte
 
@@ -326,13 +327,13 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	if err != nil {
 		config.Log.WarnContext(ctx, "failed to fetch previously trusted roots", "err", err)
 	}
-	roots, ok := parseRoots(ctx, config.Log, rootsPEM)
-	if !ok && len(rootsPEM) > 0 {
+	roots, rootCerts := parseRoots(ctx, config.Log, rootsPEM)
+	if len(rootCerts) == 0 && len(rootsPEM) > 0 {
 		config.Log.WarnContext(ctx, "failed to parse previously trusted roots",
 			"roots", string(rootsPEM))
 	}
 
-	rootsJSON, err := marshalRoots(roots)
+	rootsJSON, err := marshalRoots(rootCerts)
 	if err != nil {
 		return nil, fmt.Errorf("couldn't encode roots: %w", err)
 	}
@@ -343,7 +344,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 	m := initMetrics()
 	m.TreeSize.Set(float64(c.N))
 	m.TreeTime.Set(float64(timestamp))
-	m.ConfigRoots.Set(float64(len(roots.RawCertificates())))
+	m.ConfigRoots.Set(float64(len(rootCerts)))
 	m.ConfigStart.Set(float64(config.NotAfterStart.Unix()))
 	m.ConfigEnd.Set(float64(config.NotAfterLimit.Unix()))
 
@@ -432,7 +433,7 @@ func openCheckpoint(config *Config, b []byte) (sunlight.Checkpoint, int64, error
 
 var timeNowUnixMilli = func() int64 { return time.Now().UnixMilli() }
 
-func (l *Log) rootPool() *x509util.PEMCertPool {
+func (l *Log) rootPool() *chain.Roots {
 	l.rootsMu.RLock()
 	defer l.rootsMu.RUnlock()
 	return l.roots
@@ -454,11 +455,11 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	if bytes.Equal(pemBytes, l.RootsPEM()) {
 		return nil
 	}
-	roots, ok := parseRoots(ctx, l.c.Log, pemBytes)
-	if !ok || len(roots.RawCertificates()) == 0 {
+	roots, rootCerts := parseRoots(ctx, l.c.Log, pemBytes)
+	if len(rootCerts) == 0 {
 		return errors.New("failed to parse the PEM root certificates")
 	}
-	rootsJSON, err := marshalRoots(roots)
+	rootsJSON, err := marshalRoots(rootCerts)
 	if err != nil {
 		return fmt.Errorf("couldn't encode roots: %w", err)
 	}
@@ -467,40 +468,43 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 	if err := l.c.Backend.Upload(ctx, "_roots.pem", pemBytes, optsRoots); err != nil {
 		return fmt.Errorf("couldn't upload roots: %w", err)
 	}
-	l.m.ConfigRoots.Set(float64(len(roots.RawCertificates())))
+	l.m.ConfigRoots.Set(float64(len(rootCerts)))
 	l.roots = roots
 	l.rootsPEM = bytes.Clone(pemBytes)
 	l.rootsJSON = rootsJSON
 	return nil
 }
 
-// parseRoots parses PEM-encoded root certificates like AppendCertsFromPEM,
-// leaving out the ones that don't satisfy rsaOrECDSA.
-func parseRoots(ctx context.Context, log *slog.Logger, pemBytes []byte) (roots *x509util.PEMCertPool, ok bool) {
-	all := x509util.NewPEMCertPool()
-	ok = all.AppendCertsFromPEM(pemBytes)
-	roots = x509util.NewPEMCertPool()
-	for _, c := range all.RawCertificates() {
-		if !rsaOrECDSA(c) {
-			log.WarnContext(ctx, "ignoring root with unsupported key or signature algorithm",
-				"subject", x509util.NameToString(c.Subject))
+// parseRoots parses PEM-encoded root certificates. It returns them as trust
+// anchors and as a list of distinct DER certificates in the order of the input.
+//
+// Roots that can't be trust anchors are left out with a warning. They include
+// the ones with a key or a signature algorithm other than RSA or ECDSA, which
+// the Chrome CT Log Policy requires logs not to accept.
+func parseRoots(ctx context.Context, log *slog.Logger, pemBytes []byte) (roots *chain.Roots, certs [][]byte) {
+	roots = &chain.Roots{}
+	seen := make(map[string]bool)
+	for {
+		var block *pem.Block
+		block, pemBytes = pem.Decode(pemBytes)
+		if block == nil {
+			return roots, certs
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 || seen[string(block.Bytes)] {
 			continue
 		}
-		roots.AddCert(c)
+		seen[string(block.Bytes)] = true
+		if err := roots.Add(block.Bytes); err != nil {
+			log.WarnContext(ctx, "ignoring root", "err", err,
+				"fingerprint", fmt.Sprintf("%x", sha256.Sum256(block.Bytes)))
+			continue
+		}
+		certs = append(certs, block.Bytes)
 	}
-	return roots, ok
 }
 
-func marshalRoots(pool *x509util.PEMCertPool) ([]byte, error) {
-	roots := pool.RawCertificates()
-	var res struct {
-		Certificates [][]byte `json:"certificates"`
-	}
-	res.Certificates = make([][]byte, 0, len(roots))
-	for _, r := range roots {
-		res.Certificates = append(res.Certificates, r.Raw)
-	}
-	return json.Marshal(res)
+func marshalRoots(roots [][]byte) ([]byte, error) {
+	return json.Marshal(map[string][][]byte{"certificates": roots})
 }
 
 // ReadOnlyAfter is how long after the end of the shard window
