@@ -2,11 +2,17 @@ package sunlight
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/tlog"
@@ -156,32 +162,81 @@ func (m mapTileReader) ReadEndpoint(ctx context.Context, endpoint string) ([]byt
 	return nil, fmt.Errorf("mapTileReader: ReadEndpoint not implemented")
 }
 
+// TestUnauthenticatedTrimmedEntriesCount checks that a tile is only used if it
+// holds the entries it is expected to, whether it is a names tile or one of
+// the data tiles that are read when there are no names tiles.
 func TestUnauthenticatedTrimmedEntriesCount(t *testing.T) {
-	for _, entries := range []int{0, 2, 3, 4} {
-		var tile []byte
-		for i := range entries {
-			tile = fmt.Appendf(tile, "{\"Timestamp\":%d}\n", i)
-		}
-		tiles := mapTileReader{"tile/names/000.p/3": tile}
-		tc, err := torchwood.NewClient(tiles, torchwood.WithCutEntry(cutEntry))
-		if err != nil {
-			t.Fatal(err)
-		}
-		client := &Client{c: tc, r: tiles, cc: &ClientConfig{}}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		DNSNames:     []string{"example.com"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	certificate, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-		var got int
-		for i, e := range client.UnauthenticatedTrimmedEntries(t.Context(), 0, 3) {
-			if e.Timestamp != i {
-				t.Errorf("entry %d has timestamp %d", i, e.Timestamp)
-			}
-			got++
+	namesTile := func(lines ...string) mapTileReader {
+		var tile []byte
+		for _, line := range lines {
+			tile = append(tile, line+"\n"...)
 		}
-		if entries == 3 {
-			if err := client.Err(); err != nil || got != 3 {
-				t.Errorf("got %d entries and error %v from a tile with 3 entries", got, err)
-			}
-		} else if err := client.Err(); err == nil || got != 0 {
-			t.Errorf("got %d entries and error %v from a tile with %d entries instead of 3", got, err, entries)
+		return mapTileReader{"tile/names/000.p/3": tile}
+	}
+	dataTile := func(indexes ...int64) mapTileReader {
+		var tile []byte
+		for _, i := range indexes {
+			tile = AppendTileLeaf(tile, &LogEntry{Certificate: certificate, LeafIndex: i, Timestamp: i})
 		}
+		return mapTileReader{"tile/data/000.p/3": tile}
+	}
+	for _, tt := range []struct {
+		name  string
+		tiles mapTileReader
+		// yielded is the number of entries yielded before the error, if any.
+		// A names tile is checked before any entry is yielded, a data tile as
+		// it is read.
+		yielded int
+		ok      bool
+	}{
+		{"names tile", namesTile(`{"Timestamp":0}`, `{"Timestamp":1}`, `{"Timestamp":2}`), 3, true},
+		{"empty names tile", namesTile(), 0, false},
+		{"short names tile", namesTile(`{"Timestamp":0}`, `{"Timestamp":1}`), 0, false},
+		{"long names tile", namesTile(`{"Timestamp":0}`, `{"Timestamp":1}`, `{"Timestamp":2}`, `{"Timestamp":3}`), 0, false},
+		{"names tile with a null entry", namesTile(`{"Timestamp":0}`, `null`, `{"Timestamp":2}`), 0, false},
+
+		{"data tile", dataTile(0, 1, 2), 3, true},
+		{"empty data tile", dataTile(), 0, false},
+		{"short data tile", dataTile(0, 1), 2, false},
+		{"long data tile", dataTile(0, 1, 2, 3), 3, false},
+		{"data tile with another entry", dataTile(0, 1, 3), 2, false},
+		{"data tile of other entries", dataTile(1, 2, 3), 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tc, err := torchwood.NewClient(tt.tiles, torchwood.WithCutEntry(cutEntry))
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &Client{c: tc, r: tt.tiles, cc: &ClientConfig{}}
+
+			var next int64
+			for i, e := range client.UnauthenticatedTrimmedEntries(t.Context(), 0, 3) {
+				if i != next || e == nil || e.Timestamp != i {
+					t.Fatalf("got entry %d (%+v), expected entry %d", i, e, next)
+				}
+				next++
+			}
+			if next != int64(tt.yielded) {
+				t.Errorf("got %d entries, expected %d", next, tt.yielded)
+			}
+			if err := client.Err(); (err == nil) != tt.ok {
+				t.Errorf("got error %v", err)
+			}
+		})
 	}
 }

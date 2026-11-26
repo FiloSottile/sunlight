@@ -487,6 +487,8 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 			for t, data := range data {
 				tile := tiles[t]
 				if fallbackToDataTile {
+					first := tile.N * TileWidth
+					next, last := first, first+int64(tile.W)
 					for len(data) > 0 {
 						var e *LogEntry
 						e, data, err = ReadTileLeaf(data)
@@ -494,6 +496,11 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 							c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", tile.N, tile.W, err)
 							return
 						}
+						if e.LeafIndex != next || next == last {
+							c.err = fmt.Errorf("failed to parse tile %d (size %d): unexpected entry %d", tile.N, tile.W, e.LeafIndex)
+							return
+						}
+						next++
 						te, err := e.TrimmedEntry()
 						if err != nil {
 							c.err = fmt.Errorf("failed to trim entry %d: %w", e.LeafIndex, err)
@@ -507,6 +514,10 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 							return
 						}
 					}
+					if next != last {
+						c.err = fmt.Errorf("failed to parse tile %d (size %d): found %d entries", tile.N, tile.W, next-first)
+						return
+					}
 				} else {
 					var entries []*TrimmedEntry
 					d := json.NewDecoder(bytes.NewReader(data))
@@ -518,10 +529,18 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 							c.err = fmt.Errorf("failed to parse tile %d (size %d): %w", tile.N, tile.W, err)
 							return
 						}
+						if te == nil {
+							c.err = fmt.Errorf("failed to parse tile %d (size %d): null entry", tile.N, tile.W)
+							return
+						}
+						// The index of an entry is its position in the tile, so a
+						// tile with an unexpected number of entries can't be used.
+						if len(entries) == tile.W {
+							c.err = fmt.Errorf("failed to parse tile %d (size %d): found more than %d entries", tile.N, tile.W, tile.W)
+							return
+						}
 						entries = append(entries, te)
 					}
-					// The index of an entry is its position in the tile, so a
-					// tile with an unexpected number of entries can't be used.
 					if len(entries) != tile.W {
 						c.err = fmt.Errorf("failed to parse tile %d (size %d): found %d entries", tile.N, tile.W, len(entries))
 						return
