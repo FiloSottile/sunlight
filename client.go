@@ -329,6 +329,10 @@ var ErrWrongLogID = errors.New("sunlight: SCT log ID does not match public key")
 //
 // If the SCT log ID does not match [ClientConfig.PublicKey], CheckInclusion
 // returns an error wrapping [ErrWrongLogID].
+//
+// Warning: this method can not check that the SCT matches the certificate it
+// was issued for. Use the returned LogEntry.Certificate and IssuerKeyHash to
+// perform this check.
 func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte) (*LogEntry, tlog.RecordProof, error) {
 	var s ct.SignedCertificateTimestamp
 	if _, err := tls.Unmarshal(sct, &s); err != nil {
