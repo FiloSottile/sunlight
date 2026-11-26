@@ -135,3 +135,53 @@ func testUnauthenticatedTrimmedEntries(t *testing.T, client *Client) {
 		})
 	}
 }
+
+// A mapTileReader serves tiles from memory, by their path.
+type mapTileReader map[string][]byte
+
+func (m mapTileReader) ReadTiles(ctx context.Context, tiles []tlog.Tile) (data [][]byte, err error) {
+	for _, t := range tiles {
+		b, ok := m[TilePath(t)]
+		if !ok {
+			return nil, fmt.Errorf("tile %s not found", TilePath(t))
+		}
+		data = append(data, b)
+	}
+	return data, nil
+}
+
+func (m mapTileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) {}
+
+func (m mapTileReader) ReadEndpoint(ctx context.Context, endpoint string) ([]byte, error) {
+	return nil, fmt.Errorf("mapTileReader: ReadEndpoint not implemented")
+}
+
+func TestUnauthenticatedTrimmedEntriesCount(t *testing.T) {
+	for _, entries := range []int{0, 2, 3, 4} {
+		var tile []byte
+		for i := range entries {
+			tile = fmt.Appendf(tile, "{\"Timestamp\":%d}\n", i)
+		}
+		tiles := mapTileReader{"tile/names/000.p/3": tile}
+		tc, err := torchwood.NewClient(tiles, torchwood.WithCutEntry(cutEntry))
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := &Client{c: tc, r: tiles, cc: &ClientConfig{}}
+
+		var got int
+		for i, e := range client.UnauthenticatedTrimmedEntries(t.Context(), 0, 3) {
+			if e.Timestamp != i {
+				t.Errorf("entry %d has timestamp %d", i, e.Timestamp)
+			}
+			got++
+		}
+		if entries == 3 {
+			if err := client.Err(); err != nil || got != 3 {
+				t.Errorf("got %d entries and error %v from a tile with 3 entries", got, err)
+			}
+		} else if err := client.Err(); err == nil || got != 0 {
+			t.Errorf("got %d entries and error %v from a tile with %d entries instead of 3", got, err, entries)
+		}
+	}
+}
