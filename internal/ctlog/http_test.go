@@ -470,6 +470,12 @@ func TestGetRoots(t *testing.T) {
 	fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(), rootsPEM(edRoot, testIntermediate)))
 	expectRoots(tl, testIntermediate)
 
+	// An update that would leave no roots fails and doesn't take effect.
+	if err := tl.Log.SetRootsFromPEM(t.Context(), rootsPEM(edRoot)); err == nil {
+		t.Fatal("expected roots update to fail")
+	}
+	expectRoots(tl, testIntermediate)
+
 	// The roots are persisted and served again after a restart.
 	tl = ReloadLog(t, tl)
 	expectRoots(tl, testIntermediate)

@@ -455,7 +455,7 @@ func (l *Log) SetRootsFromPEM(ctx context.Context, pemBytes []byte) error {
 		return nil
 	}
 	roots, ok := parseRoots(ctx, l.c.Log, pemBytes)
-	if !ok {
+	if !ok || len(roots.RawCertificates()) == 0 {
 		return errors.New("failed to parse the PEM root certificates")
 	}
 	rootsJSON, err := marshalRoots(roots)
