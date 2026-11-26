@@ -3,19 +3,22 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/csv"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"slices"
 	"strings"
 	"time"
 
+	"filippo.io/sunlight/chain"
 	"filippo.io/sunlight/internal/ctlog"
-	"github.com/google/certificate-transparency-go/x509"
-	"github.com/google/certificate-transparency-go/x509util"
 )
 
 func loadRoots(ctx context.Context, lc LogConfig, l *ctlog.Log) error {
@@ -29,29 +32,47 @@ func loadRoots(ctx context.Context, lc LogConfig, l *ctlog.Log) error {
 	return nil
 }
 
-func loadCCADBRoots(ctx context.Context, lc LogConfig, l *ctlog.Log) (newRoots bool, err error) {
+func loadCCADBRoots(ctx context.Context, logger *slog.Logger, lc LogConfig, l *ctlog.Log) (newRoots bool, err error) {
 	old := l.RootsPEM()
 	buf := bytes.NewBuffer(old)
-	pool := x509util.NewPEMCertPool()
-	pool.AppendCertsFromPEM(old)
-	addRoot := func(cert *x509.Certificate, source string) {
-		if pool.Included(cert) {
+	seen := make(map[string]bool)
+	for {
+		var block *pem.Block
+		block, old = pem.Decode(old)
+		if block == nil {
+			break
+		}
+		seen[string(block.Bytes)] = true
+	}
+	addRoot := func(cert []byte, source string) {
+		if seen[string(cert)] {
+			return
+		}
+		seen[string(cert)] = true
+		if err := new(chain.Roots).Add(cert); err != nil {
+			logger.WarnContext(ctx, "ignoring root", "source", source, "err", err,
+				"fingerprint", fmt.Sprintf("%x", sha256.Sum256(cert)))
 			return
 		}
 		newRoots = true
-		pool.AddCert(cert)
+		// crypto/x509 is stricter than the log, and rejects some roots, for
+		// example because they have a negative serial number.
+		subject := "unknown subject"
+		if c, err := x509.ParseCertificate(cert); err == nil {
+			subject = c.Subject.String()
+		}
 		fmt.Fprintf(buf, "\n# %s\n# added on %s from %s\n%s\n",
-			cert.Subject.String(),
+			subject,
 			time.Now().Format(time.RFC3339),
 			source,
 			pem.EncodeToMemory(&pem.Block{
 				Type:  "CERTIFICATE",
-				Bytes: cert.Raw,
+				Bytes: cert,
 			}),
 		)
 	}
 
-	mergeDelayCert, err := x509util.CertificateFromPEM([]byte(mergeDelayRoot))
+	mergeDelayCert, err := certificateFromPEM([]byte(mergeDelayRoot))
 	if err != nil {
 		return false, fmt.Errorf("failed to parse merge delay root: %w", err)
 	}
@@ -74,12 +95,16 @@ func loadCCADBRoots(ctx context.Context, lc LogConfig, l *ctlog.Log) (newRoots b
 		if err != nil {
 			return false, fmt.Errorf("failed to read extra roots file %q: %w", lc.ExtraRoots, err)
 		}
-		extra, err := x509util.CertificatesFromPEM(extraBytes)
-		if err != nil {
-			return false, fmt.Errorf("failed to parse extra roots file %q: %w", lc.ExtraRoots, err)
-		}
-		for _, cert := range extra {
-			addRoot(cert, "extra roots file")
+		for {
+			var block *pem.Block
+			block, extraBytes = pem.Decode(extraBytes)
+			if block == nil {
+				break
+			}
+			if block.Type != "CERTIFICATE" {
+				return false, fmt.Errorf("failed to parse extra roots file %q: PEM block is not a CERTIFICATE", lc.ExtraRoots)
+			}
+			addRoot(block.Bytes, "extra roots file")
 		}
 	}
 
@@ -93,7 +118,7 @@ var CCADBClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
 
-func CCADBRoots(ctx context.Context, url string) ([]*x509.Certificate, error) {
+func CCADBRoots(ctx context.Context, url string) ([][]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -121,7 +146,7 @@ func CCADBRoots(ctx context.Context, url string) ([]*x509.Certificate, error) {
 	if usesIdx < 0 {
 		return nil, fmt.Errorf("CCADB CSV header does not contain %q", "Intended Use Case(s) Served")
 	}
-	var certificates []*x509.Certificate
+	var certificates [][]byte
 	for {
 		row, err := csvReader.Read()
 		if err == io.EOF {
@@ -140,7 +165,7 @@ func CCADBRoots(ctx context.Context, url string) ([]*x509.Certificate, error) {
 		if !strings.Contains(row[usesIdx], "Server Authentication (TLS) 1.3.6.1.5.5.7.3.1") {
 			continue
 		}
-		cert, err := x509util.CertificateFromPEM([]byte(row[pemIdx]))
+		cert, err := certificateFromPEM([]byte(row[pemIdx]))
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse CCADB certificate: %w\n%q", err, row)
 		}
@@ -150,6 +175,14 @@ func CCADBRoots(ctx context.Context, url string) ([]*x509.Certificate, error) {
 		return nil, fmt.Errorf("no certificates found in CCADB CSV")
 	}
 	return certificates, nil
+}
+
+func certificateFromPEM(pemBytes []byte) ([]byte, error) {
+	block, rest := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 {
+		return nil, errors.New("not a PEM certificate")
+	}
+	return block.Bytes, nil
 }
 
 const mergeDelayRoot = `

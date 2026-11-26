@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
@@ -23,8 +25,7 @@ import (
 	"time"
 
 	"filippo.io/torchwood"
-	ct "github.com/google/certificate-transparency-go"
-	"github.com/google/certificate-transparency-go/tls"
+	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -334,21 +335,35 @@ var ErrWrongLogID = errors.New("sunlight: SCT log ID does not match public key")
 // was issued for. Use the returned LogEntry.Certificate and IssuerKeyHash to
 // perform this check.
 func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte) (*LogEntry, tlog.RecordProof, error) {
-	var s ct.SignedCertificateTimestamp
-	if _, err := tls.Unmarshal(sct, &s); err != nil {
-		return nil, nil, fmt.Errorf("sunlight: failed to unmarshal SCT: %w", err)
+	// struct {
+	//     Version sct_version;
+	//     LogID id;
+	//     uint64 timestamp;
+	//     CtExtensions extensions;
+	//     digitally-signed struct { ... };
+	// } SignedCertificateTimestamp;
+	var version, hashAlg, sigAlg uint8
+	var id [32]byte
+	var timestamp uint64
+	var extensions, signature cryptobyte.String
+	s := cryptobyte.String(sct)
+	if !s.ReadUint8(&version) || !s.CopyBytes(id[:]) || !s.ReadUint64(&timestamp) ||
+		!s.ReadUint16LengthPrefixed(&extensions) ||
+		!s.ReadUint8(&hashAlg) || !s.ReadUint8(&sigAlg) ||
+		!s.ReadUint16LengthPrefixed(&signature) || !s.Empty() {
+		return nil, nil, errors.New("sunlight: malformed SCT")
 	}
-	if s.SCTVersion != ct.V1 {
-		return nil, nil, fmt.Errorf("sunlight: unsupported SCT version %d", s.SCTVersion)
+	if version != 0 /* v1 */ {
+		return nil, nil, fmt.Errorf("sunlight: unsupported SCT version %d", version)
 	}
 	spki, err := x509.MarshalPKIXPublicKey(c.cc.PublicKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to marshal public key: %w", err)
 	}
-	if logID := sha256.Sum256(spki); s.LogID.KeyID != logID {
-		return nil, nil, fmt.Errorf("%w: expected %x, got %x", ErrWrongLogID, logID, s.LogID.KeyID)
+	if logID := sha256.Sum256(spki); id != logID {
+		return nil, nil, fmt.Errorf("%w: expected %x, got %x", ErrWrongLogID, logID, id)
 	}
-	ext, err := ParseExtensions(s.Extensions)
+	ext, err := ParseExtensions(extensions)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to parse SCT extensions: %w", err)
 	}
@@ -356,11 +371,31 @@ func (c *Client) CheckInclusion(ctx context.Context, tree tlog.Tree, sct []byte)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sunlight: failed to fetch log entry %d: %w", ext.LeafIndex, err)
 	}
-	if entry.Timestamp != int64(s.Timestamp) {
-		return nil, nil, fmt.Errorf("sunlight: SCT timestamp %d does not match entry timestamp %d", s.Timestamp, entry.Timestamp)
+	if entry.Timestamp != int64(timestamp) {
+		return nil, nil, fmt.Errorf("sunlight: SCT timestamp %d does not match entry timestamp %d", timestamp, entry.Timestamp)
 	}
-	if err := tls.VerifySignature(c.cc.PublicKey, entry.MerkleTreeLeaf(), tls.DigitallySigned(s.Signature)); err != nil {
-		return nil, nil, fmt.Errorf("sunlight: SCT signature verification failed: %w", err)
+	// RFC 6962, Section 2.1.4 only allows SHA-256 with RSA or ECDSA.
+	if hashAlg != 4 /* sha256 */ {
+		return nil, nil, fmt.Errorf("sunlight: unsupported SCT hash algorithm %d", hashAlg)
+	}
+	digest := sha256.Sum256(entry.MerkleTreeLeaf())
+	switch key := c.cc.PublicKey.(type) {
+	case *rsa.PublicKey:
+		if sigAlg != 1 /* rsa */ {
+			return nil, nil, fmt.Errorf("sunlight: unexpected SCT signature algorithm %d", sigAlg)
+		}
+		if err := rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature); err != nil {
+			return nil, nil, fmt.Errorf("sunlight: SCT signature verification failed: %w", err)
+		}
+	case *ecdsa.PublicKey:
+		if sigAlg != 3 /* ecdsa */ {
+			return nil, nil, fmt.Errorf("sunlight: unexpected SCT signature algorithm %d", sigAlg)
+		}
+		if !ecdsa.VerifyASN1(key, digest[:], signature) {
+			return nil, nil, errors.New("sunlight: SCT signature verification failed")
+		}
+	default:
+		return nil, nil, fmt.Errorf("sunlight: unsupported public key type %T", key)
 	}
 	return entry, proof, nil
 }
@@ -505,8 +540,10 @@ func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end i
 						next++
 						te, err := e.TrimmedEntry()
 						if err != nil {
-							c.err = fmt.Errorf("failed to trim entry %d: %w", e.LeafIndex, err)
-							return
+							if c.cc.Logger != nil {
+								c.cc.Logger.Info("failed to trim entry", "index", e.LeafIndex, "err", err)
+							}
+							te = &TrimmedEntry{Timestamp: e.Timestamp}
 						}
 
 						if e.LeafIndex < start {

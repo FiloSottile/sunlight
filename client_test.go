@@ -5,7 +5,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"filippo.io/torchwood"
+	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -238,5 +241,148 @@ func TestUnauthenticatedTrimmedEntriesCount(t *testing.T) {
 				t.Errorf("got error %v", err)
 			}
 		})
+	}
+}
+
+// TestUnauthenticatedTrimmedEntriesFallback checks that an entry that names
+// can't be extracted from is yielded with only its timestamp when reading data
+// tiles, like it is in a names tile.
+func TestUnauthenticatedTrimmedEntriesFallback(t *testing.T) {
+	var tile []byte
+	tile = AppendTileLeaf(tile, &LogEntry{Certificate: []byte("not a certificate"), LeafIndex: 0, Timestamp: 1000})
+	tile = AppendTileLeaf(tile, &LogEntry{Certificate: []byte("not a certificate"), LeafIndex: 1, Timestamp: 1001})
+	tiles := mapTileReader{"tile/data/000.p/2": tile}
+	tc, err := torchwood.NewClient(tiles, torchwood.WithCutEntry(cutEntry))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{c: tc, r: tiles, cc: &ClientConfig{}}
+
+	var got []*TrimmedEntry
+	for _, e := range client.UnauthenticatedTrimmedEntries(t.Context(), 0, 2) {
+		got = append(got, e)
+	}
+	if err := client.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []*TrimmedEntry{{Timestamp: 1000}, {Timestamp: 1001}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestCheckInclusion(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logID := sha256.Sum256(spki)
+
+	// A log with a certificate, a precertificate, and another certificate.
+	entries := []*LogEntry{
+		{Certificate: []byte("certificate"), LeafIndex: 0, Timestamp: 1000},
+		{Certificate: []byte("tbs"), IsPrecert: true, IssuerKeyHash: [32]byte{1},
+			PreCertificate: []byte("precertificate"), LeafIndex: 1, Timestamp: 1001},
+		{Certificate: []byte("other certificate"), LeafIndex: 2, Timestamp: 1002},
+	}
+	var dataTile, hashTile []byte
+	var hashes []tlog.Hash
+	for _, e := range entries {
+		dataTile = AppendTileLeaf(dataTile, e)
+		h := tlog.RecordHash(e.MerkleTreeLeaf())
+		hashTile = append(hashTile, h[:]...)
+		hashes = append(hashes, h)
+	}
+	tree := tlog.Tree{N: 3, Hash: tlog.NodeHash(tlog.NodeHash(hashes[0], hashes[1]), hashes[2])}
+	tiles := mapTileReader{"tile/data/000.p/3": dataTile, "tile/0/000.p/3": hashTile}
+	tc, err := torchwood.NewClient(tiles, torchwood.WithCutEntry(cutEntry))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{c: tc, r: tiles, cc: &ClientConfig{PublicKey: key.Public()}}
+
+	// sct is the fields of a SignedCertificateTimestamp.
+	type sct struct {
+		version         uint8
+		id              [32]byte
+		timestamp       int64
+		leafIndex       int64
+		hashAlg, sigAlg uint8
+		signed          []byte
+		trailing        []byte
+	}
+	encode := func(s sct) []byte {
+		t.Helper()
+		extensions, err := MarshalExtensions(Extensions{LeafIndex: s.leafIndex})
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(s.signed)
+		signature, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b cryptobyte.Builder
+		b.AddUint8(s.version)
+		b.AddBytes(s.id[:])
+		b.AddUint64(uint64(s.timestamp))
+		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(extensions) })
+		b.AddUint8(s.hashAlg)
+		b.AddUint8(s.sigAlg)
+		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(signature) })
+		b.AddBytes(s.trailing)
+		return b.BytesOrPanic()
+	}
+	valid := func(e *LogEntry) sct {
+		return sct{id: logID, timestamp: e.Timestamp, leafIndex: e.LeafIndex,
+			hashAlg: 4, sigAlg: 3, signed: e.MerkleTreeLeaf()}
+	}
+
+	for _, e := range entries {
+		got, proof, err := client.CheckInclusion(t.Context(), tree, encode(valid(e)))
+		if err != nil {
+			t.Fatalf("entry %d: %v", e.LeafIndex, err)
+		}
+		if !reflect.DeepEqual(got, e) {
+			t.Errorf("entry %d: got %+v, want %+v", e.LeafIndex, got, e)
+		}
+		rh := tlog.RecordHash(e.MerkleTreeLeaf())
+		if err := tlog.CheckRecord(proof, tree.N, tree.Hash, e.LeafIndex, rh); err != nil {
+			t.Errorf("entry %d: %v", e.LeafIndex, err)
+		}
+	}
+
+	for _, tt := range []struct {
+		name   string
+		modify func(s *sct)
+	}{
+		{"version", func(s *sct) { s.version = 1 }},
+		{"log ID", func(s *sct) { s.id[0] ^= 1 }},
+		{"timestamp", func(s *sct) { s.timestamp++ }},
+		{"leaf index", func(s *sct) { s.leafIndex = 2 }},
+		{"leaf index beyond the tree", func(s *sct) { s.leafIndex = 3 }},
+		{"hash algorithm", func(s *sct) { s.hashAlg = 2 }},
+		{"signature algorithm", func(s *sct) { s.sigAlg = 1 }},
+		{"signed data", func(s *sct) { s.signed = entries[1].MerkleTreeLeaf() }},
+		{"trailing data", func(s *sct) { s.trailing = []byte{0} }},
+	} {
+		s := valid(entries[0])
+		tt.modify(&s)
+		_, _, err := client.CheckInclusion(t.Context(), tree, encode(s))
+		if err == nil {
+			t.Errorf("%s: SCT was accepted", tt.name)
+		}
+		if wrongLogID := errors.Is(err, ErrWrongLogID); wrongLogID != (tt.name == "log ID") {
+			t.Errorf("%s: got %v", tt.name, err)
+		}
+	}
+	truncated := encode(valid(entries[0]))
+	for n := range len(truncated) {
+		if _, _, err := client.CheckInclusion(t.Context(), tree, truncated[:n]); err == nil {
+			t.Errorf("SCT truncated to %d bytes was accepted", n)
+		}
 	}
 }

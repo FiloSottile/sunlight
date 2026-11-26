@@ -1,12 +1,15 @@
 package sunlight
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"net"
 	"strings"
+	"unicode/utf8"
 
-	"github.com/google/certificate-transparency-go/x509"
 	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/cryptobyte/asn1"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -275,26 +278,148 @@ func (e *LogEntry) TrimmedEntry() (*TrimmedEntry, error) {
 	t := &TrimmedEntry{
 		Timestamp: e.Timestamp,
 	}
-	certBytes := e.Certificate
+	input := cryptobyte.String(e.Certificate)
 	if e.IsPrecert {
-		certBytes = e.PreCertificate
+		input = cryptobyte.String(e.PreCertificate)
 	}
-	cert, err := x509.ParseCertificate(certBytes)
-	if cert == nil { // x509.ParseCertificate can return non-fatal errors
-		return nil, fmt.Errorf("failed to parse certificate: %w", err)
+
+	// Certificate  ::=  SEQUENCE  {
+	//     tbsCertificate       TBSCertificate,
+	//     signatureAlgorithm   AlgorithmIdentifier,
+	//     signatureValue       BIT STRING  }
+	//
+	// TBSCertificate  ::=  SEQUENCE  {
+	//     version         [0]  EXPLICIT Version DEFAULT v1,
+	//     serialNumber         CertificateSerialNumber,
+	//     signature            AlgorithmIdentifier,
+	//     issuer               Name,
+	//     validity             Validity,
+	//     subject              Name,
+	//     subjectPublicKeyInfo SubjectPublicKeyInfo,
+	//     issuerUniqueID  [1]  IMPLICIT UniqueIdentifier OPTIONAL,
+	//     subjectUniqueID [2]  IMPLICIT UniqueIdentifier OPTIONAL,
+	//     extensions      [3]  EXPLICIT Extensions OPTIONAL  }
+	var cert, tbs, subject, wrapper, extensions cryptobyte.String
+	if !input.ReadASN1(&cert, asn1.SEQUENCE) ||
+		!cert.ReadASN1(&tbs, asn1.SEQUENCE) ||
+		!tbs.SkipOptionalASN1(asn1.Tag(0).Constructed().ContextSpecific()) ||
+		!tbs.SkipASN1(asn1.INTEGER) ||
+		!tbs.SkipASN1(asn1.SEQUENCE) ||
+		!tbs.SkipASN1(asn1.SEQUENCE) ||
+		!tbs.SkipASN1(asn1.SEQUENCE) ||
+		!tbs.ReadASN1(&subject, asn1.SEQUENCE) ||
+		!tbs.SkipASN1(asn1.SEQUENCE) ||
+		!tbs.SkipOptionalASN1(asn1.Tag(1).ContextSpecific()) ||
+		!tbs.SkipOptionalASN1(asn1.Tag(2).ContextSpecific()) ||
+		!tbs.ReadOptionalASN1(&wrapper, nil, asn1.Tag(3).Constructed().ContextSpecific()) ||
+		!wrapper.Empty() && !wrapper.ReadASN1(&extensions, asn1.SEQUENCE) {
+		return nil, errors.New("failed to parse certificate")
 	}
-	t.Subject.Country = cert.Subject.Country
-	t.Subject.Organization = cert.Subject.Organization
-	t.Subject.OrganizationalUnit = cert.Subject.OrganizationalUnit
-	t.Subject.Locality = cert.Subject.Locality
-	t.Subject.Province = cert.Subject.Province
-	t.Subject.StreetAddress = cert.Subject.StreetAddress
-	t.Subject.PostalCode = cert.Subject.PostalCode
-	t.Subject.CommonName = cert.Subject.CommonName
-	t.DNS = cert.DNSNames
-	t.IP = make([]string, len(cert.IPAddresses))
-	for i, ip := range cert.IPAddresses {
-		t.IP[i] = ip.String()
+
+	// Name ::= SEQUENCE OF RelativeDistinguishedName
+	//
+	// RelativeDistinguishedName ::= SET SIZE (1..MAX) OF AttributeTypeAndValue
+	//
+	// AttributeTypeAndValue ::= SEQUENCE {
+	//     type     OBJECT IDENTIFIER,
+	//     value    ANY -- DEFINED BY AttributeType }
+	for !subject.Empty() {
+		var rdn cryptobyte.String
+		if !subject.ReadASN1(&rdn, asn1.SET) {
+			return nil, errors.New("failed to parse certificate subject")
+		}
+		for !rdn.Empty() {
+			var attribute, oid, value cryptobyte.String
+			var tag asn1.Tag
+			if !rdn.ReadASN1(&attribute, asn1.SEQUENCE) ||
+				!attribute.ReadASN1(&oid, asn1.OBJECT_IDENTIFIER) ||
+				!attribute.ReadAnyASN1(&value, &tag) || !attribute.Empty() {
+				return nil, errors.New("failed to parse certificate subject")
+			}
+			s := string(value)
+			switch string(oid) {
+			case "\x55\x04\x03": // id-at-commonName, 2.5.4.3
+				t.Subject.CommonName = s
+			case "\x55\x04\x06": // id-at-countryName, 2.5.4.6
+				t.Subject.Country = append(t.Subject.Country, s)
+			case "\x55\x04\x07": // id-at-localityName, 2.5.4.7
+				t.Subject.Locality = append(t.Subject.Locality, s)
+			case "\x55\x04\x08": // id-at-stateOrProvinceName, 2.5.4.8
+				t.Subject.Province = append(t.Subject.Province, s)
+			case "\x55\x04\x09": // id-at-streetAddress, 2.5.4.9
+				t.Subject.StreetAddress = append(t.Subject.StreetAddress, s)
+			case "\x55\x04\x0a": // id-at-organizationName, 2.5.4.10
+				t.Subject.Organization = append(t.Subject.Organization, s)
+			case "\x55\x04\x0b": // id-at-organizationalUnitName, 2.5.4.11
+				t.Subject.OrganizationalUnit = append(t.Subject.OrganizationalUnit, s)
+			case "\x55\x04\x11": // id-at-postalCode, 2.5.4.17
+				t.Subject.PostalCode = append(t.Subject.PostalCode, s)
+			default:
+				continue
+			}
+			// The Baseline Requirements only allow UTF8String and
+			// PrintableString for the attributes above.
+			if tag != asn1.UTF8String && tag != asn1.PrintableString {
+				return nil, errors.New("unsupported string type in certificate subject")
+			}
+			// Invalid UTF-8 would be replaced when encoding the entry as JSON.
+			if !utf8.Valid(value) {
+				return nil, errors.New("invalid string in certificate subject")
+			}
+		}
+	}
+
+	// Extensions  ::=  SEQUENCE SIZE (1..MAX) OF Extension
+	//
+	// Extension  ::=  SEQUENCE  {
+	//     extnID      OBJECT IDENTIFIER,
+	//     critical    BOOLEAN DEFAULT FALSE,
+	//     extnValue   OCTET STRING  }
+	for !extensions.Empty() {
+		var ext, id, value cryptobyte.String
+		if !extensions.ReadASN1(&ext, asn1.SEQUENCE) ||
+			!ext.ReadASN1(&id, asn1.OBJECT_IDENTIFIER) ||
+			!ext.SkipOptionalASN1(asn1.BOOLEAN) ||
+			!ext.ReadASN1(&value, asn1.OCTET_STRING) {
+			return nil, errors.New("failed to parse certificate")
+		}
+		if string(id) != "\x55\x1d\x11" { // id-ce-subjectAltName, 2.5.29.17
+			continue
+		}
+
+		// SubjectAltName ::= GeneralNames
+		//
+		// GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName
+		//
+		// GeneralName ::= CHOICE {
+		//     ...
+		//     dNSName                         [2]     IA5String,
+		//     ...
+		//     iPAddress                       [7]     OCTET STRING,
+		//     ...  }
+		var names cryptobyte.String
+		if !value.ReadASN1(&names, asn1.SEQUENCE) || !value.Empty() {
+			return nil, errors.New("failed to parse certificate subjectAltName")
+		}
+		for !names.Empty() {
+			var name cryptobyte.String
+			var tag asn1.Tag
+			if !names.ReadAnyASN1(&name, &tag) {
+				return nil, errors.New("failed to parse certificate subjectAltName")
+			}
+			switch tag {
+			case asn1.Tag(2).ContextSpecific():
+				if !utf8.Valid(name) {
+					return nil, errors.New("invalid DNS name in certificate subjectAltName")
+				}
+				t.DNS = append(t.DNS, string(name))
+			case asn1.Tag(7).ContextSpecific():
+				if len(name) != net.IPv4len && len(name) != net.IPv6len {
+					return nil, errors.New("invalid IP address in certificate subjectAltName")
+				}
+				t.IP = append(t.IP, net.IP(name).String())
+			}
+		}
 	}
 	return t, nil
 }

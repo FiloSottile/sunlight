@@ -15,7 +15,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.0
 	github.com/aws/smithy-go v1.27.2
 	github.com/cespare/webtest v0.3.0
-	github.com/google/certificate-transparency-go v1.3.3
 	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/crypto v0.59.0
 	golang.org/x/mod v0.43.0

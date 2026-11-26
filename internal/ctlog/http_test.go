@@ -25,7 +25,6 @@ import (
 
 	"filippo.io/sunlight/internal/clientaddr"
 	"filippo.io/sunlight/internal/ctlog"
-	ct "github.com/google/certificate-transparency-go"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -47,8 +46,7 @@ func TestClientDisconnect(t *testing.T) {
 	// Submit a chain with the same issuers first, so that uploading the issuers
 	// (the only operation before the pool wait that uses the request context)
 	// is a no-op below.
-	_, err := logClient.AddChain(context.Background(), []ct.ASN1Cert{
-		{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
+	_, err := logClient.AddChain(context.Background(), testLeaf, testIntermediate, testRoot)
 	fatalIfErr(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())

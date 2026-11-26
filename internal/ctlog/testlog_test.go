@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -33,12 +35,8 @@ import (
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
 	"filippo.io/torchwood"
-	"github.com/google/certificate-transparency-go/asn1"
-	"github.com/google/certificate-transparency-go/client"
-	"github.com/google/certificate-transparency-go/jsonclient"
-	"github.com/google/certificate-transparency-go/x509"
-	"github.com/google/certificate-transparency-go/x509/pkix"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -339,33 +337,102 @@ func logIDFromKey(key *ecdsa.PrivateKey) ([sha256.Size]byte, error) {
 	return sha256.Sum256(pkix), nil
 }
 
-func (tl *TestLog) LogClient() *client.LogClient {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rr := httptest.NewRecorder()
-		tl.Log.Handler().ServeHTTP(rr, r)
-		res := rr.Result()
-		if res.StatusCode != http.StatusOK {
-			tl.t.Logf("%s %s %d", r.Method, r.URL.Path, res.StatusCode)
-			tl.t.Logf("\t%s", rr.Body.String())
-		}
-		for h, v := range res.Header {
-			w.Header()[h] = v
-		}
-		w.WriteHeader(res.StatusCode)
-		io.Copy(w, res.Body)
-	}))
-	tl.t.Cleanup(ts.Close)
-	pubKey, err := x509.MarshalPKIXPublicKey(tl.Config.Key.Public())
-	fatalIfErr(tl.t, err)
-	lc, err := client.New(ts.URL, &http.Client{
-		Timeout: 10 * time.Second,
-	}, jsonclient.Options{
-		Logger:       slog.NewLogLogger(tl.Config.Log.Handler(), slog.LevelInfo),
-		PublicKeyDER: pubKey,
-	})
-	fatalIfErr(tl.t, err)
+// A LogClient submits chains to the endpoints of a TestLog.
+type LogClient struct {
+	tl *TestLog
+}
+
+// An SCT is the response to an add-chain or add-pre-chain request.
+type SCT struct {
+	Version    uint8  `json:"sct_version"`
+	ID         []byte `json:"id"`
+	Timestamp  int64  `json:"timestamp"`
+	Extensions []byte `json:"extensions"`
+	Signature  []byte `json:"signature"`
+}
+
+// LogClient starts the sequencer and returns a client for the log.
+func (tl *TestLog) LogClient() *LogClient {
 	tl.StartSequencer()
-	return lc
+	return &LogClient{tl}
+}
+
+func (c *LogClient) AddChain(ctx context.Context, chain ...[]byte) (*SCT, error) {
+	return c.add(ctx, "add-chain", chain)
+}
+
+func (c *LogClient) AddPreChain(ctx context.Context, chain ...[]byte) (*SCT, error) {
+	return c.add(ctx, "add-pre-chain", chain)
+}
+
+func (c *LogClient) add(ctx context.Context, endpoint string, chain [][]byte) (*SCT, error) {
+	body, err := json.Marshal(map[string][][]byte{"chain": chain})
+	if err != nil {
+		return nil, err
+	}
+	req := httptest.NewRequestWithContext(ctx, "POST", "/ct/v1/"+endpoint, bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	c.tl.Log.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		return nil, fmt.Errorf("%s: status %d: %s", endpoint, rr.Code, strings.TrimSpace(rr.Body.String()))
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		return nil, fmt.Errorf("%s: Content-Type is %q", endpoint, ct)
+	}
+	sct := &SCT{}
+	d := json.NewDecoder(rr.Body)
+	d.DisallowUnknownFields()
+	if err := d.Decode(sct); err != nil {
+		return nil, fmt.Errorf("%s: %w", endpoint, err)
+	}
+	if sct.Version != 0 {
+		return nil, fmt.Errorf("%s: SCT version is %d", endpoint, sct.Version)
+	}
+	logID, err := logIDFromKey(c.tl.Config.Key)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(sct.ID, logID[:]) {
+		return nil, fmt.Errorf("%s: SCT log ID is %x, expected %x", endpoint, sct.ID, logID)
+	}
+	if sct.Timestamp == 0 {
+		return nil, fmt.Errorf("%s: SCT timestamp is zero", endpoint)
+	}
+	ext, err := sunlight.ParseExtensions(sct.Extensions)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", endpoint, err)
+	}
+	// The entry of a precertificate is not the precertificate itself, so only
+	// the tests that know the entry can check its signature.
+	var entry *sunlight.LogEntry
+	if endpoint == "add-chain" {
+		entry = &sunlight.LogEntry{Certificate: chain[0], Timestamp: sct.Timestamp, LeafIndex: ext.LeafIndex}
+	}
+	if err := sct.Verify(&c.tl.Config.Key.PublicKey, entry); err != nil {
+		return nil, fmt.Errorf("%s: %w", endpoint, err)
+	}
+	return sct, nil
+}
+
+// Verify checks that the signature of the SCT is well-formed and, if entry is
+// not nil, that it is a signature over entry by key.
+func (sct *SCT) Verify(key *ecdsa.PublicKey, entry *sunlight.LogEntry) error {
+	var hashAlg, sigAlg uint8
+	var signature cryptobyte.String
+	s := cryptobyte.String(sct.Signature)
+	if !s.ReadUint8(&hashAlg) || hashAlg != 4 /* sha256 */ ||
+		!s.ReadUint8(&sigAlg) || sigAlg != 3 /* ecdsa */ ||
+		!s.ReadUint16LengthPrefixed(&signature) || !s.Empty() {
+		return fmt.Errorf("malformed SCT signature: %x", sct.Signature)
+	}
+	if entry == nil {
+		return nil
+	}
+	digest := sha256.Sum256(entry.MerkleTreeLeaf())
+	if !ecdsa.VerifyASN1(key, digest[:], signature) {
+		return errors.New("SCT signature is not valid for the entry")
+	}
+	return nil
 }
 
 func (tl *TestLog) StartSequencer() {
@@ -452,7 +519,11 @@ func makeTestCertificateTemplate(padding int) ([]byte, int) {
 			Value: bytes.Repeat([]byte("A"), padding),
 		}}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, fakeSigner{}.Public(), fakeSigner{})
+	key, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), bytes.Repeat([]byte{1}, 32))
+	if err != nil {
+		panic(err)
+	}
+	der, err := x509.CreateCertificate(nil, tmpl, tmpl, key.Public(), key)
 	if err != nil {
 		panic(err)
 	}
@@ -460,31 +531,6 @@ func makeTestCertificateTemplate(padding int) ([]byte, int) {
 		panic(fmt.Sprintf("placeholder name appears %d times in template", n))
 	}
 	return der, bytes.Index(der, []byte(testCertificateName))
-}
-
-// fakeSigner produces a fixed signature with a fixed key, so that the
-// certificates it signs are byte-for-byte reproducible across runs. Nothing
-// verifies them: the log doesn't check signatures on the certificates it
-// serializes, and the tests use testRoot as the trusted root anyway.
-type fakeSigner struct{}
-
-func (fakeSigner) Public() crypto.PublicKey {
-	// Any fixed point on the curve works. This is the P-256 generator.
-	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), []byte{
-		0x04,
-		0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40, 0xf2,
-		0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2, 0x96,
-		0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e, 0x16,
-		0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51, 0xf5,
-	})
-	if err != nil {
-		panic(err)
-	}
-	return pub
-}
-
-func (fakeSigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) {
-	return []byte("this is not a signature"), nil
 }
 
 // testCertificate returns a parseable certificate with a DNS name unique to id.

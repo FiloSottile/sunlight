@@ -884,7 +884,7 @@ func main() {
 					"CCADBRoots", lc.CCADBRoots)
 			}
 			serveGroup.Go(func() error {
-				if newRoots, err := loadCCADBRoots(ctx, lc, l); err != nil {
+				if newRoots, err := loadCCADBRoots(ctx, logger, lc, l); err != nil {
 					logger.Error("failed to load initial CCADB roots", "err", err)
 				} else if newRoots {
 					logger.Info("successfully loaded new roots from CCADB/ExtraRoots")
@@ -897,7 +897,7 @@ func main() {
 					case <-reloadChan:
 					case <-ticker.C:
 					}
-					if newRoots, err := loadCCADBRoots(ctx, lc, l); err != nil {
+					if newRoots, err := loadCCADBRoots(ctx, logger, lc, l); err != nil {
 						logger.Error("failed to reload CCADB roots", "err", err)
 					} else if newRoots {
 						logger.Info("successfully loaded new roots from CCADB/ExtraRoots on SIGHUP or timer")

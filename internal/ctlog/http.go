@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/x509/pkix"
 	"encoding/asn1"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 	"filippo.io/sunlight/chain"
 	"filippo.io/sunlight/internal/clientaddr"
 	"filippo.io/sunlight/internal/reused"
-	ct "github.com/google/certificate-transparency-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -218,11 +216,17 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 		return nil, http.StatusInternalServerError, fmtErrorf("failed to sign SCT: %w", err)
 	}
 
-	rsp, err := json.Marshal(&ct.AddChainResponse{
-		SCTVersion: ct.V1,
-		Timestamp:  uint64(seq.Timestamp),
+	rsp, err := json.Marshal(struct {
+		SCTVersion uint8  `json:"sct_version"`
+		ID         []byte `json:"id"`
+		Timestamp  int64  `json:"timestamp"`
+		Extensions []byte `json:"extensions"`
+		Signature  []byte `json:"signature"`
+	}{
+		SCTVersion: 0, // v1
 		ID:         l.logID[:],
-		Extensions: base64.StdEncoding.EncodeToString(ext),
+		Timestamp:  seq.Timestamp,
+		Extensions: ext,
 		Signature:  sctSignature,
 	})
 	if err != nil {

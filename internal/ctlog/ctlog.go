@@ -30,7 +30,6 @@ import (
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/chain"
 	"filippo.io/torchwood"
-	ct "github.com/google/certificate-transparency-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
@@ -1347,12 +1346,20 @@ func legacyStagingPath(tree tlog.Tree) string {
 
 // signTreeHead signs the tree and returns a c2sp.org/checkpoint.
 func signTreeHead(c *Config, tree treeWithTimestamp) (checkpoint []byte, err error) {
-	sthBytes, err := ct.SerializeSTHSignatureInput(ct.SignedTreeHead{
-		Version:        ct.V1,
-		TreeSize:       uint64(tree.N),
-		Timestamp:      uint64(tree.Time),
-		SHA256RootHash: ct.SHA256Hash(tree.Hash),
-	})
+	// digitally-signed struct {
+	//     Version version;
+	//     SignatureType signature_type = tree_hash;
+	//     uint64 timestamp;
+	//     uint64 tree_size;
+	//     opaque sha256_root_hash[32];
+	// } TreeHeadSignature;
+	var b cryptobyte.Builder
+	b.AddUint8(0 /* version = v1 */)
+	b.AddUint8(1 /* signature_type = tree_hash */)
+	b.AddUint64(uint64(tree.Time))
+	b.AddUint64(uint64(tree.N))
+	b.AddBytes(tree.Hash[:])
+	sthBytes, err := b.Bytes()
 	if err != nil {
 		return nil, fmtErrorf("couldn't serialize STH signature input: %w", err)
 	}
@@ -1392,11 +1399,6 @@ func signTreeHead(c *Config, tree treeWithTimestamp) (checkpoint []byte, err err
 }
 
 // digitallySign produces an encoded digitally-signed signature.
-//
-// It reimplements tls.CreateSignature and tls.Marshal from
-// github.com/google/certificate-transparency-go/tls, in part to limit
-// complexity and in part because tls.CreateSignature expects non-pointer
-// {rsa,ecdsa}.PrivateKey types, which is unusual.
 //
 // We use deterministic RFC 6979 ECDSA signatures so that when fetching a
 // previous SCT's timestamp and index from the deduplication cache, the new SCT
