@@ -30,6 +30,10 @@ The entries in a names tile correspond to the entries in the equivalent data
 tile, but are encoded as newline-separated JSON objects, each encoding a
 [TrimmedEntry][] structure.
 
+A names tile has exactly one line for each entry of the equivalent data tile, in
+the same order. If the names of an entry can't be extracted, its line only has
+the Timestamp.
+
 In particular the JSON object include the certificate's Subject fields and DNS
 and IP Subject Alternative Names.
 

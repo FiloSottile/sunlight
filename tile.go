@@ -251,7 +251,8 @@ func addExtensions(b *cryptobyte.Builder, e *LogEntry) {
 }
 
 // A TrimmedEntry is a subset of the information in a [LogEntry], including
-// names parsed from the certificate or pre-certificate.
+// names parsed from the certificate or pre-certificate. An entry whose names
+// could not be parsed only has the Timestamp.
 type TrimmedEntry struct {
 	// Timestamp is the UNIX timestamp in milliseconds of when the entry was
 	// added to the log.

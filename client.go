@@ -425,6 +425,8 @@ func (c *Client) Issuer(ctx context.Context, fp [32]byte) (*x509.Certificate, er
 // This method is only suitable for clients that don't participate in the
 // transparency ecosystem, and are only interested in a feed of names.
 //
+// An entry whose names could not be parsed only has the Timestamp.
+//
 // Callers must check [Client.Err] after the iteration breaks.
 func (c *Client) UnauthenticatedTrimmedEntries(ctx context.Context, start, end int64) iter.Seq2[int64, *TrimmedEntry] {
 	c.err = nil
