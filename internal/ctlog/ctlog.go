@@ -314,7 +314,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 				return nil, fmt.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", i, got, exp)
 			}
 
-			namesTile.B = append(namesTile.B, namesTileLine(ctx, config.Log, e)...)
+			namesTile.B = append(namesTile.B, namesTileLine(ctx, config.Log, slog.LevelWarn, e)...)
 		}
 		edgeTiles[-2] = namesTile
 	}
@@ -1021,7 +1021,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		dataTile = sunlight.AppendTileLeaf(dataTile, leaf)
 		l.m.SeqLeafSize.Observe(float64(len(dataTile) - oldTileSize))
 
-		namesTile = append(namesTile, namesTileLine(ctx, l.c.Log, leaf)...)
+		namesTile = append(namesTile, namesTileLine(ctx, l.c.Log, slog.LevelError, leaf)...)
 
 		// Compute the new tree hashes and add them to the hashReader overlay
 		// (we will use them later to insert more leaves and finally to produce
@@ -1313,11 +1313,12 @@ func stagingPath(tree tlog.Tree) string {
 // namesTileLine returns the line of a names tile for e.
 //
 // Readers find the entries of a names tile by position, so every entry has a
-// line. If its names can't be extracted, the line only has the timestamp.
-func namesTileLine(ctx context.Context, log *slog.Logger, e *sunlight.LogEntry) []byte {
+// line. If its names can't be extracted, the line only has the timestamp, and
+// the failure is logged at the given level.
+func namesTileLine(ctx context.Context, log *slog.Logger, level slog.Level, e *sunlight.LogEntry) []byte {
 	te, err := e.TrimmedEntry()
 	if err != nil {
-		log.ErrorContext(ctx, "failed to trim entry", "index", e.LeafIndex, "err", err)
+		log.Log(ctx, level, "failed to trim entry", "index", e.LeafIndex, "err", err)
 		te = &sunlight.TrimmedEntry{Timestamp: e.Timestamp}
 	}
 	line, err := json.Marshal(te)
