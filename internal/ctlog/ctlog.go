@@ -314,14 +314,7 @@ func LoadLog(ctx context.Context, config *Config) (*Log, error) {
 				return nil, fmt.Errorf("tile leaf entry %d hashes to %v, level 0 hash is %v", i, got, exp)
 			}
 
-			if tl, err := e.TrimmedEntry(); err != nil {
-				config.Log.ErrorContext(ctx, "failed to trim entry", "err", err)
-			} else if line, err := json.Marshal(tl); err != nil {
-				config.Log.ErrorContext(ctx, "failed to encode entry for names tile", "err", err)
-			} else {
-				namesTile.B = append(namesTile.B, line...)
-				namesTile.B = append(namesTile.B, '\n')
-			}
+			namesTile.B = append(namesTile.B, namesTileLine(ctx, config.Log, e)...)
 		}
 		edgeTiles[-2] = namesTile
 	}
@@ -1028,14 +1021,7 @@ func (l *Log) sequencePool(ctx context.Context, p *pool) (err error) {
 		dataTile = sunlight.AppendTileLeaf(dataTile, leaf)
 		l.m.SeqLeafSize.Observe(float64(len(dataTile) - oldTileSize))
 
-		if tl, err := leaf.TrimmedEntry(); err != nil {
-			l.c.Log.ErrorContext(ctx, "failed to trim entry", "err", err)
-		} else if line, err := json.Marshal(tl); err != nil {
-			l.c.Log.ErrorContext(ctx, "failed to encode entry for names tile", "err", err)
-		} else {
-			namesTile = append(namesTile, line...)
-			namesTile = append(namesTile, '\n')
-		}
+		namesTile = append(namesTile, namesTileLine(ctx, l.c.Log, leaf)...)
 
 		// Compute the new tree hashes and add them to the hashReader overlay
 		// (we will use them later to insert more leaves and finally to produce
@@ -1322,6 +1308,24 @@ func stagingPath(tree tlog.Tree) string {
 	// staging bundles are deleted from the local backend (where it would be
 	// important not to make a directory listing too long).
 	return fmt.Sprintf("staging/%d-%s", tree.N, hex.EncodeToString(tree.Hash[:]))
+}
+
+// namesTileLine returns the line of a names tile for e.
+//
+// Readers find the entries of a names tile by position, so every entry has a
+// line. If its names can't be extracted, the line only has the timestamp.
+func namesTileLine(ctx context.Context, log *slog.Logger, e *sunlight.LogEntry) []byte {
+	te, err := e.TrimmedEntry()
+	if err != nil {
+		log.ErrorContext(ctx, "failed to trim entry", "index", e.LeafIndex, "err", err)
+		te = &sunlight.TrimmedEntry{Timestamp: e.Timestamp}
+	}
+	line, err := json.Marshal(te)
+	if err != nil {
+		log.ErrorContext(ctx, "failed to encode entry for names tile", "index", e.LeafIndex, "err", err)
+		line = fmt.Appendf(nil, `{"Timestamp":%d}`, e.Timestamp)
+	}
+	return append(line, '\n')
 }
 
 func legacyStagingPath(tree tlog.Tree) string {

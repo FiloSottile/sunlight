@@ -278,7 +278,10 @@ func (tl *TestLog) CheckLog(size int64) (sthTimestamp int64) {
 			}
 			names = rest
 			trimmed, err := e.TrimmedEntry()
-			fatalIfErr(t, err)
+			if err != nil {
+				// An entry without names still has a line.
+				trimmed = &sunlight.TrimmedEntry{Timestamp: e.Timestamp}
+			}
 			expected, err := json.Marshal(trimmed)
 			fatalIfErr(t, err)
 			if !bytes.Equal(line, expected) {

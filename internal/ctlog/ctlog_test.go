@@ -2,6 +2,7 @@ package ctlog_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,6 +13,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	mathrand "math/rand"
 	"reflect"
 	"slices"
@@ -93,6 +96,46 @@ func TestSequenceLargeLog(t *testing.T) {
 		}
 		tl.CheckLog(5 + 500*3000)
 	})
+}
+
+// TestNamesTileWithoutNames checks that an entry that names can't be extracted
+// from still has a line in the names tile, as entries are found by position.
+func TestNamesTileWithoutNames(t *testing.T) {
+	tl := NewEmptyTestLog(t)
+	addCertificate(t, tl)
+	e := &ctlog.PendingLogEntry{Certificate: []byte("not a certificate")}
+	f, _ := tl.Log.AddLeafToPool(e)
+	wait := waitFuncWrapper(t, e, true, f)
+	addCertificate(t, tl)
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(3)
+
+	sequenced, err := wait(context.Background())
+	fatalIfErr(t, err)
+	checkNamesTile := func(path string, lines int) {
+		t.Helper()
+		b, err := tl.Config.Backend.Fetch(context.Background(), path)
+		fatalIfErr(t, err)
+		r, err := gzip.NewReader(bytes.NewReader(b))
+		fatalIfErr(t, err)
+		names, err := io.ReadAll(r)
+		fatalIfErr(t, err)
+		got := strings.Split(strings.TrimSuffix(string(names), "\n"), "\n")
+		if len(got) != lines {
+			t.Fatalf("names tile %s has %d lines, expected %d", path, len(got), lines)
+		}
+		if expected := fmt.Sprintf(`{"Timestamp":%d}`, sequenced.Timestamp); got[1] != expected {
+			t.Errorf("names tile %s has %s for the entry without names, expected %s", path, got[1], expected)
+		}
+	}
+	checkNamesTile("tile/names/000.p/3", 3)
+
+	// The partial names tile is made again when the log is loaded.
+	tl = ReloadLog(t, tl)
+	addCertificate(t, tl)
+	fatalIfErr(t, tl.Log.Sequence())
+	tl.CheckLog(4)
+	checkNamesTile("tile/names/000.p/4", 4)
 }
 
 func TestSequenceEmptyPool(t *testing.T) {
