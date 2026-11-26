@@ -15,12 +15,14 @@ jobs:
       matrix:
         go:
           - { go-version: stable }
-          - { go-version-file: go.mod }
+          # The go line of go.mod. GOTOOLCHAIN=local keeps the toolchain line
+          # from selecting a newer version.
+          - { go-version: "1.27.0", env: GOTOOLCHAIN=local }
         deps:
           - locked
           - latest
         exclude:
-          - go: { go-version-file: go.mod }
+          - go: { go-version: "1.27.0", env: GOTOOLCHAIN=local }
             deps: latest
     steps:
       - uses: actions/checkout@v5
@@ -29,9 +31,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go.go-version }}
-          go-version-file: ${{ matrix.go.go-version-file }}
       - uses: geomys/sandboxed-step@v1.2.2
         with:
+          env: ${{ matrix.go.env }}
           run: |
             if [ "${{ matrix.deps }}" = "latest" ]; then
               go get -u -t ./...
