@@ -5,15 +5,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"math/big"
 	"testing"
 	"time"
-
-	ct "github.com/google/certificate-transparency-go"
-	"github.com/google/certificate-transparency-go/asn1"
-	"github.com/google/certificate-transparency-go/x509"
-	"github.com/google/certificate-transparency-go/x509/pkix"
 )
 
 func TestMarkCertificates(t *testing.T) {
@@ -53,8 +51,7 @@ func TestMarkCertificates(t *testing.T) {
 		tl.Config.MarkCertificates = mark
 		fatalIfErr(t, tl.Log.SetRootsFromPEM(t.Context(), pem.EncodeToMemory(
 			&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})))
-		_, err := tl.LogClient().AddChain(context.Background(), []ct.ASN1Cert{
-			{Data: leafDER}, {Data: rootDER}})
+		_, err := tl.LogClient().AddChain(context.Background(), leafDER, rootDER)
 		return err
 	}
 

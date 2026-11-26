@@ -1,26 +1,23 @@
 package ctlog
 
 import (
+	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
-	"slices"
+	"strings"
 	"time"
 
 	"filippo.io/sunlight"
+	"filippo.io/sunlight/chain"
 	"filippo.io/sunlight/internal/clientaddr"
 	"filippo.io/sunlight/internal/reused"
-	ct "github.com/google/certificate-transparency-go"
-	"github.com/google/certificate-transparency-go/asn1"
-	"github.com/google/certificate-transparency-go/trillian/ctfe"
-	"github.com/google/certificate-transparency-go/x509"
-	"github.com/google/certificate-transparency-go/x509util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -61,12 +58,7 @@ func (l *Log) addChain(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), clientaddr.Source(r), func(le *PendingLogEntry) error {
-		if le.IsPrecert {
-			return fmtErrorf("pre-certificate submitted to add-chain")
-		}
-		return nil
-	})
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), clientaddr.Source(r), false)
 	if err != nil {
 		l.c.Log.DebugContext(r.Context(), "add-chain error", "code", code, "err", err)
 		http.Error(rw, err.Error(), code)
@@ -89,12 +81,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), clientaddr.Source(r), func(le *PendingLogEntry) error {
-		if !le.IsPrecert {
-			return fmtErrorf("final certificate submitted to add-pre-chain")
-		}
-		return nil
-	})
+	rsp, code, err := l.addChainOrPreChain(r.Context(), r.Body, r.UserAgent(), clientaddr.Source(r), true)
 	if err != nil {
 		l.c.Log.DebugContext(r.Context(), "add-pre-chain error", "code", code, "err", err)
 		http.Error(rw, err.Error(), code)
@@ -109,11 +96,7 @@ func (l *Log) addPreChain(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// markCertificateEKU is the id-kp-BrandIndicatorforMessageIdentification EKU
-// required on mark certificates by the BIMI Guidelines.
-var markCertificateEKU = asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 3, 31}
-
-func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, userAgent string, client netip.Prefix, checkType func(*PendingLogEntry) error) (response []byte, code int, err error) {
+func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, userAgent string, client netip.Prefix, precert bool) (response []byte, code int, err error) {
 	labels := prometheus.Labels{"error": "", "issuer": "", "root": "", "reused": "",
 		"precert": "", "chain_len": "", "low_priority": "", "source": ""}
 	defer func() {
@@ -149,67 +132,37 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 		return nil, http.StatusBadRequest, fmtErrorf("empty chain")
 	}
 
-	ekus := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-	if l.c.MarkCertificates {
-		// The Verified Mark Certificate EKU is not known to the x509 package,
-		// so we can't ask ctfe to check for it. Do it ourselves below.
-		ekus = nil
+	verifier := &chain.Verifier{
+		Roots:         l.rootPool(),
+		NotAfterStart: l.c.NotAfterStart,
+		NotAfterLimit: l.c.NotAfterLimit,
+		ExtKeyUsage:   chain.ServerAuth,
+		BlockedKeys:   l.c.BlockedSPKIs,
 	}
-	chain, err := ctfe.ValidateChain(req.Chain, ctfe.NewCertValidationOpts(l.rootPool(), time.Time{}, false, false, &l.c.NotAfterStart, &l.c.NotAfterLimit, false, ekus))
+	if l.c.MarkCertificates {
+		verifier.ExtKeyUsage = chain.BrandIndicatorForMessageIdentification
+	}
+	verified, err := verifier.Verify(req.Chain, precert)
 	if err != nil {
+		// The reason for the rejection is the subcategory of the error.
+		if e, ok := errors.AsType[*chain.Error](err); ok {
+			err = categoryError{category: e.Reason, err: err}
+		}
 		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: %w", err)
 	}
-	if l.c.MarkCertificates && !slices.ContainsFunc(chain[0].UnknownExtKeyUsage, markCertificateEKU.Equal) {
-		return nil, http.StatusBadRequest, fmtErrorf("invalid chain: missing Verified Mark Certificate EKU")
-	}
-	lowPriority := lowPriorityLeaf(chain[0])
-	labels["chain_len"] = fmt.Sprintf("%d", len(chain))
-	labels["root"] = x509util.NameToString(chain[len(chain)-1].Subject)
-	labels["issuer"] = x509util.NameToString(chain[0].Issuer)
+	lowPriority := lowPriorityLeaf(verified)
+	labels["chain_len"] = fmt.Sprintf("%d", len(verified.Chain))
+	labels["root"] = nameString(verified.Root)
+	labels["issuer"] = nameString(verified.Issuer)
 	labels["low_priority"] = fmt.Sprintf("%v", lowPriority)
 
-	e := &PendingLogEntry{Certificate: chain[0].Raw}
-	for _, issuer := range chain[1:] {
-		e.Issuers = append(e.Issuers, issuer.Raw)
-	}
-	if isPrecert, err := ctfe.IsPrecertificate(chain[0]); err != nil {
-		l.c.Log.WarnContext(ctx, "invalid precertificate", "err", err, "body", body)
-		return nil, http.StatusBadRequest, fmtErrorf("invalid precertificate: %w", err)
-	} else if isPrecert {
+	e := &PendingLogEntry{Certificate: verified.Chain[0], Issuers: verified.Chain[1:]}
+	if precert {
 		labels["precert"] = "true"
-		if len(chain) < 2 {
-			l.c.Log.WarnContext(ctx, "missing precertificate issuer", "err", err, "body", body)
-			return nil, http.StatusBadRequest, fmtErrorf("missing precertificate issuer")
-		}
-
-		// Precertificate Signing Certificates are not supported, as allowed
-		// by c2sp.org/static-ct-api@v1.1.0.
-		if ct.IsPreIssuer(chain[1]) {
-			return nil, http.StatusBadRequest, fmtErrorf("precertificate signing certificates are not supported")
-		}
-
-		defangedTBS, err := x509.RemoveCTPoison(chain[0].RawTBSCertificate)
-		if err != nil {
-			l.c.Log.ErrorContext(ctx, "failed to build TBSCertificate", "err", err, "body", body)
-			return nil, http.StatusInternalServerError, fmtErrorf("failed to build TBSCertificate: %w", err)
-		}
-
 		e.IsPrecert = true
-		e.Certificate = defangedTBS
-		e.PreCertificate = chain[0].Raw
-		e.IssuerKeyHash = sha256.Sum256(chain[1].RawSubjectPublicKeyInfo)
-	}
-	for _, c := range chain {
-		if !rsaOrECDSA(c) {
-			return nil, http.StatusBadRequest, fmtErrorf("unsupported key or signature algorithm in chain: %s", x509util.NameToString(c.Subject))
-		}
-		if slices.Contains(l.c.BlockedSPKIs, sha256.Sum256(c.RawSubjectPublicKeyInfo)) {
-			return nil, http.StatusBadRequest, fmtErrorf("blocked key in chain: %s", x509util.NameToString(c.Subject))
-		}
-	}
-
-	if err := checkType(e); err != nil {
-		return nil, http.StatusBadRequest, err
+		e.Certificate = verified.TBSCertificate
+		e.PreCertificate = verified.Chain[0]
+		e.IssuerKeyHash = verified.IssuerKeyHash
 	}
 
 	// Rate limit sources that submit too many low-priority entries that are
@@ -263,11 +216,17 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 		return nil, http.StatusInternalServerError, fmtErrorf("failed to sign SCT: %w", err)
 	}
 
-	rsp, err := json.Marshal(&ct.AddChainResponse{
-		SCTVersion: ct.V1,
-		Timestamp:  uint64(seq.Timestamp),
+	rsp, err := json.Marshal(struct {
+		SCTVersion uint8  `json:"sct_version"`
+		ID         []byte `json:"id"`
+		Timestamp  int64  `json:"timestamp"`
+		Extensions []byte `json:"extensions"`
+		Signature  []byte `json:"signature"`
+	}{
+		SCTVersion: 0, // v1
 		ID:         l.logID[:],
-		Extensions: base64.StdEncoding.EncodeToString(ext),
+		Timestamp:  seq.Timestamp,
+		Extensions: ext,
 		Signature:  sctSignature,
 	})
 	if err != nil {
@@ -278,37 +237,42 @@ func (l *Log) addChainOrPreChain(ctx context.Context, reqBody io.ReadCloser, use
 	return rsp, http.StatusOK, nil
 }
 
-// rsaOrECDSA reports whether the certificate has an RSA or ECDSA public key and
-// is signed with RSA or ECDSA. The Chrome CT Log Policy requires logs to accept
-// no other roots and to reject chains including any other certificate.
-func rsaOrECDSA(c *x509.Certificate) bool {
-	switch c.PublicKeyAlgorithm {
-	case x509.RSA, x509.ECDSA:
-	default:
-		return false
-	}
-	switch c.SignatureAlgorithm {
-	case x509.MD2WithRSA, x509.MD5WithRSA, x509.SHA1WithRSA,
-		x509.SHA256WithRSA, x509.SHA384WithRSA, x509.SHA512WithRSA,
-		x509.SHA256WithRSAPSS, x509.SHA384WithRSAPSS, x509.SHA512WithRSAPSS,
-		x509.ECDSAWithSHA1, x509.ECDSAWithSHA256, x509.ECDSAWithSHA384, x509.ECDSAWithSHA512:
-		return true
-	default:
-		return false
-	}
-}
-
-func lowPriorityLeaf(c *x509.Certificate) bool {
-	if isPrecert, _ := ctfe.IsPrecertificate(c); isPrecert {
+func lowPriorityLeaf(v *chain.Verified) bool {
+	if v.TBSCertificate != nil {
 		// The BRs allow at most 48 hours of backdating. A precertificate older
 		// than that can't turn into a valid certificate anymore, so it must be
 		// cross-posted.
-		return time.Since(c.NotBefore) >= 48*time.Hour
+		return time.Since(v.NotBefore) >= 48*time.Hour
 	}
 	// If a certificate has SCTs, it's already been logged. It'd be better to
 	// verify the signatures, but this check is meant for when we are under load
 	// and need to prioritize.
-	return len(c.SCTList.SCTList) > 0
+	return v.SCTs
+}
+
+// attributeNames are the names of the most common attribute types of X.501 Names.
+var attributeNames = map[string]string{
+	"2.5.4.6": "C", "2.5.4.10": "O", "2.5.4.11": "OU", "2.5.4.3": "CN",
+	"2.5.4.7": "L", "2.5.4.8": "ST", "2.5.4.5": "serialNumber",
+	"2.5.4.9": "streetAddress", "2.5.4.17": "postalCode",
+}
+
+// nameString returns a description of a DER-encoded X.501 Name for use as a
+// metrics label, like "C=US, O=Let's Encrypt, CN=E7". It lists the attributes
+// in the order they are encoded, by OID if they are not in attributeNames.
+func nameString(der []byte) string {
+	var rdns pkix.RDNSequence
+	if rest, err := asn1.Unmarshal(der, &rdns); err != nil || len(rest) != 0 {
+		return fmt.Sprintf("%x", der)
+	}
+	var parts []string
+	for _, rdn := range rdns {
+		for _, atv := range rdn {
+			oid := atv.Type.String()
+			parts = append(parts, fmt.Sprintf("%s=%v", cmp.Or(attributeNames[oid], oid), atv.Value))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (l *Log) getRoots(rw http.ResponseWriter, r *http.Request) {

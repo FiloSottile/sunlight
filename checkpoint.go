@@ -21,7 +21,6 @@ import (
 	"unicode/utf8"
 
 	"filippo.io/torchwood"
-	ct "github.com/google/certificate-transparency-go"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 )
@@ -66,13 +65,20 @@ func NewRFC6962Verifier(name string, key crypto.PublicKey) (note.Verifier, error
 			return false
 		}
 
-		sth := ct.SignedTreeHead{
-			Version:        ct.V1,
-			TreeSize:       uint64(c.N),
-			Timestamp:      timestamp,
-			SHA256RootHash: ct.SHA256Hash(c.Hash),
-		}
-		sthBytes, err := ct.SerializeSTHSignatureInput(sth)
+		// digitally-signed struct {
+		//     Version version;
+		//     SignatureType signature_type = tree_hash;
+		//     uint64 timestamp;
+		//     uint64 tree_size;
+		//     opaque sha256_root_hash[32];
+		// } TreeHeadSignature;
+		var b cryptobyte.Builder
+		b.AddUint8(0 /* version = v1 */)
+		b.AddUint8(1 /* signature_type = tree_hash */)
+		b.AddUint64(timestamp)
+		b.AddUint64(uint64(c.Tree.N))
+		b.AddBytes(c.Tree.Hash[:])
+		sthBytes, err := b.Bytes()
 		if err != nil {
 			return false
 		}

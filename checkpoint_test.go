@@ -1,11 +1,11 @@
 package sunlight
 
 import (
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"testing"
 
-	ct "github.com/google/certificate-transparency-go"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
@@ -21,29 +21,30 @@ func TestRFC6962InjectedSigner(t *testing.T) {
 		"tree_head_signature": "BAMASDBGAiEAnaHGuwnyyHWvrfgEn3qtl1j2heMzocku6ZAItYD75m8CIQCpotlpH5GEPEfMMzky72BCuIl14FB65t5SWZ91vgTQOg==",
 		"tree_size": 90785920
 	}`)
-	var sth ct.SignedTreeHead
+	var sth struct {
+		TreeSize       int64  `json:"tree_size"`
+		Timestamp      int64  `json:"timestamp"`
+		SHA256RootHash []byte `json:"sha256_root_hash"`
+	}
 	if err := json.Unmarshal(sthBytes, &sth); err != nil {
 		t.Fatal(err)
 	}
-	key, err := ct.PublicKeyFromB64("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAESYlKFDLLFmA9JScaiaNnqlU8oWDytxIYMfswHy9Esg0aiX+WnP/yj4O0ViEHtLwbmOQeSWBGkIu9YK9CLeer+g==")
+	keyBytes, err := base64.StdEncoding.DecodeString("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAESYlKFDLLFmA9JScaiaNnqlU8oWDytxIYMfswHy9Esg0aiX+WnP/yj4O0ViEHtLwbmOQeSWBGkIu9YK9CLeer+g==")
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := ct.NewSignatureVerifier(key)
+	key, err := x509.ParsePKIXPublicKey(keyBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifier.VerifySTHSignature(sth); err != nil {
-		t.Fatal(err)
-	}
-	s, err := NewRFC6962InjectedSigner("example.com", key, sig, int64(sth.Timestamp))
+	s, err := NewRFC6962InjectedSigner("example.com", key, sig, sth.Timestamp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := &Checkpoint{
 		Origin: "example.com",
 		Tree: tlog.Tree{
-			N:    int64(sth.TreeSize),
+			N:    sth.TreeSize,
 			Hash: tlog.Hash(sth.SHA256RootHash),
 		},
 	}
@@ -63,7 +64,7 @@ func TestRFC6962InjectedSigner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tt != int64(sth.Timestamp) {
+	if tt != sth.Timestamp {
 		t.Fatalf("got timestamp %d, want %d", tt, sth.Timestamp)
 	}
 }

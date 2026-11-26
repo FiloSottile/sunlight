@@ -27,8 +27,6 @@ import (
 
 	"filippo.io/sunlight"
 	"filippo.io/sunlight/internal/ctlog"
-	ct "github.com/google/certificate-transparency-go"
-	"github.com/google/certificate-transparency-go/tls"
 )
 
 var globalTime = time.Now().UnixMilli()
@@ -241,8 +239,8 @@ func TestSequenceUploadPaths(t *testing.T) {
 		"issuer/6b23c0d5f35d1b11f9b683f0b0a617355deb11277d91ae091d399c655b87940d",
 		"issuer/81365bbc90b5b3991c762eebada7c6d84d1e39a0a1d648cb4fe5a9890b089da8",
 		"issuer/df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
-		"staging/261-ef737b670a21586dc4daf3c3f1338aeba81f93601235bd2a97af32f278ee2dd8",
-		"staging/527-15f6369ab80858ba1cf537b71961a144449fb4a70c57947a754f849ed3897b59",
+		"staging/261-8a2482a0a749e5439c9c7bdbf513974c4fc6c8a880e06670d14ccff7da3876c9",
+		"staging/527-b9962a87e31ba88c7f339898aa96986f43f8712146973e04491b8d9e771b467a",
 		"tile/0/000",
 		"tile/0/001",
 		"tile/0/001.p/5",
@@ -727,50 +725,43 @@ func testSubmit(t *testing.T, precert bool) {
 	addCertificate(t, tl)
 
 	var err error
-	var sct1, sct2 *ct.SignedCertificateTimestamp
+	var sct1, sct2 *SCT
 	if precert {
-		sct1, err = logClient.AddPreChain(context.Background(), []ct.ASN1Cert{
-			{Data: testPrecert}, {Data: testIntermediate}, {Data: testRoot}})
+		sct1, err = logClient.AddPreChain(context.Background(), testPrecert, testIntermediate, testRoot)
 	} else {
-		sct1, err = logClient.AddChain(context.Background(), []ct.ASN1Cert{
-			{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
+		sct1, err = logClient.AddChain(context.Background(), testLeaf, testIntermediate, testRoot)
 	}
 	fatalIfErr(t, err)
 
-	if sct1.SCTVersion != ct.V1 {
-		t.Errorf("got SCT version %d, expected %d", sct1.SCTVersion, ct.V1)
-	}
-	pkix, err := x509.MarshalPKIXPublicKey(tl.Config.Key.Public())
-	if err != nil {
-		t.Fatalf("couldn't marshal public key: %v", err)
-	}
-	logID := sha256.Sum256(pkix)
-	if sct1.LogID.KeyID != logID {
-		t.Errorf("got log ID %x, expected %x", sct1.LogID.KeyID, logID)
-	}
-	if sct1.Timestamp == 0 {
-		t.Error("got zero timestamp")
-	}
 	if idx, err := sunlight.ParseExtensions(sct1.Extensions); err != nil {
 		t.Errorf("couldn't parse extensions: %v", err)
 	} else if idx.LeafIndex != 1 {
 		t.Errorf("got extensions index %d, expected 1", idx)
 	}
 
+	// The SCT is a signature over the entry, which for a precertificate is
+	// made of its TBSCertificate without the poison extension and of the hash
+	// of the public key of its issuer.
+	entry := &sunlight.LogEntry{Certificate: testLeaf, Timestamp: sct1.Timestamp, LeafIndex: 1}
 	if precert {
-		sct2, err = logClient.AddPreChain(context.Background(), []ct.ASN1Cert{
-			{Data: testPrecert}, {Data: testIntermediate}, {Data: testRoot}})
+		issuer, err := x509.ParseCertificate(testIntermediate)
+		fatalIfErr(t, err)
+		entry.IsPrecert = true
+		entry.Certificate = testPrecertTBS
+		entry.IssuerKeyHash = sha256.Sum256(issuer.RawSubjectPublicKeyInfo)
+	}
+	if err := sct1.Verify(&tl.Config.Key.PublicKey, entry); err != nil {
+		t.Error(err)
+	}
+
+	if precert {
+		sct2, err = logClient.AddPreChain(context.Background(), testPrecert, testIntermediate, testRoot)
 	} else {
-		sct2, err = logClient.AddChain(context.Background(), []ct.ASN1Cert{
-			{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
+		sct2, err = logClient.AddChain(context.Background(), testLeaf, testIntermediate, testRoot)
 	}
 	fatalIfErr(t, err)
 
-	sct1Bytes, err := tls.Marshal(*sct1)
-	fatalIfErr(t, err)
-	sct2Bytes, err := tls.Marshal(*sct2)
-	fatalIfErr(t, err)
-	if !bytes.Equal(sct1Bytes, sct2Bytes) {
+	if !reflect.DeepEqual(sct1, sct2) {
 		t.Error("got different SCTs for the same entry")
 	}
 }
@@ -787,8 +778,7 @@ func TestSunsetLog(t *testing.T) {
 	logClient := tl.LogClient()
 
 	// Try to add a chain and verify we get 410 Gone.
-	_, err := logClient.AddChain(context.Background(), []ct.ASN1Cert{
-		{Data: testLeaf}, {Data: testIntermediate}, {Data: testRoot}})
+	_, err := logClient.AddChain(context.Background(), testLeaf, testIntermediate, testRoot)
 	if err == nil {
 		t.Fatal("expected error for sunset log")
 	}
@@ -1182,5 +1172,6 @@ func BenchmarkSequencer(b *testing.B) {
 
 var testLeaf, _ = base64.StdEncoding.DecodeString("MIIEJjCCAw6gAwIBAgISA9YVxv2Lcc/y6IhrW5svQmHPMA0GCSqGSIb3DQEBCwUAMDIxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQswCQYDVQQDEwJSMzAeFw0yMzExMTUxMDE5MTFaFw0yNDAyMTMxMDE5MTBaMB0xGzAZBgNVBAMTEnJvbWUuY3QuZmlsaXBwby5pbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMufQMpi+5cCSw8a6D2se6bjTR6Vpcm5kr5b1UHaJZVdM4tOCy66d3iO9LcKYwIdXJJD1TbtzAuLlRCWa1HNlGSjggIUMIICEDAOBgNVHQ8BAf8EBAMCB4AwHQYDVR0lBBYwFAYIKwYBBQUHAwEGCCsGAQUFBwMCMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFIiqDtb1Rz6Y9iVID4JBRl36tE47MB8GA1UdIwQYMBaAFBQusxe3WFbLrlAJQOYfr52LFMLGMFUGCCsGAQUFBwEBBEkwRzAhBggrBgEFBQcwAYYVaHR0cDovL3IzLm8ubGVuY3Iub3JnMCIGCCsGAQUFBzAChhZodHRwOi8vcjMuaS5sZW5jci5vcmcvMB0GA1UdEQQWMBSCEnJvbWUuY3QuZmlsaXBwby5pbzATBgNVHSAEDDAKMAgGBmeBDAECATCCAQQGCisGAQQB1nkCBAIEgfUEgfIA8AB2AEiw42vapkc0D+VqAvqdMOscUgHLVt0sgdm7v6s52IRzAAABi9K04WIAAAQDAEcwRQIhAIjFeq4LZpEUNCTtVu1s3yURyaX18TRp4qjt02A2FYHEAiBWQxxfEsyYUFuDOFIYSh6q6MA9m2YenRmL7FqzgpMvpAB2ADtTd3U+LbmAToswWwb+QDtn2E/D9Me9AA0tcm/h+tQXAAABi9K0418AAAQDAEcwRQIhAJfS1HrW24DPJJCzwZ+Xgo4jX/o6nsXNVRuOrrqoFjBmAiAi53R5tlmS94uXLnUyX6+ULDxwCuSRSb23iEidzugiVDANBgkqhkiG9w0BAQsFAAOCAQEAc0EXBRfCal3xyXZ60DJspRf66ulLpVii1BPvcf0PWWGC/MCjbY2xwz+1p6fePMSMrUJpOTtP5L52bZNQBptq6oKSOKGpVn8eIaVqNPeJsYCuzL5tKnzfhBoyIs9tqc8U7JwZuIyCIFsxd5eDNLSNyphX9+jxATorpFJ8RYibzjmBkDjRSl6T2f32Qy4AKy2FJe2yryJjdiDHqzT3SoTYcJp/2wWklYFMtBV/j4qTGyFiVdVZ1GQUhHvlw1iVqXLHe8cVQoSc+iStlDxeFWEuKnHRTtpfNz+KzP15R13C6CBswODDjqH2HCS2OKhyENB6SF7KhhD5/hMVyj6UWq9pDw==")
 var testPrecert, _ = base64.StdEncoding.DecodeString("MIIDMzCCAhugAwIBAgISA9YVxv2Lcc/y6IhrW5svQmHPMA0GCSqGSIb3DQEBCwUAMDIxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQswCQYDVQQDEwJSMzAeFw0yMzExMTUxMDE5MTFaFw0yNDAyMTMxMDE5MTBaMB0xGzAZBgNVBAMTEnJvbWUuY3QuZmlsaXBwby5pbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMufQMpi+5cCSw8a6D2se6bjTR6Vpcm5kr5b1UHaJZVdM4tOCy66d3iO9LcKYwIdXJJD1TbtzAuLlRCWa1HNlGSjggEhMIIBHTAOBgNVHQ8BAf8EBAMCB4AwHQYDVR0lBBYwFAYIKwYBBQUHAwEGCCsGAQUFBwMCMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFIiqDtb1Rz6Y9iVID4JBRl36tE47MB8GA1UdIwQYMBaAFBQusxe3WFbLrlAJQOYfr52LFMLGMFUGCCsGAQUFBwEBBEkwRzAhBggrBgEFBQcwAYYVaHR0cDovL3IzLm8ubGVuY3Iub3JnMCIGCCsGAQUFBzAChhZodHRwOi8vcjMuaS5sZW5jci5vcmcvMB0GA1UdEQQWMBSCEnJvbWUuY3QuZmlsaXBwby5pbzATBgNVHSAEDDAKMAgGBmeBDAECATATBgorBgEEAdZ5AgQDAQH/BAIFADANBgkqhkiG9w0BAQsFAAOCAQEAk4K63mYRtOqH2LprGfBDIXnOXGt7wicdyBD2Zh5tkqMBB0XulcAi94IUfEOBSfIIzZ5lTh8WvAB6RxMGXYf8Qx4dHCP1McpMvkOJNEz9cHVjoBxx8asdAsV6d+av3MsK83n/fnN6looyUoDz09AZNvmlR74HCmpgLydMMv8ugdiPjRlYLaKy8wiA+HpX2rb4oWJ9kSD7dxuu6+NqPi4qWVsopQKBMcYEhCfQN26tcm2X3jebcwE3TFNxhK5RcRTWMO3i5AtaUZDT4bWUTFTHP8668wvCpI8MyfIlVdlUv3BOnyjvr/zpSBb/SfbyE0yiUBKhxl5z3+LImTNwxbc5sg==")
+var testPrecertTBS, _ = base64.StdEncoding.DecodeString("MIICBqADAgECAhID1hXG/Ytxz/LoiGtbmy9CYc8wDQYJKoZIhvcNAQELBQAwMjELMAkGA1UEBhMCVVMxFjAUBgNVBAoTDUxldCdzIEVuY3J5cHQxCzAJBgNVBAMTAlIzMB4XDTIzMTExNTEwMTkxMVoXDTI0MDIxMzEwMTkxMFowHTEbMBkGA1UEAxMScm9tZS5jdC5maWxpcHBvLmlvMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEy59AymL7lwJLDxroPax7puNNHpWlybmSvlvVQdollV0zi04LLrp3eI70twpjAh1ckkPVNu3MC4uVEJZrUc2UZKOCAQwwggEIMA4GA1UdDwEB/wQEAwIHgDAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwDAYDVR0TAQH/BAIwADAdBgNVHQ4EFgQUiKoO1vVHPpj2JUgPgkFGXfq0TjswHwYDVR0jBBgwFoAUFC6zF7dYVsuuUAlA5h+vnYsUwsYwVQYIKwYBBQUHAQEESTBHMCEGCCsGAQUFBzABhhVodHRwOi8vcjMuby5sZW5jci5vcmcwIgYIKwYBBQUHMAKGFmh0dHA6Ly9yMy5pLmxlbmNyLm9yZy8wHQYDVR0RBBYwFIIScm9tZS5jdC5maWxpcHBvLmlvMBMGA1UdIAQMMAowCAYGZ4EMAQIB")
 var testIntermediate, _ = base64.StdEncoding.DecodeString("MIIFFjCCAv6gAwIBAgIRAJErCErPDBinU/bWLiWnX1owDQYJKoZIhvcNAQELBQAwTzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2VhcmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMjAwOTA0MDAwMDAwWhcNMjUwOTE1MTYwMDAwWjAyMQswCQYDVQQGEwJVUzEWMBQGA1UEChMNTGV0J3MgRW5jcnlwdDELMAkGA1UEAxMCUjMwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC7AhUozPaglNMPEuyNVZLD+ILxmaZ6QoinXSaqtSu5xUyxr45r+XXIo9cPR5QUVTVXjJ6oojkZ9YI8QqlObvU7wy7bjcCwXPNZOOftz2nwWgsbvsCUJCWH+jdxsxPnHKzhm+/b5DtFUkWWqcFTzjTIUu61ru2P3mBw4qVUq7ZtDpelQDRrK9O8ZutmNHz6a4uPVymZ+DAXXbpyb/uBxa3Shlg9F8fnCbvxK/eG3MHacV3URuPMrSXBiLxgZ3Vms/EY96Jc5lP/Ooi2R6X/ExjqmAl3P51T+c8B5fWmcBcUr2Ok/5mzk53cU6cG/kiFHaFpriV1uxPMUgP17VGhi9sVAgMBAAGjggEIMIIBBDAOBgNVHQ8BAf8EBAMCAYYwHQYDVR0lBBYwFAYIKwYBBQUHAwIGCCsGAQUFBwMBMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFBQusxe3WFbLrlAJQOYfr52LFMLGMB8GA1UdIwQYMBaAFHm0WeZ7tuXkAXOACIjIGlj26ZtuMDIGCCsGAQUFBwEBBCYwJDAiBggrBgEFBQcwAoYWaHR0cDovL3gxLmkubGVuY3Iub3JnLzAnBgNVHR8EIDAeMBygGqAYhhZodHRwOi8veDEuYy5sZW5jci5vcmcvMCIGA1UdIAQbMBkwCAYGZ4EMAQIBMA0GCysGAQQBgt8TAQEBMA0GCSqGSIb3DQEBCwUAA4ICAQCFyk5HPqP3hUSFvNVneLKYY611TR6WPTNlclQtgaDqw+34IL9fzLdwALduO/ZelN7kIJ+m74uyA+eitRY8kc607TkC53wlikfmZW4/RvTZ8M6UK+5UzhK8jCdLuMGYL6KvzXGRSgi3yLgjewQtCPkIVz6D2QQzCkcheAmCJ8MqyJu5zlzyZMjAvnnAT45tRAxekrsu94sQ4egdRCnbWSDtY7kh+BImlJNXoB1lBMEKIq4QDUOXoRgffuDghje1WrG9ML+Hbisq/yFOGwXD9RiX8F6sw6W4avAuvDszue5L3sz85K+EC4Y/wFVDNvZo4TYXao6Z0f+lQKc0t8DQYzk1OXVu8rp2yJMC6alLbBfODALZvYH7n7do1AZls4I9d1P4jnkDrQoxB3UqQ9hVl3LEKQ73xF1OyK5GhDDX8oVfGKF5u+decIsH4YaTw7mP3GFxJSqv3+0lUFJoi5Lc5da149p90IdshCExroL1+7mryIkXPeFM5TgO9r0rvZaBFOvV2z0gp35Z0+L4WPlbuEjN/lxPFin+HlUjr8gRsI3qfJOQFy/9rKIJR0Y/8Omwt/8oTWgy1mdeHmmjk7j1nYsvC9JSQ6ZvMldlTTKB3zhThV1+XWYp6rjd5JW1zbVWEkLNxE7GJThEUG3szgBVGP7pSWTUTsqXnLRbwHOoq7hHwg==")
 var testRoot, _ = base64.StdEncoding.DecodeString("MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAwTzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2VhcmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJuZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBYMTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygch77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6UA5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sWT8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyHB5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UCB5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUvKBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWnOlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTnjh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbwqHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CIrU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkqhkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZLubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KKNFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7UrTkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdCjNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVcoyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPAmRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57demyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=")

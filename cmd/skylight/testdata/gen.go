@@ -31,7 +31,6 @@ import (
 
 	"filippo.io/sunlight"
 	"filippo.io/torchwood"
-	ct "github.com/google/certificate-transparency-go"
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
@@ -60,12 +59,20 @@ func main() {
 
 	treeHash := tlog.Hash(sha256.Sum256([]byte("skylight test tree root")))
 
-	sthBytes, err := ct.SerializeSTHSignatureInput(ct.SignedTreeHead{
-		Version:        ct.V1,
-		TreeSize:       treeSize,
-		Timestamp:      timestamp,
-		SHA256RootHash: ct.SHA256Hash(treeHash),
-	})
+	// digitally-signed struct {
+	//     Version version;
+	//     SignatureType signature_type = tree_hash;
+	//     uint64 timestamp;
+	//     uint64 tree_size;
+	//     opaque sha256_root_hash[32];
+	// } TreeHeadSignature;
+	var sth cryptobyte.Builder
+	sth.AddUint8(0 /* version = v1 */)
+	sth.AddUint8(1 /* signature_type = tree_hash */)
+	sth.AddUint64(timestamp)
+	sth.AddUint64(treeSize)
+	sth.AddBytes(treeHash[:])
+	sthBytes, err := sth.Bytes()
 	if err != nil {
 		log.Fatal(err)
 	}
